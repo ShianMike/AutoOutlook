@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-paper text-ink font-sans antialiased;
+    background-image:
+      radial-gradient(rgba(17, 17, 17, 0.06) 1px, transparent 1px);
+    background-size: 18px 18px;
+    background-position: 0 0;
+  }
+  ::selection {
+    background: #111111;
+    color: #f5f1e8;
+  }
+  *:focus-visible {
+    outline: 3px solid #111111;
+    outline-offset: 3px;
+  }
+}
+
+@layer components {
+  .retro-card {
+    @apply bg-paper border-[3px] border-ink shadow-retro rounded-none;
+  }
+  .retro-card-lg {
+    @apply bg-paper border-[4px] border-ink shadow-retro-lg rounded-none;
+  }
+  .retro-panel {
+    @apply bg-paper border-[3px] border-ink rounded-none;
+  }
+  .retro-badge {
+    @apply inline-flex items-center gap-1.5 border-[2px] border-ink px-2 py-0.5 font-mono text-[11px] font-bold uppercase tracking-wider shadow-retro-sm bg-paper;
+  }
+  .retro-chip {
+    @apply inline-flex items-center justify-center border-[3px] border-ink px-3 py-1 font-display font-extrabold uppercase tracking-wider shadow-retro-sm;
+  }
+  .retro-button {
+    @apply inline-flex items-center justify-center gap-2 border-[3px] border-ink bg-paper px-3 py-2 font-display font-bold uppercase text-sm tracking-wider shadow-retro-sm transition-transform select-none cursor-pointer;
+  }
+  .retro-button:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 0 #111111;
+  }
+  .retro-button:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 0 #111111;
+  }
+  .retro-button-primary {
+    @apply bg-ink text-paper;
+  }
+  .retro-button-primary:hover {
+    @apply bg-ink text-paper;
+  }
+  .retro-divider {
+    @apply h-[3px] w-full bg-ink;
+  }
+  .retro-tick {
+    @apply w-[2px] bg-ink;
+  }
+  .retro-grid-bg {
+    background-image:
+      linear-gradient(rgba(17, 17, 17, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(17, 17, 17, 0.08) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .retro-scanline {
+    position: relative;
+    overflow: hidden;
+  }
+  .retro-scanline::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(17, 17, 17, 0) 0,
+      rgba(17, 17, 17, 0) 3px,
+      rgba(17, 17, 17, 0.05) 3px,
+      rgba(17, 17, 17, 0.05) 4px
+    );
+    mix-blend-mode: multiply;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-dot,
+  .animate-scan,
+  .animate-ticker {
+    animation: none !important;
+  }
+}
