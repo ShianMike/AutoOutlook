@@ -502,7 +502,7 @@ def _save_overlay_cache(path: Path, result: dict[str, Any]) -> None:
     for key in OVERLAY_500_FIELD_KEYS:
         payload[f"field__{key}"] = np.asarray(fields[key], dtype=float)
     with tmp_path.open("wb") as fh:
-        np.savez_compressed(fh, **payload)
+        np.savez(fh, **payload)
     tmp_path.replace(path)
 
 

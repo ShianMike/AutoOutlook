@@ -151,7 +151,7 @@ def run_pipeline(
                 probabilities = predictor(features)
                 if probabilities is None:
                     raise RuntimeError("ML hazard model returned no gridded probabilities")
-                category_grid = category_grid_from_probabilities(probabilities, features)
+                category_grid = category_grid_from_probabilities(probabilities, features, model)
                 valid_time_iso = _valid_iso(cycle, forecast_hour)
                 polygons = risk_polygons_from_grid(fetched.lats, fetched.lons, category_grid, forecast_hour, valid_time_iso)
                 tile = probability_tile(
@@ -335,7 +335,17 @@ def _fetch_hours(
             hour = future_to_hour[future]
             try:
                 out[hour] = future.result()
+                meta = out[hour].metadata
+                print(
+                    f"[fetch ok] F{hour:02d} "
+                    f"cache={meta.get('cacheHit')} "
+                    f"shape={meta.get('gridShape')} "
+                    f"bytes={meta.get('selectedByteCount')} "
+                    f"latency={meta.get('fetchLatencyMs')}ms",
+                    flush=True,
+                )
             except Exception as exc:  # noqa: BLE001
+                print(f"[fetch fail] F{hour:02d} {type(exc).__name__}: {exc}", flush=True)
                 failures.append({
                     "forecastHour": hour,
                     "stage": "fetch",

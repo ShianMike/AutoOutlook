@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import type { OutlookArtifacts, OutlookArtifactFeatureCollection, OutlookArtifactMetadata } from '../types/outlookArtifacts';
+import type {
+  OutlookArtifacts,
+  OutlookArtifactFeatureCollection,
+  OutlookArtifactMetadata,
+  OutlookProbabilityTiles,
+} from '../types/outlookArtifacts';
 
 type ArtifactStatus = 'loading' | 'ready' | 'missing' | 'error';
 
@@ -35,15 +40,16 @@ export function useOutlookArtifacts(refreshMs = 10 * 60 * 1000): OutlookArtifact
 
     const load = async () => {
       try {
-        const [metadata, riskPolygons, aggregateRiskPolygons] = await Promise.all([
+        const [metadata, riskPolygons, aggregateRiskPolygons, probabilityTiles] = await Promise.all([
           fetchJson<OutlookArtifactMetadata>('/api/outlook/latest', controller.signal),
           fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/risk-polygons', controller.signal),
           fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/aggregate-risk-polygons', controller.signal).catch(() => undefined),
+          fetchJson<OutlookProbabilityTiles>('/api/outlook/probability-tiles', controller.signal).catch(() => undefined),
         ]);
         if (!cancelled) {
           setState({
             status: 'ready',
-            artifacts: { metadata, riskPolygons, aggregateRiskPolygons },
+            artifacts: { metadata, riskPolygons, aggregateRiskPolygons, probabilityTiles },
             message: null,
           });
         }

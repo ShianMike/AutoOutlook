@@ -301,7 +301,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(np.all((features.normalized["mucape"] >= 0.0) & (features.normalized["mucape"] <= 1.0)))
 
     def test_probability_categories_use_spc_style_mdt_label(self) -> None:
-        features = gridded_features_from_fields(small_fields((2, 3)), forecast_hour=0)
+        fields = small_fields((2, 3))
+        fields["cape_mu"] = np.full((2, 3), 1800.0)
+        fields["u500"] = np.full((2, 3), 32.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
         probabilities = {
             "tornado": np.array([[0.00, 0.02, 0.05], [0.10, 0.15, 0.30]]),
             "hail": np.zeros((2, 3)),
@@ -315,6 +318,52 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             ["ENH", "MDT", "HIGH"],
         ])
 
+    def test_category_grid_gates_uncalibrated_high_end_risk(self) -> None:
+        weak_fields = small_fields((1, 2))
+        weak_fields["td2m"] = np.full((1, 2), 282.0)
+        weak_features = gridded_features_from_fields(weak_fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((1, 2), 0.80),
+            "hail": np.full((1, 2), 0.90),
+            "wind": np.full((1, 2), 0.90),
+        }
+
+        weak_categories = category_grid_from_probabilities(high_probs, weak_features)
+
+        self.assertTrue(np.all(weak_categories <= SPC_RISK_LABELS.index("TSTM")))
+
+        cape_driven_fields = small_fields((1, 2))
+        cape_driven_fields["cape_mu"] = np.full((1, 2), 2200.0)
+        cape_driven_fields["cape"] = np.full((1, 2), 1900.0)
+        cape_driven_fields["td2m"] = np.full((1, 2), 296.0)
+        cape_driven_fields["u500"] = np.full((1, 2), 23.5)
+        cape_driven_fields["v500"] = np.full((1, 2), 1.0)
+        cape_driven_fields["srh01"] = np.full((1, 2), 35.0)
+        cape_driven_fields["srh03"] = np.full((1, 2), 90.0)
+        cape_driven_features = gridded_features_from_fields(cape_driven_fields, forecast_hour=0)
+
+        cape_driven_categories = category_grid_from_probabilities(high_probs, cape_driven_features)
+
+        self.assertTrue(np.all(cape_driven_categories <= SPC_RISK_LABELS.index("MRGL")))
+
+        strong_fields = small_fields((1, 2))
+        strong_fields["cape_mu"] = np.full((1, 2), 2000.0)
+        strong_fields["u500"] = np.full((1, 2), 35.0)
+        strong_features = gridded_features_from_fields(strong_fields, forecast_hour=0)
+        candidate_model = {
+            "trainingRows": 6000,
+            "datasetQuality": {
+                "trainingRows": 6000,
+                "minimumRecommendedRows": 5000,
+                "experimentalOnly": False,
+                "status": "candidate",
+            },
+        }
+
+        capped_categories = category_grid_from_probabilities(high_probs, strong_features, candidate_model)
+
+        self.assertTrue(np.all(capped_categories <= SPC_RISK_LABELS.index("ENH")))
+
     def test_risk_polygons_are_geojson_features(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
         lons = np.linspace(-100.0, -96.0, 5)
@@ -325,6 +374,20 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         self.assertEqual(geojson["type"], "FeatureCollection")
         self.assertTrue(any(feature["properties"]["category"] == "MRGL" for feature in geojson["features"]))
+        tstm_cells = [
+            feature["properties"]["cellCount"]
+            for feature in geojson["features"]
+            if feature["properties"]["category"] == "TSTM"
+        ]
+        self.assertTrue(tstm_cells)
+        self.assertLessEqual(max(tstm_cells), 16)
+        for feature in geojson["features"]:
+            ring = feature["geometry"]["coordinates"][0]
+            area = 0.0
+            for idx, (x0, y0) in enumerate(ring[:-1]):
+                x1, y1 = ring[idx + 1]
+                area += x0 * y1 - x1 * y0
+            self.assertLessEqual(area / 2.0, 0.0)
 
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)

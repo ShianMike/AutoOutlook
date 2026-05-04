@@ -98,18 +98,58 @@ function formatGeneratedAt(iso: string | undefined): string {
   return `${String(date.getUTCMonth() + 1).padStart(2, '0')}/${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}${String(date.getUTCMinutes()).padStart(2, '0')}Z`;
 }
 
+function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollection | undefined): OutlookArtifactFeatureCollection | undefined {
+  if (!collection) return undefined;
+  return {
+    ...collection,
+    features: collection.features.map((feature) => {
+      if (feature.geometry.type === 'Polygon') {
+        const coordinates = (feature.geometry.coordinates as number[][][]).map(normalizeExteriorRing);
+        return { ...feature, geometry: { ...feature.geometry, coordinates } };
+      }
+      const coordinates = (feature.geometry.coordinates as number[][][][]).map((polygon) =>
+        polygon.map(normalizeExteriorRing),
+      );
+      return { ...feature, geometry: { ...feature.geometry, coordinates } };
+    }),
+  };
+}
+
+function normalizeExteriorRing(ring: number[][]): number[][] {
+  if (!Array.isArray(ring) || ring.length < 4) return ring;
+  const open = samePoint(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : [...ring];
+  if (signedRingArea(open) > 0) open.reverse();
+  return samePoint(open[0], open[open.length - 1]) ? open : [...open, open[0]];
+}
+
+function signedRingArea(coords: number[][]): number {
+  let area = 0;
+  for (let i = 0; i < coords.length; i += 1) {
+    const [x0, y0] = coords[i];
+    const [x1, y1] = coords[(i + 1) % coords.length];
+    area += x0 * y1 - x1 * y0;
+  }
+  return area / 2;
+}
+
+function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
+  return Boolean(a && b && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1]);
+}
+
 export default function GeneratedOutlookMap({ snapshot, status, artifacts, message }: GeneratedOutlookMapProps) {
   const selectedForecastHour = snapshot?.forecastHour;
-  const selectedCollection = useMemo(
-    () => filterHourCollection(artifacts?.riskPolygons, selectedForecastHour),
-    [artifacts, selectedForecastHour],
+  const riskPolygons = useMemo(
+    () => normalizeArtifactCollection(artifacts?.riskPolygons),
+    [artifacts?.riskPolygons],
   );
-  const aggregateCollection = artifacts?.aggregateRiskPolygons;
-  const renderedCollection = selectedCollection.features.length > 0
-    ? selectedCollection
-    : aggregateCollection ?? selectedCollection;
+  const selectedCollection = useMemo(
+    () => filterHourCollection(riskPolygons, selectedForecastHour),
+    [riskPolygons, selectedForecastHour],
+  );
+  const renderedCollection = selectedCollection;
   const renderedMax = maxCategory(renderedCollection);
-  const mapCategory = renderedMax ?? snapshot?.outlook.category;
+  const hasGeneratedLayer = renderedCollection.features.length > 0;
+  const mapCategory = hasGeneratedLayer ? renderedMax : undefined;
 
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
 
@@ -149,7 +189,6 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   );
 
   const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
-  const hasGeneratedLayer = renderedCollection.features.length > 0;
   const hasUpperAirOverlay = hasGeneratedLayer && snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (

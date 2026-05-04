@@ -11,7 +11,10 @@ export function map500mbLines(snapshot: HourSnapshot | null): UpperAirLine[] {
   if (!snapshot.upperAirOverlay.hasHeightContours) return [];
   const modelLines = snapshot.upperAirLines;
   if (!Array.isArray(modelLines) || modelLines.length === 0) return [];
-  return selectReadableLines(modelLines.map(sanitize500mbLine).filter((line): line is UpperAirLine => line !== null));
+  return modelLines
+    .map(sanitize500mbLine)
+    .filter((line): line is UpperAirLine => line !== null)
+    .sort((a, b) => a.value - b.value);
 }
 
 function sanitize500mbLine(line: UpperAirLine): UpperAirLine | null {
@@ -23,14 +26,6 @@ function sanitize500mbLine(line: UpperAirLine): UpperAirLine | null {
   if (coords.length < 2) return null;
 
   return { level: '500mb', value: line.value, coords };
-}
-
-function selectReadableLines(lines: UpperAirLine[]): UpperAirLine[] {
-  const sorted = [...lines].sort((a, b) => a.value - b.value);
-  const targetCount = 9;
-  if (sorted.length <= targetCount) return sorted;
-  const stride = Math.max(1, Math.ceil(sorted.length / targetCount));
-  return sorted.filter((_, idx) => idx % stride === 0).slice(0, targetCount);
 }
 
 function isConusCoord(coord: [number, number]): boolean {

@@ -20,6 +20,7 @@ interface HazardOutlookMapProps {
   snapshot: HourSnapshot | null;
   hazard: OutlookHazardKey;
   title: string;
+  sourceLabel?: string;
 }
 
 interface UpperAirFeature {
@@ -53,7 +54,7 @@ interface TriplePointFeature {
   geometry: { type: 'LineString'; coordinates: [number, number][] };
 }
 
-export default function HazardOutlookMap({ snapshot, hazard, title }: HazardOutlookMapProps) {
+export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel }: HazardOutlookMapProps) {
   const cfg = HAZARD_CONFIGS[hazard];
   const contourHour = snapshot?.forecastHour ?? 0;
 
@@ -213,9 +214,10 @@ export default function HazardOutlookMap({ snapshot, hazard, title }: HazardOutl
         <span className="font-display font-extrabold uppercase text-[12px] tracking-wider truncate">
           {title}
         </span>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0">
-          PEAK {peakPct}
-        </span>
+        <div className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0 flex items-center gap-2">
+          {sourceLabel && <span>{sourceLabel}</span>}
+          <span>PEAK {peakPct}</span>
+        </div>
       </header>
       <div className="aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
         <ComposableMap

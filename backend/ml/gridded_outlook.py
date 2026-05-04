@@ -98,11 +98,62 @@ def predict_hazard_grids(features: GriddedFeatures) -> dict[str, np.ndarray] | N
 def category_grid_from_probabilities(
     probabilities: Mapping[str, np.ndarray],
     features: GriddedFeatures,
+    model_metadata: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
     tornado = _hazard_ord("tornado", np.asarray(probabilities["tornado"], dtype=float))
     hail = _hazard_ord("hail", np.asarray(probabilities["hail"], dtype=float))
     wind = _hazard_ord("wind", np.asarray(probabilities["wind"], dtype=float))
     severe_ord = np.maximum.reduce([tornado, hail, wind])
+    organized_severe_mask = (
+        (features.raw["mucape"] >= 500.0)
+        & (features.raw["sfcDewpointF"] >= 50.0)
+        & (features.raw["shear06Kt"] >= 25.0)
+        & (features.raw["cin"] > -250.0)
+    )
+    severe_kinematic_mask = (
+        (features.raw["shear06Kt"] >= 35.0)
+        & (
+            (features.raw["stormRelWindKt"] >= 22.0)
+            | (features.raw["srh01"] >= 75.0)
+            | (features.raw["srh03"] >= 150.0)
+            | ((features.raw["shear06Kt"] >= 50.0) & (features.raw["mucape"] >= 1000.0))
+        )
+    )
+    significant_severe_mask = (
+        (features.raw["mucape"] >= 1000.0)
+        & (features.raw["sfcDewpointF"] >= 55.0)
+        & (features.raw["shear06Kt"] >= 35.0)
+        & (features.raw["cin"] > -200.0)
+    )
+    significant_kinematic_mask = (
+        (features.raw["shear06Kt"] >= 40.0)
+        & (
+            (features.raw["stormRelWindKt"] >= 28.0)
+            | (features.raw["srh01"] >= 100.0)
+            | (features.raw["srh03"] >= 225.0)
+            | ((features.raw["shear06Kt"] >= 55.0) & (features.raw["mucape"] >= 1500.0))
+        )
+    )
+    high_end_mask = (
+        (features.raw["mucape"] >= 1500.0)
+        & (features.raw["sfcDewpointF"] >= 60.0)
+        & (features.raw["shear06Kt"] >= 45.0)
+        & (features.raw["cin"] > -150.0)
+    )
+    severe_ord = np.where(organized_severe_mask, severe_ord, 0)
+    severe_ord = np.where(severe_kinematic_mask, severe_ord, np.minimum(severe_ord, 2))
+    severe_ord = np.where(
+        significant_severe_mask & significant_kinematic_mask,
+        severe_ord,
+        np.minimum(severe_ord, 3),
+    )
+    severe_ord = np.where(
+        high_end_mask & significant_kinematic_mask,
+        severe_ord,
+        np.minimum(severe_ord, 5),
+    )
+    category_cap = _model_category_cap(model_metadata)
+    severe_ord = np.minimum(severe_ord, category_cap)
     tstm_mask = (
         (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 100.0)
         & (features.raw["sfcDewpointF"] >= 45.0)
@@ -127,7 +178,7 @@ def risk_polygons_from_grid(
         ndimage = None
 
     for ordinal in range(1, len(SPC_RISK_LABELS)):
-        mask = np.asarray(category_grid >= ordinal)
+        mask = np.asarray(category_grid == ordinal)
         if not np.any(mask):
             continue
         if ndimage is None:
@@ -261,6 +312,33 @@ def _hazard_ord(hazard: str, probability: np.ndarray) -> np.ndarray:
     return out
 
 
+def _model_category_cap(model_metadata: Mapping[str, Any] | None) -> int:
+    if not model_metadata:
+        return len(SPC_RISK_LABELS) - 1
+    quality = model_metadata.get("datasetQuality")
+    training_rows = _int_value(model_metadata.get("trainingRows"))
+    minimum_rows = 5000
+    experimental = False
+    status = ""
+    if isinstance(quality, Mapping):
+        training_rows = max(training_rows, _int_value(quality.get("trainingRows")))
+        minimum_rows = max(1, _int_value(quality.get("minimumRecommendedRows"), minimum_rows))
+        experimental = bool(quality.get("experimentalOnly"))
+        status = str(quality.get("status", "")).lower()
+    if experimental or training_rows < minimum_rows:
+        return SPC_RISK_LABELS.index("SLGT")
+    if not bool(model_metadata.get("productionCapable")) and status not in {"production", "operational"}:
+        return SPC_RISK_LABELS.index("ENH")
+    return len(SPC_RISK_LABELS) - 1
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _lat_lon_grid(lats: np.ndarray, lons: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     lat_arr = np.asarray(lats, dtype=float)
     lon_arr = np.asarray(lons, dtype=float)
@@ -290,7 +368,7 @@ def _component_polygon(lons: np.ndarray, lats: np.ndarray) -> list[list[float]]:
         return _bbox_polygon(points)
     if coords and coords[0] != coords[-1]:
         coords.append(coords[0])
-    return coords
+    return _normalize_exterior_ring(coords)
 
 
 def _bbox_polygon(points: np.ndarray) -> list[list[float]]:
@@ -313,7 +391,27 @@ def _bbox_polygon(points: np.ndarray) -> list[list[float]]:
         [round(min_lon, 4), round(max_lat, 4)],
     ]
     coords.append(coords[0])
-    return coords
+    return _normalize_exterior_ring(coords)
+
+
+def _normalize_exterior_ring(coords: list[list[float]]) -> list[list[float]]:
+    if len(coords) < 4:
+        return coords
+    ring = coords[:-1] if coords[0] == coords[-1] else coords
+    if _signed_ring_area(ring) > 0:
+        ring = list(reversed(ring))
+    out = [list(coord) for coord in ring]
+    if out[0] != out[-1]:
+        out.append(out[0])
+    return out
+
+
+def _signed_ring_area(coords: list[list[float]]) -> float:
+    area = 0.0
+    for idx, (x0, y0) in enumerate(coords):
+        x1, y1 = coords[(idx + 1) % len(coords)]
+        area += x0 * y1 - x1 * y0
+    return area / 2.0
 
 
 def _round_nested(values: np.ndarray, digits: int = 3) -> list[list[float]]:

@@ -590,7 +590,7 @@ def _save_cache(
     for key, value in fields.items():
         payload[f"field__{key}"] = np.asarray(value, dtype=float)
     with tmp_path.open("wb") as fh:
-        np.savez_compressed(fh, **payload)
+        np.savez(fh, **payload)
     tmp_path.replace(path)
 
 

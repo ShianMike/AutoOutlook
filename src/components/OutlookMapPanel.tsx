@@ -6,6 +6,7 @@ import RetroPanel from './retro/RetroPanel';
 import RetroBadge from './retro/RetroBadge';
 import HazardOutlookMap from './HazardOutlookMap';
 import GeneratedOutlookMap from './GeneratedOutlookMap';
+import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
 import { useOutlookArtifacts } from '../hooks/useOutlookArtifacts';
 
@@ -26,6 +27,7 @@ export default function OutlookMapPanel({ snapshot }: OutlookMapPanelProps) {
   const [isExporting, setIsExporting] = useState(false);
   const exportRef = useRef<HTMLDivElement | null>(null);
   const outlookArtifacts = useOutlookArtifacts();
+  const generatedHazardsReady = hasGeneratedHazardTile(outlookArtifacts.artifacts, snapshot?.forecastHour);
   const mlDriven = Boolean(snapshot?.mlHazards);
   const engineLabel = mlDriven
     ? outlookArtifacts.status === 'ready'
@@ -121,10 +123,37 @@ export default function OutlookMapPanel({ snapshot }: OutlookMapPanelProps) {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 border-[3px] border-ink bg-paper p-2">
-            <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" />
-            <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" />
-            <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" />
-            <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" />
+            <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule" />
+            {generatedHazardsReady ? (
+              <GeneratedHazardProbabilityMap
+                snapshot={snapshot}
+                hazard="hail"
+                title="Hail Outlook"
+                artifacts={outlookArtifacts.artifacts}
+              />
+            ) : (
+              <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" />
+            )}
+            {generatedHazardsReady ? (
+              <GeneratedHazardProbabilityMap
+                snapshot={snapshot}
+                hazard="wind"
+                title="Damaging Wind Outlook"
+                artifacts={outlookArtifacts.artifacts}
+              />
+            ) : (
+              <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" />
+            )}
+            {generatedHazardsReady ? (
+              <GeneratedHazardProbabilityMap
+                snapshot={snapshot}
+                hazard="tornado"
+                title="Tornado Outlook"
+                artifacts={outlookArtifacts.artifacts}
+              />
+            ) : (
+              <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" />
+            )}
           </div>
         )}
 
