@@ -252,8 +252,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title }: HazardOutl
             }
           </Geographies>
 
-          {/* 500 mb geopotential-height contours. Backend HRRR supplies real
-              contours; browser fallbacks render a broad synthetic height field. */}
+          {/* 500 mb geopotential-height contours: real HRRR HGT at 500 mb only. */}
           {upperAirLineCollection.features.length > 0 && (
             <Geographies geography={upperAirLineCollection}>
               {({ geographies }) =>

@@ -128,6 +128,25 @@ export interface UpperAirVector {
   speedKt: number;
 }
 
+export interface UpperAirOverlayMetadata {
+  domain: 'CONUS';
+  level: '500mb';
+  fields: string[];
+  gridStride: number;
+  windBarbStride?: number;
+  source: string;
+  hasHeightContours: boolean;
+  hasWindVectors: boolean;
+  windVectorCount: number;
+  heightContourCount: number;
+  sourceCycle?: string | null;
+  forecastHour: number;
+  validTimeISO?: string;
+  cacheHit?: boolean;
+  cachePath?: string | null;
+  error?: string;
+}
+
 export interface SurfaceBoundaryFocus {
   kind: 'triple-point' | 'dryline' | 'frontal';
   lat: number;
@@ -148,6 +167,7 @@ export interface HourSnapshot {
   cities: CityMarker[];
   upperAirLines?: UpperAirLine[];
   upperAirVectors?: UpperAirVector[];
+  upperAirOverlay?: UpperAirOverlayMetadata;
   surfaceBoundary?: SurfaceBoundaryFocus;
 }
 

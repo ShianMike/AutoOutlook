@@ -18,6 +18,7 @@ import type {
   SignalStrength,
   OutlookArea,
   SurfaceBoundaryFocus,
+  UpperAirOverlayMetadata,
   UpperAirLine,
   UpperAirVector,
 } from '../../types/forecast';
@@ -37,6 +38,7 @@ interface BackendHour {
   mlHazards?: MlHazardProbabilities;
   upperAirLines?: UpperAirLine[];
   upperAirVectors?: UpperAirVector[];
+  upperAirOverlay?: UpperAirOverlayMetadata;
   surfaceBoundary?: SurfaceBoundaryFocus;
 }
 
@@ -105,6 +107,7 @@ export const pythonBackendProvider: ForecastProvider = {
         cities: cityMarkers,
         upperAirLines: h.upperAirLines,
         upperAirVectors: h.upperAirVectors,
+        upperAirOverlay: h.upperAirOverlay,
         surfaceBoundary: h.surfaceBoundary,
       });
     }));

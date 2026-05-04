@@ -111,13 +111,14 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   const renderedMax = maxCategory(renderedCollection);
   const mapCategory = renderedMax ?? snapshot?.outlook.category;
 
+  const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
+
   const upperAirLineCollection = useMemo(
     () => {
-      const lines = map500mbLines(snapshot);
       return {
         type: 'FeatureCollection' as const,
-        features: lines.map((line, idx): UpperAirFeature => {
-          const style = upperAirLineVisualStyle(snapshot, idx, lines.length);
+        features: upperAirLines.map((line, idx): UpperAirFeature => {
+          const style = upperAirLineVisualStyle(snapshot, idx, upperAirLines.length);
           return {
             type: 'Feature',
             properties: { idx, value: line.value, ...style },
@@ -126,13 +127,13 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
         }),
       };
     },
-    [snapshot],
+    [snapshot, upperAirLines],
   );
 
   const upperAirStreakCollection = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
-      features: buildUpperAirIntensitySegments(snapshot, map500mbLines(snapshot))
+      features: buildUpperAirIntensitySegments(snapshot, upperAirLines)
         .map((segment, idx): UpperAirStreakFeature => ({
           type: 'Feature',
           properties: {
@@ -144,11 +145,12 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
           geometry: { type: 'LineString', coordinates: segment.coords },
         })),
     }),
-    [snapshot],
+    [snapshot, upperAirLines],
   );
 
   const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
   const hasGeneratedLayer = renderedCollection.features.length > 0;
+  const hasUpperAirOverlay = hasGeneratedLayer && snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
@@ -190,7 +192,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             }
           </Geographies>
 
-          {upperAirLineCollection.features.length > 0 && (
+          {hasUpperAirOverlay && upperAirLineCollection.features.length > 0 && (
             <Geographies geography={upperAirLineCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => (
@@ -269,7 +271,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             }
           </Geographies>
 
-          {upperAirLineCollection.features.length > 0 && (
+          {hasUpperAirOverlay && upperAirLineCollection.features.length > 0 && (
             <Geographies geography={upperAirLineCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => (
@@ -311,7 +313,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             </Geographies>
           )}
 
-          {upperAirStreakCollection.features.length > 0 && (
+          {hasUpperAirOverlay && upperAirStreakCollection.features.length > 0 && (
             <Geographies geography={upperAirStreakCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => (
@@ -353,7 +355,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             </Geographies>
           )}
 
-          {windVectors.map((vector, idx) => (
+          {hasUpperAirOverlay && windVectors.map((vector, idx) => (
             <Marker key={`generated-wind-vector-top-${idx}`} coordinates={[vector.lon, vector.lat]}>
               <WindBarb vector={vector} top />
             </Marker>
@@ -371,9 +373,6 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                   ? 'Loading HRRR/XGBoost outlook artifacts…'
                   : message ?? 'Run the HRRR/XGBoost artifact pipeline to publish risk polygons for this map.'}
               </p>
-              <div className="mt-3 border-t-[2px] border-ink pt-2 font-mono text-[10px] uppercase tracking-widest text-ink/50">
-                Synthetic TypeScript SPC-style contours are disabled for this view.
-              </div>
             </div>
           </div>
         )}

@@ -21,5 +21,6 @@ backend/models/
 backend/ml_data/
 backend/archive_data/
 backend/artifacts/
+backend/cache/
 *.parquet
 .tmp/

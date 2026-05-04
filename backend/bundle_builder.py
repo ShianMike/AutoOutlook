@@ -16,7 +16,7 @@ import numpy as np
 import xarray as xr
 
 from . import metpy_diagnostics as diag
-from .hrrr_filter import fetch_hrrr_grib_valid_time
+from .hrrr_filter import fetch_hrrr_500mb_overlay_valid_time, fetch_hrrr_grib_valid_time
 from .ml.inference import model_status, predict_ml_hazards
 from .nomads_pipeline import NomadsFetchError
 from .region_picker import pick_focus_region, _southern_border_multiplier
@@ -24,6 +24,9 @@ from .region_picker import pick_focus_region, _southern_border_multiplier
 log = logging.getLogger(__name__)
 
 FORECAST_HOURS = list(range(0, 49))
+HGT500_CONTOUR_LEVELS = tuple(range(5280, 5941, 60))
+FULL_CONUS_OVERLAY_GRID_STRIDE = 4
+FULL_CONUS_WIND_BARB_STRIDE = 22
 
 QUICK_CATEGORY_ORD = {"TSTM": 0, "MRGL": 1, "SLGT": 2, "ENH": 3, "MOD": 4, "HIGH": 5}
 
@@ -592,6 +595,81 @@ def _direct_hrrr_hour_payload(h: int, grib_hour: dict[str, Any]) -> dict[str, An
     )
 
 
+def fetch_full_conus_500mb_overlay(
+    target_dt: datetime,
+    grid_stride: int = FULL_CONUS_OVERLAY_GRID_STRIDE,
+    wind_barb_stride: int = FULL_CONUS_WIND_BARB_STRIDE,
+    fetcher=fetch_hrrr_500mb_overlay_valid_time,
+) -> dict[str, Any]:
+    """Return real full-CONUS 500 mb contours and wind barbs from HRRR fields."""
+    grib_hour = fetcher(target_dt, grid_stride=grid_stride)
+    fields = grib_hour.get("fields", {})
+    lats = np.asarray(grib_hour.get("lats", []), dtype=float)
+    lons = np.asarray(grib_hour.get("lons", []), dtype=float)
+    hgt500 = fields.get("hgt500")
+    u500 = fields.get("u500")
+    v500 = fields.get("v500")
+    upper_air_lines = _hgt500_lines_from_field(hgt500, lats, lons, levels=HGT500_CONTOUR_LEVELS)
+    upper_air_vectors = _wind500_vectors_from_fields(u500, v500, lats, lons, stride=wind_barb_stride)
+    source_cycle = f"HRRR {int(grib_hour.get('runCycle', 0)):02d}Z {grib_hour.get('runDate', '')}"
+    model_forecast_hour = int(grib_hour.get("modelForecastHour", 0))
+    metadata = {
+        "domain": "CONUS",
+        "level": "500mb",
+        "fields": ["hgt500", "u500", "v500"],
+        "gridStride": int(grib_hour.get("gridStride", grid_stride)),
+        "windBarbStride": max(1, int(wind_barb_stride)),
+        "source": "HRRR",
+        "hasHeightContours": len(upper_air_lines) > 0,
+        "hasWindVectors": len(upper_air_vectors) > 0,
+        "windVectorCount": len(upper_air_vectors),
+        "heightContourCount": len(upper_air_lines),
+        "sourceCycle": source_cycle,
+        "forecastHour": model_forecast_hour,
+        "runDate": grib_hour.get("runDate"),
+        "runCycle": grib_hour.get("runCycle"),
+        "modelForecastHour": model_forecast_hour,
+        "validTimeISO": grib_hour.get("validTimeISO"),
+        "cacheHit": bool(grib_hour.get("cacheHit")),
+        "cachePath": grib_hour.get("cachePath"),
+    }
+    return {
+        "upperAirLines": upper_air_lines,
+        "upperAirVectors": upper_air_vectors,
+        "metadata": metadata,
+    }
+
+
+def _empty_full_conus_500mb_overlay(target_dt: datetime, forecast_hour: int, error: str | None = None) -> dict[str, Any]:
+    metadata = {
+        "domain": "CONUS",
+        "level": "500mb",
+        "fields": ["hgt500", "u500", "v500"],
+        "gridStride": FULL_CONUS_OVERLAY_GRID_STRIDE,
+        "windBarbStride": FULL_CONUS_WIND_BARB_STRIDE,
+        "source": "HRRR",
+        "hasHeightContours": False,
+        "hasWindVectors": False,
+        "windVectorCount": 0,
+        "heightContourCount": 0,
+        "sourceCycle": None,
+        "forecastHour": int(forecast_hour),
+        "validTimeISO": target_dt.isoformat().replace("+00:00", "Z"),
+    }
+    if error:
+        metadata["error"] = error
+    return {"upperAirLines": [], "upperAirVectors": [], "metadata": metadata}
+
+
+def _attach_full_conus_500mb_overlay(payload: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "upperAirLines": overlay.get("upperAirLines", []),
+        "upperAirVectors": overlay.get("upperAirVectors", []),
+        "upperAirOverlay": overlay.get("metadata"),
+    }
+
+
 def _dataset_region(
     ds: xr.Dataset,
     dims: dict[str, str],
@@ -1145,6 +1223,7 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
     focus_regions: dict[int, dict[str, Any]] = {}
     focus_area_anchors: dict[int, list[dict[str, Any]]] = {}
     raw_anchors: dict[int, dict[str, Any]] = {}
+    upper_air_overlays: dict[int, dict[str, Any]] = {}
 
     def _fetch_focus(hour: int) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
         grib_hour = fetch_hrrr_grib_valid_time(_valid_dt_for_hour(now, hour), profile="focus")
@@ -1191,11 +1270,33 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
         h: _direct_hrrr_hour_payload(h, raw_anchors[h])
         for h in sorted(raw_anchors)
     }
+
+    def _fetch_overlay(hour: int) -> tuple[int, dict[str, Any]]:
+        valid_dt = _valid_dt_for_hour(now, hour)
+        return hour, fetch_full_conus_500mb_overlay(valid_dt)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_hour = {executor.submit(_fetch_overlay, h): h for h in FORECAST_HOURS}
+        for future in as_completed(future_to_hour):
+            try:
+                hour, overlay = future.result()
+                upper_air_overlays[hour] = overlay
+            except Exception as exc:  # noqa: BLE001
+                log.info("Full-CONUS 500 mb overlay skipped for F%02d: %s", future_to_hour[future], exc)
+
     ml_status = model_status()
     ml_used_hours = 0
     hours_out = []
     for h in FORECAST_HOURS:
         payload = _payload_for_hour_from_anchors(h, _valid_iso(_valid_dt_for_hour(now, h)), anchor_payloads)
+        overlay = upper_air_overlays.get(h)
+        if overlay is None:
+            overlay = _empty_full_conus_500mb_overlay(
+                _valid_dt_for_hour(now, h),
+                h,
+                "Full-CONUS HRRR 500 mb overlay unavailable",
+            )
+        payload = _attach_full_conus_500mb_overlay(payload, overlay)
         ml_hazards = predict_ml_hazards(payload.get("ingredients", {}), h)
         if ml_hazards is not None:
             payload["mlHazards"] = ml_hazards
@@ -1218,6 +1319,7 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
         ml_note = ", ML hazards unavailable during inference; fallback rule hazards"
     else:
         ml_note = f", ML hazards inactive: {ml_status.get('reason', 'model artifacts unavailable')}; fallback rule hazards"
+    overlay_count = sum(1 for overlay in upper_air_overlays.values() if overlay.get("metadata", {}).get("hasHeightContours") or overlay.get("metadata", {}).get("hasWindVectors"))
 
     bundle = {
         "cycle": cycle_str,
@@ -1225,7 +1327,8 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
         "providerNotes": (
             "NOMADS HRRR GRIB filter"
             f" ({len(focus_regions)} CONUS focus scans, {len(anchor_payloads)} regional anchor hrs,"
-            f" hourly interpolation, multi-area contours) - focus: {region['label']}"
+            f" {overlay_count} full-CONUS 500mb overlays, hourly interpolation, multi-area contours)"
+            f" - focus: {region['label']}"
             f"{ml_note}"
         ),
         "latencyMs": elapsed_ms,
@@ -1283,7 +1386,7 @@ def _point(da: xr.DataArray, dims: dict[str, str], vtime_idx: int, i_lat: int, i
 
 
 def _shear06_field(ds: xr.Dataset, dims: dict[str, str], vtime_idx: int) -> np.ndarray:
-    """Approximate 0–6 km bulk shear in knots over the (lat, lon) plane."""
+    """Approximate deep-layer shear from 10 m to 500 mb winds in knots."""
     base_shape = _safe2d(_isel_time(ds["cape"], dims, vtime_idx)).shape
     if "u_iso" not in ds.variables or "v_iso" not in ds.variables:
         return np.zeros(base_shape)
@@ -1361,6 +1464,7 @@ def _wind500_vectors_from_fields(
     v500: np.ndarray | None,
     lats: np.ndarray,
     lons: np.ndarray,
+    stride: int = 22,
 ) -> list[dict[str, Any]]:
     """Convert gridded 500 mb U/V wind components from m/s to sampled kt barbs."""
     if u500 is None or v500 is None:
@@ -1370,26 +1474,36 @@ def _wind500_vectors_from_fields(
     if u.ndim != 2 or v.ndim != 2 or u.shape != v.shape:
         return []
 
-    if lats.ndim == 1 and lons.ndim == 1:
-        lon_grid, lat_grid = np.meshgrid(lons, lats)
+    lat_arr = np.asarray(lats, dtype=float)
+    lon_arr = np.asarray(lons, dtype=float)
+    if lat_arr.ndim == 1 and lon_arr.ndim == 1:
+        if lat_arr.size != u.shape[0] or lon_arr.size != u.shape[1]:
+            return []
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
     else:
-        lat_grid = np.asarray(lats, dtype=float)
-        lon_grid = np.asarray(lons, dtype=float)
+        lat_grid = lat_arr
+        lon_grid = lon_arr
+        if lat_grid.shape != u.shape or lon_grid.shape != u.shape:
+            return []
 
     rows, cols = u.shape
-    row_step = max(1, rows // 8)
-    col_step = max(1, cols // 10)
+    stride = max(1, int(stride))
+    row_start = 0 if rows <= stride else stride // 2
+    col_start = 0 if cols <= stride else stride // 2
     vectors: list[dict[str, Any]] = []
-    for i in range(row_step // 2, rows, row_step):
-        for j in range(col_step // 2, cols, col_step):
+    for i in range(row_start, rows, stride):
+        for j in range(col_start, cols, stride):
             lon = float(lon_grid[i, j])
             lat = float(lat_grid[i, j])
-            u_kt = float(u[i, j] * 1.9438445)
-            v_kt = float(v[i, j] * 1.9438445)
-            speed_kt = float(np.hypot(u_kt, v_kt))
-            if not all(np.isfinite(x) for x in (lon, lat, u_kt, v_kt, speed_kt)):
+            u_ms = float(u[i, j])
+            v_ms = float(v[i, j])
+            speed_ms = float(np.hypot(u_ms, v_ms))
+            if not all(np.isfinite(x) for x in (lon, lat, u_ms, v_ms, speed_ms)):
                 continue
-            if -130 <= lon <= -60 and 20 <= lat <= 55 and speed_kt >= 10:
+            if -130 <= lon <= -60 and 20 <= lat <= 55:
+                u_kt = float(u_ms * 1.9438445)
+                v_kt = float(v_ms * 1.9438445)
+                speed_kt = float(speed_ms * 1.9438445)
                 vectors.append({
                     "level": "500mb",
                     "lon": lon,
@@ -1398,33 +1512,42 @@ def _wind500_vectors_from_fields(
                     "vKt": v_kt,
                     "speedKt": speed_kt,
                 })
-    return vectors[:120]
+    return vectors
 
 
 def _hgt500_lines_from_field(
     hgt: np.ndarray | None,
     lats: np.ndarray,
     lons: np.ndarray,
+    levels: tuple[int, ...] = HGT500_CONTOUR_LEVELS,
 ) -> list[dict[str, Any]]:
     """Generate 500 mb geopotential-height contour polylines for the map."""
     if hgt is None:
         return []
     hgt = np.asarray(hgt, dtype=float)
-    if hgt.ndim != 2 or not np.isfinite(hgt).any():
+    finite = np.isfinite(hgt)
+    if hgt.ndim != 2 or finite.sum() < 4:
         return []
 
-    if lats.ndim == 1 and lons.ndim == 1:
-        lon_grid, lat_grid = np.meshgrid(lons, lats)
+    lat_arr = np.asarray(lats, dtype=float)
+    lon_arr = np.asarray(lons, dtype=float)
+    if lat_arr.ndim == 1 and lon_arr.ndim == 1:
+        if lat_arr.size != hgt.shape[0] or lon_arr.size != hgt.shape[1]:
+            return []
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
     else:
-        lat_grid = lats
-        lon_grid = lons
+        lat_grid = lat_arr
+        lon_grid = lon_arr
+        if lat_grid.shape != hgt.shape or lon_grid.shape != hgt.shape:
+            return []
 
-    hmin = float(np.nanpercentile(hgt, 4))
-    hmax = float(np.nanpercentile(hgt, 96))
-    start = int(np.ceil(hmin / 60.0) * 60)
-    end = int(np.floor(hmax / 60.0) * 60)
-    levels = np.arange(start, end + 1, 60)
-    if levels.size == 0:
+    finite_hgt = hgt[finite]
+    hmin = float(np.nanmin(finite_hgt))
+    hmax = float(np.nanmax(finite_hgt))
+    if not np.isfinite(hmin) or not np.isfinite(hmax) or hmax <= hmin:
+        return []
+    valid_levels = [float(level) for level in levels if hmin <= float(level) <= hmax]
+    if not valid_levels:
         return []
 
     try:
@@ -1436,7 +1559,7 @@ def _hgt500_lines_from_field(
 
     fig = plt.figure(figsize=(1, 1))
     try:
-        cs = plt.contour(lon_grid, lat_grid, hgt, levels=levels)
+        cs = plt.contour(lon_grid, lat_grid, hgt, levels=valid_levels)
         lines: list[dict[str, Any]] = []
         for level, segments in zip(cs.levels, cs.allsegs):
             for seg in segments:
@@ -1450,6 +1573,6 @@ def _hgt500_lines_from_field(
                 ]
                 if len(coords) >= 8:
                     lines.append({"level": "500mb", "value": float(level), "coords": coords})
-        return lines[:28]
+        return lines[:48]
     finally:
         plt.close(fig)

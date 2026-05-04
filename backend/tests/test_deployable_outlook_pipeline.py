@@ -9,14 +9,35 @@ from unittest.mock import patch
 
 import numpy as np
 
-from backend.hrrr_selected import HrrrCycle, descriptor_matches_selected, parse_idx, selected_ranges
+from backend.bundle_builder import HGT500_CONTOUR_LEVELS, _hgt500_lines_from_field, _wind500_vectors_from_fields, fetch_full_conus_500mb_overlay
+from backend.hrrr_filter import _messages_to_fields
+from backend.hrrr_selected import (
+    REQUIRED_HRRR_TERMS,
+    HrrrCycle,
+    SelectedHrrrValidationError,
+    _fetch_range,
+    _request_with_backoff,
+    descriptor_matches_selected,
+    downsample_hrrr_grid,
+    latest_available_hrrr_cycle_with_metadata,
+    parse_idx,
+    selected_ranges,
+    selected_term_report,
+    validate_decoded_hrrr_fields,
+)
 from backend.ml.gridded_outlook import (
     SPC_RISK_LABELS,
     category_grid_from_probabilities,
     gridded_features_from_fields,
     risk_polygons_from_grid,
 )
-from backend.ml.outlook_pipeline import run_pipeline
+from backend.ml.outlook_pipeline import (
+    ALL_FORECAST_HOURS,
+    PRODUCTION_FORECAST_HOURS,
+    _publish_working_dir,
+    resolve_forecast_hours,
+    run_pipeline,
+)
 from backend.ml.spc_verification import compare_prediction_to_spc, official_category_grid
 
 
@@ -67,6 +88,53 @@ def fake_spc_geojson() -> dict:
     }
 
 
+def required_idx_text() -> str:
+    lines = []
+    for idx, term in enumerate(REQUIRED_HRRR_TERMS, start=1):
+        lines.append(f"{idx}:{(idx - 1) * 100}:d=2024050412{term}anl:")
+    lines.append(f"{len(lines) + 1}:{len(lines) * 100}:d=2024050412:REFC:entire atmosphere:anl:")
+    return "\n".join(lines)
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, text: str = "", content: bytes = b"", headers: dict | None = None) -> None:
+        self.status_code = status_code
+        self.text = text
+        self.content = content
+        self.headers = headers or {}
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status_code < 400
+
+    def raise_for_status(self) -> None:
+        if not self.ok:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeHrrrIdxSession:
+    def __init__(self, complete_cycle: int) -> None:
+        self.complete_cycle = complete_cycle
+        self.headers: dict[str, str] = {}
+
+    def request(self, method: str, url: str, **_kwargs):
+        if method != "GET":
+            return FakeResponse(405)
+        if f"t{self.complete_cycle:02d}z.wrfsfcf00" in url or f"t{self.complete_cycle:02d}z.wrfsfcf48" in url:
+            return FakeResponse(200, required_idx_text())
+        return FakeResponse(404)
+
+
+class SequenceSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    def request(self, method: str, url: str, **_kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
 class DeployableOutlookPipelineTests(unittest.TestCase):
     def test_selected_hrrr_terms_filter_only_requested_records(self) -> None:
         idx_text = "\n".join([
@@ -81,6 +149,145 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(descriptor_matches_selected(records[0][2]))
         self.assertFalse(descriptor_matches_selected(records[1][2]))
         self.assertEqual(selected_ranges(records, 500), [(0, 99), (200, 299), (400, 499)])
+
+    def test_selected_term_report_separates_required_and_optional_missing_terms(self) -> None:
+        records = parse_idx(required_idx_text())
+
+        report = selected_term_report(records)
+
+        self.assertEqual(report["missingRequiredTerms"], [])
+        self.assertIn(":PWAT:entire atmosphere", report["missingOptionalTerms"])
+        self.assertIn(":CAPE:surface:", report["matchedTerms"])
+
+    def test_byte_range_request_retries_transient_statuses(self) -> None:
+        session = SequenceSession([FakeResponse(503), FakeResponse(200, content=b"ok")])
+
+        response = _request_with_backoff(session, "GET", "https://example.test/file", retries=1, backoff_seconds=0)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(session.calls, 2)
+
+    def test_byte_range_request_rejects_full_grib_fallback(self) -> None:
+        session = SequenceSession([FakeResponse(200, content=b"GRIB" + (b"x" * 2048))])
+
+        with self.assertRaises(ValueError):
+            _fetch_range(session, "https://example.test/file", 0, 10)
+
+    def test_latest_cycle_detection_falls_back_to_complete_extended_cycle(self) -> None:
+        detection = latest_available_hrrr_cycle_with_metadata(
+            session=FakeHrrrIdxSession(complete_cycle=12),
+            now=datetime(2024, 5, 4, 19, tzinfo=timezone.utc),
+            max_lookback_hours=12,
+        )
+
+        self.assertEqual(detection.selected.run_cycle, 12)
+        self.assertEqual(detection.metadata["selected"]["runCycle"], 12)
+        self.assertFalse(detection.metadata["checkedCycles"][0]["complete"])
+        self.assertTrue(detection.metadata["checkedCycles"][1]["complete"])
+
+    def test_downsampled_hrrr_fields_keep_consistent_shapes_and_validate(self) -> None:
+        lats = np.linspace(25.0, 50.0, 6)
+        lons = np.linspace(-125.0, -70.0, 9)
+        fields = small_fields((6, 9))
+
+        ds_lats, ds_lons, ds_fields = downsample_hrrr_grid(lats, lons, fields, stride=3)
+        validate_decoded_hrrr_fields(ds_lats, ds_lons, ds_fields)
+
+        self.assertEqual(ds_lats.shape, (2,))
+        self.assertEqual(ds_lons.shape, (3,))
+        self.assertEqual(ds_fields["cape"].shape, (2, 3))
+
+    def test_hrrr_validation_rejects_implausible_required_fields(self) -> None:
+        lats = np.linspace(25.0, 50.0, 5)
+        lons = np.linspace(-125.0, -70.0, 5)
+        fields = small_fields()
+        fields["t2m"] = np.full((5, 5), 999.0)
+
+        with self.assertRaises(SelectedHrrrValidationError):
+            validate_decoded_hrrr_fields(lats, lons, fields)
+
+    def test_forecast_hour_resolution_defaults_to_deployment_hours(self) -> None:
+        self.assertEqual(resolve_forecast_hours(), list(PRODUCTION_FORECAST_HOURS))
+        self.assertEqual(resolve_forecast_hours(all_hours=True), list(ALL_FORECAST_HOURS))
+        self.assertEqual(resolve_forecast_hours([6, 0, 6]), [0, 6])
+
+    def test_hrrr_500mb_wind_vectors_use_real_uv_components_in_knots(self) -> None:
+        lats = np.linspace(25.0, 50.0, 30)
+        lons = np.linspace(-125.0, -70.0, 30)
+        u500 = np.full((30, 30), 10.0)
+        v500 = np.full((30, 30), -5.0)
+
+        vectors = _wind500_vectors_from_fields(u500, v500, lats, lons)
+
+        self.assertGreater(len(vectors), 0)
+        first = vectors[0]
+        self.assertEqual(first["level"], "500mb")
+        self.assertAlmostEqual(first["uKt"], 10.0 * 1.9438445)
+        self.assertAlmostEqual(first["vKt"], -5.0 * 1.9438445)
+        self.assertAlmostEqual(first["speedKt"], np.hypot(10.0, -5.0) * 1.9438445)
+
+    def test_hrrr_500mb_vectors_require_valid_conus_fields(self) -> None:
+        lats = np.linspace(5.0, 10.0, 30)
+        lons = np.linspace(-150.0, -140.0, 30)
+        vectors = _wind500_vectors_from_fields(np.ones((30, 30)), np.ones((30, 30)), lats, lons)
+
+        self.assertEqual(vectors, [])
+
+    def test_missing_hrrr_500mb_height_returns_no_contours(self) -> None:
+        lats = np.linspace(25.0, 50.0, 5)
+        lons = np.linspace(-125.0, -70.0, 5)
+
+        self.assertEqual(_hgt500_lines_from_field(None, lats, lons), [])
+
+    def test_500mb_overlay_uses_real_full_conus_fields(self) -> None:
+        lats = np.linspace(20.0, 55.0, 48)
+        lons = np.linspace(-130.0, -60.0, 72)
+        _lon_grid, lat_grid = np.meshgrid(lons, lats)
+        hgt500 = 5250.0 + ((lat_grid - 20.0) / 35.0) * 760.0
+        u500 = np.full_like(hgt500, 12.0)
+        v500 = np.full_like(hgt500, -6.0)
+
+        def fake_fetcher(_target_dt, grid_stride=4):
+            return {
+                "runDate": "20240504",
+                "runCycle": 12,
+                "modelForecastHour": 3,
+                "validTimeISO": "2024-05-04T15:00:00Z",
+                "gridStride": grid_stride,
+                "lats": lats,
+                "lons": lons,
+                "fields": {"hgt500": hgt500, "u500": u500, "v500": v500},
+                "cacheHit": False,
+                "cachePath": None,
+            }
+
+        overlay = fetch_full_conus_500mb_overlay(
+            datetime(2024, 5, 4, 15, tzinfo=timezone.utc),
+            fetcher=fake_fetcher,
+        )
+
+        self.assertEqual(overlay["metadata"]["domain"], "CONUS")
+        self.assertTrue(overlay["metadata"]["hasHeightContours"])
+        self.assertTrue(overlay["metadata"]["hasWindVectors"])
+        self.assertGreater(overlay["metadata"]["windVectorCount"], 1)
+        self.assertGreater(overlay["metadata"]["heightContourCount"], 1)
+        self.assertTrue(all(line["value"] in HGT500_CONTOUR_LEVELS for line in overlay["upperAirLines"]))
+        self.assertTrue(any(min(coord[0] for coord in line["coords"]) <= -125.0 for line in overlay["upperAirLines"]))
+        first_vector = overlay["upperAirVectors"][0]
+        self.assertAlmostEqual(first_vector["uKt"], 12.0 * 1.9438445)
+        self.assertAlmostEqual(first_vector["vKt"], -6.0 * 1.9438445)
+
+    def test_overlay_message_decode_does_not_require_surface_cape(self) -> None:
+        values = np.ones((2, 2))
+        messages = [
+            {"category": 3, "parameter": 5, "level_type": 100, "level_value": 50000.0, "lats": np.array([20.0, 21.0]), "lons": np.array([-100.0, -99.0]), "values": values * 5700.0},
+            {"category": 2, "parameter": 2, "level_type": 100, "level_value": 50000.0, "lats": np.array([20.0, 21.0]), "lons": np.array([-100.0, -99.0]), "values": values * 10.0},
+            {"category": 2, "parameter": 3, "level_type": 100, "level_value": 50000.0, "lats": np.array([20.0, 21.0]), "lons": np.array([-100.0, -99.0]), "values": values * -5.0},
+        ]
+
+        _lats, _lons, fields = _messages_to_fields(messages, require_cape=False)
+
+        self.assertEqual(sorted(fields), ["hgt500", "u500", "v500"])
 
     def test_gridded_features_include_derived_severe_weather_fields(self) -> None:
         fields = small_fields()
@@ -183,6 +390,102 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertTrue((latest / "probability_tiles.json").exists())
             self.assertEqual(metadata["cycle"], "HRRR 12Z 20240504")
             self.assertTrue(metadata["spcVerification"]["spcFetchedAfterPredictionArtifacts"])
+
+    def test_pipeline_reports_failed_hours_but_publishes_when_minimum_is_met(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            if ref.forecast_hour == 1:
+                raise RuntimeError("missing hour")
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            return {"tornado": probs, "hail": probs, "wind": probs}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            metadata = run_pipeline(
+                output_dir=Path(tmp) / "latest",
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                verify_spc=False,
+                preview=False,
+                min_successful_hours=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+            self.assertEqual(metadata["successfulForecastHours"], [0])
+            self.assertEqual(metadata["failedHours"][0]["forecastHour"], 1)
+            self.assertTrue((Path(tmp) / "latest" / "metadata.json").exists())
+
+    def test_pipeline_failure_preserves_previous_latest_artifacts(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(_ref, _session):
+            raise RuntimeError("hour unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            latest = Path(tmp) / "latest"
+            latest.mkdir()
+            (latest / "metadata.json").write_text(json.dumps({"cycle": "old"}), encoding="utf-8")
+
+            with self.assertRaises(RuntimeError):
+                run_pipeline(
+                    output_dir=latest,
+                    forecast_hours=[0, 1],
+                    now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                    verify_spc=False,
+                    preview=False,
+                    min_successful_hours=2,
+                    detect_cycle_fn=fake_detect,
+                    fetch_hour_fn=fake_fetch,
+                )
+
+            self.assertEqual(json.loads((latest / "metadata.json").read_text(encoding="utf-8"))["cycle"], "old")
+            failed = json.loads((Path(tmp) / "latest.failed.json").read_text(encoding="utf-8"))
+            self.assertTrue(failed["previousLatestPreserved"])
+            self.assertEqual(len(failed["failedHours"]), 2)
+
+    def test_publish_restores_previous_latest_if_new_move_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            latest = root / "latest"
+            working = root / "latest.tmp"
+            latest.mkdir()
+            working.mkdir()
+            (latest / "metadata.json").write_text(json.dumps({"cycle": "old"}), encoding="utf-8")
+            (working / "metadata.json").write_text(json.dumps({"cycle": "new"}), encoding="utf-8")
+            real_move = __import__("shutil").move
+            move_calls = {"count": 0}
+
+            def flaky_move(src, dst):
+                move_calls["count"] += 1
+                if move_calls["count"] == 2:
+                    raise RuntimeError("publish move failed")
+                return real_move(src, dst)
+
+            with patch("backend.ml.outlook_pipeline.shutil.move", side_effect=flaky_move):
+                with self.assertRaises(RuntimeError):
+                    _publish_working_dir(working, latest)
+
+            self.assertTrue((latest / "metadata.json").exists())
+            self.assertEqual(json.loads((latest / "metadata.json").read_text(encoding="utf-8"))["cycle"], "old")
 
     def test_server_serves_latest_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,7 +14,7 @@ Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shad
   1. **Python backend** (Flask + HRRR GRIB2 byte-range filtering + MetPy-style diagnostics) — pulls selected HRRR fields, derives severe-weather ingredients, and activates XGBoost hazard probabilities when model artifacts are valid.
   2. **Open-Meteo** (browser-side) — free GFS-Seamless JSON endpoints used as an automatic fallback if the backend isn't running.
   3. **Mock** — deterministic Plains severe-weather day used when both live providers fail.
-- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest available extended HRRR cycle, processes forecast hours `0..48`, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
+- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest complete extended HRRR cycle, processes production forecast hours by default, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
 
 ## Run
 
@@ -80,7 +80,15 @@ Run it as a scheduler loop:
 python -m backend.ml.outlook_pipeline --loop --interval-minutes 30
 ```
 
-The pipeline writes to `backend/artifacts/latest/` by default. That directory is intentionally git-ignored because it contains generated runtime artifacts.
+By default the pipeline processes `0..18` hourly, then `21,24,27,30,33,36,39,42,45,48`. Use `--all-hours` for every `0..48` hour, or `--forecast-hours 0 3 6 9 12` for an explicit subset.
+
+Deployment hardening flags:
+
+```powershell
+python -m backend.ml.outlook_pipeline --grid-stride 3 --min-successful-hours 8 --cache-ttl-hours 12
+```
+
+The pipeline writes to `backend/artifacts/latest/` by default and caches decoded selected HRRR hours under `backend/cache/hrrr_selected/`. Both directories are intentionally git-ignored because they contain generated runtime artifacts. If a new run fails below the minimum successful-hour threshold, the previous `latest/` artifact folder is preserved and failure details are written to `backend/artifacts/latest.failed.json`.
 
 Important leakage guard: the pipeline writes prediction artifacts first, then downloads the current official SPC Day 1 GeoJSON for verification. The official SPC outlook is never passed into the model feature matrix.
 
