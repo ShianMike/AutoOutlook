@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -27,8 +28,12 @@ from backend.hrrr_selected import (
 )
 from backend.ml.gridded_outlook import (
     SPC_RISK_LABELS,
+    apply_category_probability_ceiling,
+    apply_environmental_probability_caps,
     category_grid_from_probabilities,
     gridded_features_from_fields,
+    postprocess_category_grid,
+    probability_tile,
     risk_polygons_from_grid,
 )
 from backend.ml.outlook_pipeline import (
@@ -36,6 +41,8 @@ from backend.ml.outlook_pipeline import (
     PRODUCTION_FORECAST_HOURS,
     _publish_working_dir,
     resolve_forecast_hours,
+    resolve_cli_forecast_hours,
+    run_incremental_pipeline,
     run_pipeline,
 )
 from backend.ml.spc_verification import compare_prediction_to_spc, official_category_grid
@@ -211,6 +218,20 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(resolve_forecast_hours(all_hours=True), list(ALL_FORECAST_HOURS))
         self.assertEqual(resolve_forecast_hours([6, 0, 6]), [0, 6])
 
+    def test_incremental_cli_defaults_to_all_hours(self) -> None:
+        args = argparse.Namespace(
+            incremental=True,
+            publish_each_hour=False,
+            forecast_hours=None,
+            all_hours=False,
+            initial_hours=None,
+        )
+
+        self.assertEqual(resolve_cli_forecast_hours(args), list(ALL_FORECAST_HOURS))
+
+        args.forecast_hours = [0, 6]
+        self.assertEqual(resolve_cli_forecast_hours(args), [0, 6])
+
     def test_hrrr_500mb_wind_vectors_use_real_uv_components_in_knots(self) -> None:
         lats = np.linspace(25.0, 50.0, 30)
         lons = np.linspace(-125.0, -70.0, 30)
@@ -302,8 +323,12 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
     def test_probability_categories_use_spc_style_mdt_label(self) -> None:
         fields = small_fields((2, 3))
-        fields["cape_mu"] = np.full((2, 3), 1800.0)
-        fields["u500"] = np.full((2, 3), 32.0)
+        fields["cape_mu"] = np.full((2, 3), 3200.0)
+        fields["cape_ml"] = np.full((2, 3), 2400.0)
+        fields["u500"] = np.full((2, 3), 42.0)
+        fields["td2m"] = np.full((2, 3), 297.0)
+        fields["srh01"] = np.full((2, 3), 260.0)
+        fields["srh03"] = np.full((2, 3), 340.0)
         features = gridded_features_from_fields(fields, forecast_hour=0)
         probabilities = {
             "tornado": np.array([[0.00, 0.02, 0.05], [0.10, 0.15, 0.30]]),
@@ -364,6 +389,79 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         self.assertTrue(np.all(capped_categories <= SPC_RISK_LABELS.index("ENH")))
 
+    def test_environmental_probability_caps_match_model_category_cap_thresholds(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape_mu"] = np.full((2, 2), 3200.0)
+        fields["cape_ml"] = np.full((2, 2), 2400.0)
+        fields["u500"] = np.full((2, 2), 40.0)
+        fields["srh01"] = np.full((2, 2), 220.0)
+        fields["srh03"] = np.full((2, 2), 320.0)
+        fields["td2m"] = np.full((2, 2), 296.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.80),
+            "hail": np.full((2, 2), 0.90),
+            "wind": np.full((2, 2), 0.90),
+        }
+        candidate_model = {
+            "trainingRows": 6000,
+            "datasetQuality": {
+                "trainingRows": 6000,
+                "minimumRecommendedRows": 5000,
+                "experimentalOnly": False,
+                "status": "candidate",
+            },
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features, candidate_model)
+
+        self.assertLessEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.149)
+        self.assertLessEqual(float(np.nanmax(capped.probabilities["hail"])), 0.44)
+        self.assertLessEqual(float(np.nanmax(capped.probabilities["wind"])), 0.44)
+        categories = category_grid_from_probabilities(capped.probabilities, features, candidate_model)
+        self.assertTrue(np.all(categories <= SPC_RISK_LABELS.index("ENH")))
+
+    def test_category_probability_ceiling_keeps_tiles_consistent_with_final_categories(self) -> None:
+        probabilities = {
+            "tornado": np.array([[0.30, 0.30, 0.30]]),
+            "hail": np.array([[0.60, 0.60, 0.60]]),
+            "wind": np.array([[0.60, 0.60, 0.60]]),
+        }
+        final_categories = np.array([[
+            SPC_RISK_LABELS.index("TSTM"),
+            SPC_RISK_LABELS.index("MRGL"),
+            SPC_RISK_LABELS.index("SLGT"),
+        ]], dtype=np.int16)
+
+        capped = apply_category_probability_ceiling(probabilities, final_categories)
+
+        self.assertLess(float(capped.probabilities["tornado"][0, 0]), 0.02)
+        self.assertLess(float(capped.probabilities["hail"][0, 1]), 0.15)
+        self.assertLess(float(capped.probabilities["wind"][0, 2]), 0.30)
+        self.assertTrue(capped.report["categoryConsistencyCapsApplied"])
+
+    def test_postprocess_downgrades_isolated_high_cells(self) -> None:
+        fields = small_fields((9, 9))
+        fields["cape_mu"] = np.full((9, 9), 3200.0)
+        fields["cape_ml"] = np.full((9, 9), 2200.0)
+        fields["u500"] = np.full((9, 9), 38.0)
+        fields["srh01"] = np.full((9, 9), 240.0)
+        fields["srh03"] = np.full((9, 9), 330.0)
+        fields["td2m"] = np.full((9, 9), 297.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        category_grid = np.ones((9, 9), dtype=np.int16)
+        category_grid[4, 4] = SPC_RISK_LABELS.index("HIGH")
+        probabilities = {
+            "tornado": np.full((9, 9), 0.01),
+            "hail": np.full((9, 9), 0.01),
+            "wind": np.full((9, 9), 0.01),
+        }
+
+        processed = postprocess_category_grid(category_grid, probabilities, features)
+
+        self.assertLess(int(processed.category_grid[4, 4]), SPC_RISK_LABELS.index("HIGH"))
+        self.assertGreaterEqual(processed.report["downgradedCells"]["isolatedComponent"], 1)
+
     def test_risk_polygons_are_geojson_features(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
         lons = np.linspace(-100.0, -96.0, 5)
@@ -388,6 +486,24 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 x1, y1 = ring[idx + 1]
                 area += x0 * y1 - x1 * y0
             self.assertLessEqual(area / 2.0, 0.0)
+
+    def test_probability_tile_downsampling_preserves_block_max_categories_and_probabilities(self) -> None:
+        lats = np.linspace(30.0, 33.0, 4)
+        lons = np.linspace(-100.0, -97.0, 4)
+        category = np.zeros((4, 4), dtype=np.int16)
+        category[1, 1] = SPC_RISK_LABELS.index("SLGT")
+        probabilities = {
+            "tornado": np.zeros((4, 4)),
+            "hail": np.zeros((4, 4)),
+            "wind": np.zeros((4, 4)),
+        }
+        probabilities["hail"][1, 1] = 0.29
+
+        tile = probability_tile(lats, lons, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=4)
+
+        self.assertEqual(tile["shape"], [1, 1])
+        self.assertEqual(tile["categoryLabel"], [["SLGT"]])
+        self.assertEqual(tile["probabilities"]["hail"], [[0.29]])
 
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
@@ -491,6 +607,98 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(metadata["failedHours"][0]["forecastHour"], 1)
             self.assertTrue((Path(tmp) / "latest" / "metadata.json").exists())
 
+    def test_incremental_pipeline_publishes_ready_hours_without_waiting_for_failures(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            if ref.forecast_hour == 1:
+                raise RuntimeError("missing hour")
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            probs[1:4, 1:4] = 0.20
+            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            index = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+            self.assertEqual(index["status"], "partial")
+            self.assertEqual(index["readyForecastHours"], [0])
+            self.assertEqual(index["failedForecastHours"], [1])
+            self.assertTrue((output_dir / "hours" / "f00" / "risk_polygons.geojson").exists())
+            self.assertTrue((output_dir / "hours" / "f00" / "probability_tile.json").exists())
+            self.assertEqual(
+                json.loads((output_dir / "hours" / "f01" / "metadata.json").read_text(encoding="utf-8"))["status"],
+                "failed",
+            )
+
+    def test_incremental_pipeline_merges_existing_ready_hours(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        fetched_hours: list[int] = []
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            fetched_hours.append(ref.forecast_hour)
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            probs[1:4, 1:4] = 0.20
+            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            first = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+            second = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+            self.assertEqual(first["readyForecastHours"], [0])
+            self.assertEqual(second["readyForecastHours"], [0, 1])
+            self.assertEqual(second["requestedForecastHours"], [0, 1])
+            self.assertEqual(fetched_hours, [0, 1])
+            self.assertTrue((output_dir / "hours" / "f00" / "probability_tile.json").exists())
+            self.assertTrue((output_dir / "hours" / "f01" / "probability_tile.json").exists())
+
     def test_pipeline_failure_preserves_previous_latest_artifacts(self) -> None:
         cycle = HrrrCycle("20240504", 12)
 
@@ -562,6 +770,28 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["cycle"], "unit")
+
+    def test_server_serves_incremental_hour_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            hour_dir = artifact_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            (artifact_dir / "index.json").write_text(json.dumps({"status": "running", "readyForecastHours": [0]}), encoding="utf-8")
+            (hour_dir / "risk_polygons.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": []}), encoding="utf-8")
+            (hour_dir / "probability_tile.json").write_text(json.dumps({"forecastHour": 0}), encoding="utf-8")
+            (hour_dir / "metadata.json").write_text(json.dumps({"forecastHour": 0, "status": "ready"}), encoding="utf-8")
+            from backend import server
+
+            with patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir):
+                client = server.app.test_client()
+                index_response = client.get("/api/outlook/incremental")
+                tile_response = client.get("/api/outlook/incremental/hour/0/probability-tile")
+                meta_response = client.get("/api/outlook/incremental/hour/0/metadata")
+
+            self.assertEqual(index_response.status_code, 200)
+            self.assertEqual(tile_response.status_code, 200)
+            self.assertEqual(meta_response.status_code, 200)
+            self.assertEqual(tile_response.get_json()["forecastHour"], 0)
 
 
 if __name__ == "__main__":

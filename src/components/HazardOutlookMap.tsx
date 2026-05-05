@@ -211,7 +211,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="font-display font-extrabold uppercase text-[12px] tracking-wider truncate">
+        <span className="min-w-0 font-display font-extrabold uppercase text-[12px] leading-tight tracking-wider">
           {title}
         </span>
         <div className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0 flex items-center gap-2">
@@ -507,7 +507,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
         </ComposableMap>
 
         {/* Legend overlay (bottom-left) */}
-        <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper/95 px-2 py-1 shadow-retro-sm">
+        <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper px-2 py-1 shadow-retro-sm">
           <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
             {title}
           </div>

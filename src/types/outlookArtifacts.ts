@@ -25,10 +25,14 @@ export interface OutlookArtifactMetadata {
   generatedAtISO: string;
   cycle: string;
   cycleTimeISO?: string;
+  selectedArtifactForecastHour?: number;
+  artifactForecastHour?: number;
+  artifactValidTimeISO?: string;
   forecastHours?: number[];
   featureSchemaHash?: string;
   selectedHrrrTerms?: string[];
   aggregateCategoryCounts?: Record<string, number>;
+  categoryCounts?: Record<string, number>;
   artifacts?: Record<string, string | null>;
   spcVerification?: {
     agreementFraction?: number | null;
@@ -39,6 +43,11 @@ export interface OutlookArtifactMetadata {
     spcExpireTimeISO?: string;
     leakageGuard?: string;
   } | null;
+  mode?: 'full' | 'incremental';
+  status?: 'running' | 'complete' | 'partial' | 'failed';
+  readyForecastHours?: number[];
+  failedForecastHours?: number[];
+  pendingForecastHours?: number[];
 }
 
 export interface OutlookProbabilityTile {
@@ -70,6 +79,8 @@ export interface OutlookProbabilityTiles {
   riskLabels?: ArtifactRiskCategory[];
   gridStride?: number;
   tileStride?: number;
+  environmentalCapsApplied?: boolean;
+  categoryConsistencyCapsApplied?: boolean;
   hours: OutlookProbabilityHour[];
 }
 
@@ -78,4 +89,40 @@ export interface OutlookArtifacts {
   riskPolygons: OutlookArtifactFeatureCollection;
   aggregateRiskPolygons?: OutlookArtifactFeatureCollection;
   probabilityTiles?: OutlookProbabilityTiles;
+  timelineSummary?: OutlookIncrementalSummary;
+  incrementalIndex?: OutlookIncrementalIndex;
+  selectedArtifactForecastHour?: number;
+  selectedHourStatus?: 'ready' | 'pending' | 'failed' | 'missing';
+}
+
+export interface OutlookIncrementalIndex extends OutlookArtifactMetadata {
+  mode: 'incremental';
+  requestedForecastHours: number[];
+  readyForecastHours: number[];
+  failedForecastHours: number[];
+  pendingForecastHours: number[];
+  latestReadyForecastHour?: number | null;
+  status: 'running' | 'complete' | 'partial' | 'failed';
+  failedHours?: Array<{ forecastHour: number; stage?: string; error?: string }>;
+  gridStride?: number;
+  tileStride?: number;
+}
+
+export interface OutlookTimelineHourSummary {
+  forecastHour: number;
+  validTimeISO?: string;
+  category: ArtifactRiskCategory;
+  mainHazard?: 'tornado' | 'hail' | 'wind' | null;
+  peakHazardProbability: number;
+  significantSevere: boolean;
+  coverage: number;
+  categoryCounts?: Record<string, number>;
+  probabilityMax?: Partial<Record<'tornado' | 'hail' | 'wind', number>>;
+}
+
+export interface OutlookIncrementalSummary {
+  cycle?: string;
+  cycleTimeISO?: string;
+  generatedAtISO?: string;
+  hours: OutlookTimelineHourSummary[];
 }

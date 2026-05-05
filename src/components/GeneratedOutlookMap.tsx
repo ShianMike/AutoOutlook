@@ -2,13 +2,15 @@ import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { HourSnapshot, RiskCategory, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts, OutlookArtifactFeatureCollection, ArtifactRiskCategory } from '../types/outlookArtifacts';
+import { artifactRiskToFeatureCollection, getArtifactHourTile, getArtifactMaxCategory } from '../utils/artifactProbabilities';
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
+import MapWatermark from './MapWatermark';
 
 const STATES_URL = '/us-states-10m.json';
 
-type ArtifactState = 'loading' | 'ready' | 'missing' | 'error';
+type ArtifactState = 'loading' | 'ready' | 'missing' | 'error' | 'pending' | 'failed';
 
 interface GeneratedOutlookMapProps {
   snapshot: HourSnapshot | null;
@@ -72,17 +74,6 @@ function displayCategory(category: ArtifactRiskCategory | RiskCategory | undefin
   return category === 'MOD' ? 'MDT' : category;
 }
 
-function filterHourCollection(
-  collection: OutlookArtifactFeatureCollection | undefined,
-  forecastHour: number | undefined,
-): OutlookArtifactFeatureCollection {
-  if (!collection || forecastHour === undefined) return { type: 'FeatureCollection', features: [] };
-  const features = collection.features
-    .filter((feature) => feature.properties.forecastHour === forecastHour)
-    .filter((feature) => feature.properties.category !== 'NONE');
-  return { type: 'FeatureCollection', features };
-}
-
 function maxCategory(collection: OutlookArtifactFeatureCollection): ArtifactRiskCategory | undefined {
   return collection.features.reduce<ArtifactRiskCategory | undefined>((best, feature) => {
     const category = feature.properties.category;
@@ -138,18 +129,25 @@ function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
 
 export default function GeneratedOutlookMap({ snapshot, status, artifacts, message }: GeneratedOutlookMapProps) {
   const selectedForecastHour = snapshot?.forecastHour;
-  const riskPolygons = useMemo(
-    () => normalizeArtifactCollection(artifacts?.riskPolygons),
-    [artifacts?.riskPolygons],
+  const selectedTile = useMemo(
+    () => getArtifactHourTile(artifacts, selectedForecastHour),
+    [artifacts, selectedForecastHour],
+  );
+  const tileRiskCollection = useMemo(
+    () => normalizeArtifactCollection(artifactRiskToFeatureCollection(selectedTile)),
+    [selectedTile],
   );
   const selectedCollection = useMemo(
-    () => filterHourCollection(riskPolygons, selectedForecastHour),
-    [riskPolygons, selectedForecastHour],
+    () => tileRiskCollection ?? { type: 'FeatureCollection' as const, features: [] },
+    [tileRiskCollection],
   );
+  const usingTileRisk = Boolean(selectedTile);
   const renderedCollection = selectedCollection;
   const renderedMax = maxCategory(renderedCollection);
+  const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
   const hasGeneratedLayer = renderedCollection.features.length > 0;
-  const mapCategory = hasGeneratedLayer ? renderedMax : undefined;
+  const hasGeneratedArtifact = Boolean(selectedTile);
+  const mapCategory = hasGeneratedArtifact ? tileMax ?? renderedMax : undefined;
 
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
 
@@ -189,17 +187,20 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   );
 
   const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
-  const hasUpperAirOverlay = hasGeneratedLayer && snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
+  const hasUpperAirOverlay = snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="font-display font-extrabold uppercase text-[13px] tracking-wider truncate">
+        <span className="min-w-0 font-display font-extrabold uppercase text-[13px] leading-tight tracking-wider">
           HRRR/XGBoost Risk Levels
         </span>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0">
-          CAT {displayCategory(mapCategory)}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <MapWatermark className="hidden sm:inline-flex" />
+          <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
+            CAT {displayCategory(mapCategory)}
+          </span>
+        </div>
       </header>
 
       <div className="aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
@@ -264,25 +265,25 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                       style={{
                         default: {
                           fill: style.fill,
-                          fillOpacity: 0.5,
-                          stroke: style.stroke,
-                          strokeWidth: 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
+                          stroke: usingTileRisk ? '#111111' : style.stroke,
+                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         hover: {
                           fill: style.fill,
-                          fillOpacity: 0.5,
-                          stroke: style.stroke,
-                          strokeWidth: 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
+                          stroke: usingTileRisk ? '#111111' : style.stroke,
+                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         pressed: {
                           fill: style.fill,
-                          fillOpacity: 0.5,
-                          stroke: style.stroke,
-                          strokeWidth: 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
+                          stroke: usingTileRisk ? '#111111' : style.stroke,
+                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -401,22 +402,28 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
           ))}
         </ComposableMap>
 
-        {!hasGeneratedLayer && (
+        {!hasGeneratedArtifact && (
           <div className="absolute inset-4 flex items-center justify-center">
-            <div className="max-w-[520px] border-[3px] border-ink bg-paper/95 p-4 shadow-retro">
+            <div className="max-w-[520px] border-[3px] border-ink bg-paper p-4 shadow-retro">
               <div className="font-display text-[14px] font-extrabold uppercase tracking-wider">
-                Generated outlook layer unavailable
+                {status === 'loading' || status === 'pending'
+                  ? 'Forecast hour unavailable'
+                  : 'Generated outlook layer unavailable'}
               </div>
               <p className="mt-2 font-mono text-[11px] leading-relaxed text-ink/70">
                 {status === 'loading'
-                  ? 'Loading HRRR/XGBoost outlook artifacts…'
-                  : message ?? 'Run the HRRR/XGBoost artifact pipeline to publish risk polygons for this map.'}
+                  ? 'Selected forecast hour is still fetching generated outlook artifacts.'
+                  : status === 'pending'
+                    ? message ?? 'Selected forecast hour is still generating.'
+                    : status === 'failed'
+                      ? message ?? 'Selected forecast hour failed to generate.'
+                      : message ?? 'Run the HRRR/XGBoost artifact pipeline to publish risk polygons for this map.'}
               </p>
             </div>
           </div>
         )}
 
-        <div className="absolute bottom-2 left-2 border-[2px] border-ink bg-paper/95 px-2.5 py-2 shadow-retro-sm">
+        <div className="absolute bottom-2 left-2 border-[2px] border-ink bg-paper px-2.5 py-2 shadow-retro-sm">
           <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-ink/70 leading-none mb-1.5">
             Generated risk categories
           </div>
@@ -435,7 +442,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
         </div>
 
         {artifacts?.metadata && (
-          <div className="absolute right-2 bottom-2 border-[2px] border-ink bg-paper/95 px-2.5 py-2 shadow-retro-sm font-mono text-[9px] uppercase tracking-widest text-ink/70">
+          <div className="absolute right-2 bottom-2 border-[2px] border-ink bg-paper px-2.5 py-2 shadow-retro-sm font-mono text-[9px] uppercase tracking-widest text-ink/70">
             <div>{artifacts.metadata.cycle}</div>
             <div>Generated {formatGeneratedAt(artifacts.metadata.generatedAtISO)}</div>
           </div>

@@ -42,7 +42,7 @@
     @apply inline-flex items-center gap-1.5 border-[2px] border-ink px-2 py-0.5 font-mono text-[11px] font-bold uppercase tracking-wider shadow-retro-sm bg-paper;
   }
   .retro-chip {
-    @apply inline-flex items-center justify-center border-[3px] border-ink px-3 py-1 font-display font-extrabold uppercase tracking-wider shadow-retro-sm;
+    @apply inline-flex items-center justify-center border-[3px] border-ink bg-paper px-3 py-1 font-display font-extrabold uppercase tracking-wider shadow-retro-sm;
   }
   .retro-button {
     @apply inline-flex items-center justify-center gap-2 border-[3px] border-ink bg-paper px-3 py-2 font-display font-bold uppercase text-sm tracking-wider shadow-retro-sm transition-transform select-none cursor-pointer;
@@ -76,12 +76,18 @@
   .retro-scanline {
     position: relative;
     overflow: hidden;
+    isolation: isolate;
+  }
+  .retro-scanline > * {
+    position: relative;
+    z-index: 1;
   }
   .retro-scanline::after {
     content: '';
     position: absolute;
     inset: 0;
     pointer-events: none;
+    z-index: 0;
     background: repeating-linear-gradient(
       to bottom,
       rgba(17, 17, 17, 0) 0,

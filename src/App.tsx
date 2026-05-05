@@ -1,5 +1,6 @@
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
+import { useOutlookArtifacts } from './hooks/useOutlookArtifacts';
 import { FORECAST_HOUR_LABELS } from './types/forecast';
 
 import DashboardSidebar from './components/DashboardSidebar';
@@ -18,6 +19,7 @@ export default function App() {
   const auto = useAutoForecast();
   const hour = useForecastHour(auto.bundle);
   const snapshot = hour.snapshot;
+  const outlookArtifacts = useOutlookArtifacts(snapshot?.forecastHour, snapshot?.validTimeISO);
   const mlDriven = Boolean(auto.bundle?.mlModel?.active && auto.bundle.mlHazardHours);
   const hourLabel = snapshot
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
@@ -34,6 +36,8 @@ export default function App() {
           bundle={auto.bundle}
           selectedValidTime={snapshot?.validTimeISO}
           selectedHourLabel={hourLabel}
+          artifacts={outlookArtifacts.artifacts}
+          artifactStatus={outlookArtifacts.status}
         />
 
         <main className="w-full min-w-0 flex-1 px-3 py-2 sm:px-4 xl:px-5 flex flex-col gap-3 xl:gap-4">
@@ -46,19 +50,20 @@ export default function App() {
               onNext={hour.next}
               onPrev={hour.prev}
               onTogglePlay={hour.togglePlay}
+              artifactIndex={outlookArtifacts.artifacts?.incrementalIndex}
             />
           </section>
 
           <section id="outlook-map" className="scroll-mt-4">
-            <OutlookMapPanel snapshot={snapshot} />
+            <OutlookMapPanel snapshot={snapshot} outlookArtifacts={outlookArtifacts} />
           </section>
 
           <section id="primary-outlook" className="scroll-mt-4">
-            <PrimaryOutlookBanner snapshot={snapshot} />
+            <PrimaryOutlookBanner snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
           </section>
 
           <section id="hazards" className="scroll-mt-4">
-            <HazardProbabilityBoard snapshot={snapshot} />
+            <HazardProbabilityBoard snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
           </section>
 
           <section id="ingredients" className="scroll-mt-4">
@@ -66,7 +71,12 @@ export default function App() {
           </section>
 
           <section id="timeline" className="scroll-mt-4">
-            <RiskTimeline bundle={auto.bundle} selectedForecastHour={snapshot?.forecastHour} />
+            <RiskTimeline
+              bundle={auto.bundle}
+              selectedForecastHour={snapshot?.forecastHour}
+              artifacts={outlookArtifacts.artifacts}
+              artifactStatus={outlookArtifacts.status}
+            />
           </section>
 
           <section id="discussion" className="scroll-mt-4">
@@ -74,7 +84,11 @@ export default function App() {
           </section>
 
           <section id="readiness" className="scroll-mt-4">
-            <WatchReadinessPanel snapshot={snapshot} />
+            <WatchReadinessPanel
+              snapshot={snapshot}
+              artifacts={outlookArtifacts.artifacts}
+              artifactStatus={outlookArtifacts.status}
+            />
           </section>
 
           <section id="system-status" className="scroll-mt-4">
@@ -84,6 +98,7 @@ export default function App() {
               attempted={auto.attempted}
               selectedHour={snapshot?.forecastHour}
               selectedValidTime={snapshot?.validTimeISO}
+              outlookArtifacts={outlookArtifacts}
               refreshIntervalMs={auto.refreshIntervalMs}
               onRefresh={auto.refreshNow}
             />

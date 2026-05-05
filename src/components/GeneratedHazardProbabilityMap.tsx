@@ -1,30 +1,40 @@
 import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { HourSnapshot } from '../types/forecast';
-import type { OutlookArtifacts, OutlookProbabilityTile } from '../types/outlookArtifacts';
+import type { HourSnapshot, UpperAirVector } from '../types/forecast';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import {
+  artifactProbabilityToFeatureCollection,
+  artifactThunderToFeatureCollection,
+  getArtifactHazardPeak,
+  getArtifactHourTile,
+  getArtifactThunderCoverage,
+  type ArtifactHazardKey,
+  type GeneratedArtifactHazardKey,
+} from '../utils/artifactProbabilities';
 import { HAZARD_CONFIGS } from '../utils/hazardProbabilityBands';
+import { map500mbLines } from '../utils/upperAirLines';
+import { map500mbWindVectors } from '../utils/upperAirWind';
+import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
+import MapWatermark from './MapWatermark';
 
 const STATES_URL = '/us-states-10m.json';
 
-export type GeneratedHazardKey = 'tornado' | 'hail' | 'wind';
+export type GeneratedHazardKey = GeneratedArtifactHazardKey;
 
 interface GeneratedHazardProbabilityMapProps {
   snapshot: HourSnapshot | null;
   hazard: GeneratedHazardKey;
   title: string;
   artifacts: OutlookArtifacts | null;
-}
-
-interface HazardPoint {
-  lon: number;
-  lat: number;
-  probability: number;
-  bucket: number;
+  status: ArtifactStatus;
+  showWatermark?: boolean;
 }
 
 export function hasGeneratedHazardTile(
   artifacts: OutlookArtifacts | null,
   forecastHour: number | undefined,
+  _status?: ArtifactStatus,
 ): boolean {
   if (forecastHour === undefined) return false;
   return Boolean(artifacts?.probabilityTiles?.hours.some((hour) => hour.forecastHour === forecastHour));
@@ -35,30 +45,71 @@ export default function GeneratedHazardProbabilityMap({
   hazard,
   title,
   artifacts,
+  status,
+  showWatermark = false,
 }: GeneratedHazardProbabilityMapProps) {
   const forecastHour = snapshot?.forecastHour;
-  const probabilityHour = useMemo(
-    () => artifacts?.probabilityTiles?.hours.find((hour) => hour.forecastHour === forecastHour),
-    [artifacts?.probabilityTiles, forecastHour],
-  );
-  const tile = probabilityHour?.tile;
+  const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
+  const displayForecastHour = tile?.forecastHour ?? forecastHour;
   const cfg = HAZARD_CONFIGS[hazard];
-  const points = useMemo(
-    () => tileToPoints(tile, hazard),
+  const featureCollection = useMemo(
+    () => hazard === 'thunder'
+      ? artifactThunderToFeatureCollection(tile)
+      : artifactProbabilityToFeatureCollection(tile, hazard),
     [tile, hazard],
   );
-  const peakProb = points.reduce((max, point) => Math.max(max, point.probability), 0);
+  const peakProb = hazard === 'thunder'
+    ? getArtifactThunderCoverage(tile) ?? 0
+    : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
   const peakPct = peakProb >= 0.005 ? `${Math.round(peakProb * 100)}%` : '--';
+  const metricLabel = hazard === 'thunder' ? `COVER ${peakPct}` : `PEAK ${peakPct}`;
+  const legendItems = cfg.thresholds.map((threshold, i) => ({ label: cfg.labels[i], color: cfg.colors[i], threshold }));
+  const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
+  const upperAirLineCollection = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: upperAirLines.map((line, idx) => {
+        const style = upperAirLineVisualStyle(snapshot, idx, upperAirLines.length);
+        return {
+          type: 'Feature' as const,
+          properties: { idx, value: line.value, ...style },
+          geometry: { type: 'LineString' as const, coordinates: line.coords },
+        };
+      }),
+    }),
+    [snapshot, upperAirLines],
+  );
+  const upperAirStreakCollection = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: buildUpperAirIntensitySegments(snapshot, upperAirLines).map((segment, idx) => ({
+        type: 'Feature' as const,
+        properties: {
+          idx,
+          stroke: segment.stroke,
+          strokeWidth: segment.strokeWidth,
+          strokeOpacity: segment.strokeOpacity,
+        },
+        geometry: { type: 'LineString' as const, coordinates: segment.coords },
+      })),
+    }),
+    [snapshot, upperAirLines],
+  );
+  const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
+  const hasUpperAirOverlay = snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="font-display font-extrabold uppercase text-[12px] tracking-wider truncate">
+        <span className="min-w-0 font-display font-extrabold uppercase text-[12px] leading-tight tracking-wider">
           {title}
         </span>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0">
-          PEAK {peakPct}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          {showWatermark && <MapWatermark className="hidden sm:inline-flex" />}
+          <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
+            {metricLabel}
+          </span>
+        </div>
       </header>
       <div className="aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
         <ComposableMap
@@ -89,23 +140,63 @@ export default function GeneratedHazardProbabilityMap({
             }
           </Geographies>
 
-          {points.map((point, idx) => {
-            const size = 2.4 + point.bucket * 0.65;
-            return (
-              <Marker key={`${hazard}-tile-${idx}`} coordinates={[point.lon, point.lat]}>
-                <rect
-                  x={-size / 2}
-                  y={-size / 2}
-                  width={size}
-                  height={size}
-                  fill={cfg.colors[point.bucket]}
-                  fillOpacity={0.62}
-                  stroke="#111111"
-                  strokeWidth={0.12}
-                />
-              </Marker>
-            );
-          })}
+          {hasUpperAirOverlay && upperAirLineCollection.features.length > 0 && (
+            <Geographies geography={upperAirLineCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => (
+                  <Geography
+                    key={`artifact-h500-base-${geo.rsmKey ?? index}`}
+                    geography={geo}
+                    style={{
+                      default: { fill: 'none', stroke: '#707070', strokeWidth: 0.85, strokeOpacity: 0.28, outline: 'none' },
+                      hover:   { fill: 'none', stroke: '#707070', strokeWidth: 0.85, strokeOpacity: 0.28, outline: 'none' },
+                      pressed: { fill: 'none', stroke: '#707070', strokeWidth: 0.85, strokeOpacity: 0.28, outline: 'none' },
+                    }}
+                  />
+                ))
+              }
+            </Geographies>
+          )}
+
+          {featureCollection.features.length > 0 && (
+            <Geographies geography={featureCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => (
+                  <Geography
+                    key={`artifact-prob-${hazard}-${geo.rsmKey ?? index}`}
+                    geography={geo}
+                    tabIndex={-1}
+                    style={{
+                      default: {
+                        fill: geo.properties.color as string,
+                        fillOpacity: 0.58,
+                        stroke: '#111111',
+                        strokeWidth: 0.08,
+                        outline: 'none',
+                        pointerEvents: 'none',
+                      },
+                      hover: {
+                        fill: geo.properties.color as string,
+                        fillOpacity: 0.58,
+                        stroke: '#111111',
+                        strokeWidth: 0.08,
+                        outline: 'none',
+                        pointerEvents: 'none',
+                      },
+                      pressed: {
+                        fill: geo.properties.color as string,
+                        fillOpacity: 0.58,
+                        stroke: '#111111',
+                        strokeWidth: 0.08,
+                        outline: 'none',
+                        pointerEvents: 'none',
+                      },
+                    }}
+                  />
+                ))
+              }
+            </Geographies>
+          )}
 
           <Geographies geography={STATES_URL}>
             {({ geographies }) =>
@@ -122,27 +213,117 @@ export default function GeneratedHazardProbabilityMap({
               ))
             }
           </Geographies>
+
+          {hasUpperAirOverlay && upperAirLineCollection.features.length > 0 && (
+            <Geographies geography={upperAirLineCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => (
+                  <Geography
+                    key={`artifact-h500-top-${geo.rsmKey ?? index}`}
+                    geography={geo}
+                    style={{
+                      default: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                      hover: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                      pressed: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                    }}
+                  />
+                ))
+              }
+            </Geographies>
+          )}
+
+          {hasUpperAirOverlay && upperAirStreakCollection.features.length > 0 && (
+            <Geographies geography={upperAirStreakCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => (
+                  <Geography
+                    key={`artifact-h500-streak-${geo.rsmKey ?? index}`}
+                    geography={geo}
+                    style={{
+                      default: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                      hover: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                      pressed: {
+                        fill: 'none',
+                        stroke: geo.properties.stroke as string,
+                        strokeWidth: geo.properties.strokeWidth as number,
+                        strokeOpacity: geo.properties.strokeOpacity as number,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        outline: 'none',
+                      },
+                    }}
+                  />
+                ))
+              }
+            </Geographies>
+          )}
+
+          {hasUpperAirOverlay && windVectors.map((vector, idx) => (
+            <Marker key={`generated-hazard-wind-vector-top-${idx}`} coordinates={[vector.lon, vector.lat]}>
+              <WindBarb vector={vector} top />
+            </Marker>
+          ))}
         </ComposableMap>
 
-        <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper/95 px-2 py-1 shadow-retro-sm">
+        <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper px-2 py-1 shadow-retro-sm">
           <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
             HRRR/XGBoost {title}
           </div>
           <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
-            {cfg.thresholds.map((threshold, i) => (
-              <div key={threshold} className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+            {legendItems.map((item) => (
+              <div key={item.label} className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
                 <span
                   className="inline-block w-3 h-2 border-[1.5px] border-ink shrink-0"
-                  style={{ background: cfg.colors[i] }}
+                  style={{ background: item.color }}
                   aria-hidden
                 />
-                <span className="text-ink">{cfg.labels[i]}</span>
+                <span className="text-ink">{item.label}</span>
               </div>
             ))}
           </div>
         </div>
 
-        {points.length === 0 && (
+        {featureCollection.features.length === 0 && (
           <div className="absolute top-1.5 right-1.5 border-[2px] border-ink bg-paper px-2 py-1 shadow-retro-sm font-mono text-[10px] uppercase tracking-widest">
             BELOW THRESHOLD
           </div>
@@ -152,33 +333,29 @@ export default function GeneratedHazardProbabilityMap({
   );
 }
 
-function tileToPoints(tile: OutlookProbabilityTile | undefined, hazard: GeneratedHazardKey): HazardPoint[] {
-  if (!tile) return [];
-  const probs = tile.probabilities[hazard];
-  const cfg = HAZARD_CONFIGS[hazard];
-  const points: HazardPoint[] = [];
-  for (let row = 0; row < probs.length; row += 1) {
-    for (let col = 0; col < probs[row].length; col += 1) {
-      const probability = Number(probs[row][col]);
-      const lat = Number(tile.lats[row]?.[col]);
-      const lon = Number(tile.lons[row]?.[col]);
-      const riskOrdinal = Number(tile.categoryOrdinal[row]?.[col] ?? 0);
-      if (!Number.isFinite(probability) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      if (riskOrdinal < 2) continue;
-      const rawBucket = probabilityBucket(probability, cfg.thresholds);
-      if (rawBucket < 0) continue;
-      const cappedBucket = Math.min(rawBucket, riskOrdinal - 2);
-      if (cappedBucket < 0) continue;
-      points.push({ lon, lat, probability, bucket: cappedBucket });
-    }
-  }
-  return points;
-}
-
-function probabilityBucket(probability: number, thresholds: number[]): number {
-  let bucket = -1;
-  thresholds.forEach((threshold, idx) => {
-    if (probability >= threshold) bucket = idx;
+function WindBarb({ vector, top = false }: { vector: UpperAirVector; top?: boolean }) {
+  if (!top || vector.speedKt < 22) return null;
+  const length = 7;
+  const featherCount = Math.max(1, Math.min(4, Math.round(vector.speedKt / 22)));
+  const angleDeg = (Math.atan2(-vector.vKt, vector.uKt) * 180 / Math.PI) + 180;
+  const opacity = 0.72;
+  const stroke = '#50565c';
+  const halo = '#ffffff';
+  const feathers = (prefix: string) => Array.from({ length: featherCount }, (_, i) => {
+    const x = length - i * 1.8;
+    return <path key={`${prefix}-${i}`} d={`M ${x} 0 L ${x - 2.5} 3.3`} />;
   });
-  return bucket;
+
+  return (
+    <g transform={`rotate(${angleDeg})`} opacity={opacity} strokeLinecap="square">
+      <g stroke={halo} strokeWidth={2.1} fill="none" opacity={0.68}>
+        <path d={`M ${-length} 0 L ${length} 0`} />
+        {feathers('halo')}
+      </g>
+      <g stroke={stroke} strokeWidth={1.05} fill="none">
+        <path d={`M ${-length} 0 L ${length} 0`} />
+        {feathers('main')}
+      </g>
+    </g>
+  );
 }

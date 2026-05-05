@@ -1,5 +1,6 @@
 flask>=3.1
 flask-cors>=6.0
+gunicorn>=22.0
 siphon>=0.10
 metpy>=1.7
 xarray>=2024.1

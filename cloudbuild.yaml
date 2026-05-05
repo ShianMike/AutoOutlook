@@ -1,0 +1,49 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: autooutlook
+  _REPOSITORY: cloud-run-source-deploy
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --allow-unauthenticated
+      - --memory
+      - 4Gi
+      - --cpu
+      - "2"
+      - --timeout
+      - "300"
+      - --concurrency
+      - "8"
+      - --min-instances
+      - "1"
+      - --max-instances
+      - "3"
+      - --cpu-boost
+      - --set-env-vars
+      - AUTOOUTLOOK_CORS_ORIGINS=*,WEB_CONCURRENCY=1,WEB_THREADS=8,GUNICORN_TIMEOUT=300
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID

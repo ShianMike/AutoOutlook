@@ -1,5 +1,6 @@
 import type { ForecastBundle } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
+import type { OutlookIncrementalIndex } from '../types/outlookArtifacts';
 import RetroButton from './retro/RetroButton';
 import RetroBadge from './retro/RetroBadge';
 
@@ -11,6 +12,7 @@ interface ForecastTimeSliderProps {
   onNext: () => void;
   onPrev: () => void;
   onTogglePlay: () => void;
+  artifactIndex?: OutlookIncrementalIndex;
 }
 
 function fmtValid(iso?: string): string {
@@ -22,6 +24,27 @@ function fmtValid(iso?: string): string {
   return `${day} · ${hr}${mn}Z`;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+const VALID_TIME_TOLERANCE_MS = 20 * 60 * 1000;
+
+function artifactHourForStop(
+  artifactIndex: OutlookIncrementalIndex | undefined,
+  stop: { forecastHour: number; validTimeISO?: string },
+): number {
+  if (artifactIndex?.cycleTimeISO && stop.validTimeISO) {
+    const cycleMs = Date.parse(artifactIndex.cycleTimeISO);
+    const validMs = Date.parse(stop.validTimeISO);
+    if (Number.isFinite(cycleMs) && Number.isFinite(validMs)) {
+      const rawHours = (validMs - cycleMs) / HOUR_MS;
+      const roundedHours = Math.round(rawHours);
+      if (Math.abs(validMs - (cycleMs + roundedHours * HOUR_MS)) <= VALID_TIME_TOLERANCE_MS) {
+        return roundedHours;
+      }
+    }
+  }
+  return stop.forecastHour;
+}
+
 export default function ForecastTimeSlider({
   bundle,
   index,
@@ -30,6 +53,7 @@ export default function ForecastTimeSlider({
   onNext,
   onPrev,
   onTogglePlay,
+  artifactIndex,
 }: ForecastTimeSliderProps) {
   const stops = bundle?.hours ?? [];
   const totalStops = Math.max(stops.length, 1);
@@ -93,6 +117,16 @@ export default function ForecastTimeSlider({
             const isActive = i === safeIndex;
             const lbl = FORECAST_HOUR_LABELS[stop.forecastHour] ?? `+${stop.forecastHour}h`;
             const showLabel = !isHourly;
+            const artifactHour = artifactHourForStop(artifactIndex, stop);
+            const artifactState = artifactIndex
+              ? artifactIndex.readyForecastHours.includes(artifactHour)
+                ? 'ready'
+                : artifactIndex.failedForecastHours.includes(artifactHour)
+                  ? 'failed'
+                  : artifactIndex.pendingForecastHours.includes(artifactHour)
+                    ? 'pending'
+                    : 'missing'
+              : 'missing';
             return (
               <button
                 key={stop.forecastHour}
@@ -106,7 +140,11 @@ export default function ForecastTimeSlider({
                   className={[
                     'block rotate-45 border-ink transition-all',
                     isHourly ? 'w-[8px] h-[8px] border-[2px]' : 'w-[20px] h-[20px] border-[3px]',
-                    isActive ? 'bg-signal-amber shadow-retro-sm scale-110' : 'bg-paper hover:bg-signal-amber',
+                    isActive ? 'bg-signal-amber shadow-retro-sm scale-110' :
+                      artifactState === 'ready' ? 'bg-paper hover:bg-signal-amber' :
+                        artifactState === 'failed' ? 'bg-signal-red opacity-80' :
+                          artifactState === 'pending' ? 'bg-paper opacity-45' :
+                            'bg-paper hover:bg-signal-amber',
                   ].join(' ')}
                 />
                 {showLabel && (

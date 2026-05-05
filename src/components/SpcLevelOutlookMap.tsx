@@ -781,7 +781,7 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="font-display font-extrabold uppercase text-[13px] tracking-wider truncate">
+        <span className="min-w-0 font-display font-extrabold uppercase text-[13px] leading-tight tracking-wider">
           SPC Levels Outlook
         </span>
         <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0">
@@ -1032,7 +1032,7 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
           ))}
         </ComposableMap>
 
-        <div className="absolute bottom-2 left-2 border-[2px] border-ink bg-paper/95 px-2.5 py-2 shadow-retro-sm">
+        <div className="absolute bottom-2 left-2 border-[2px] border-ink bg-paper px-2.5 py-2 shadow-retro-sm">
           <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-ink/70 leading-none mb-1.5">
             Probability of occurrence within 40km
           </div>

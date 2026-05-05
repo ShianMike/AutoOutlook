@@ -66,13 +66,13 @@ function clamp01(x: number): number {
 // on; strong forcing can overcome even a nasty cap.
 function initiationModifier(ing: Ingredients, floor = 0.35): number {
   const capFactor =
-    ing.capStrength === 'strong' ? 0.30 :
-    ing.capStrength === 'moderate' ? 0.55 :
-    ing.capStrength === 'weak' ? 0.82 : 1.0;
+    ing.capStrength === 'strong' ? 0.22 :
+    ing.capStrength === 'moderate' ? 0.46 :
+    ing.capStrength === 'weak' ? 0.74 : 1.0;
   const forcingRelief =
-    ing.frontSignal === 'strong' ? 0.25 :
-    ing.frontSignal === 'moderate' ? 0.12 :
-    ing.frontSignal === 'weak' ? 0.03 : 0;
+    ing.frontSignal === 'strong' ? 0.20 :
+    ing.frontSignal === 'moderate' ? 0.08 :
+    ing.frontSignal === 'weak' ? 0.02 : 0;
   const effectiveCap = Math.min(1.0, capFactor + forcingRelief);
   const initFactor = floor + (1 - floor) * clamp01(ing.initiationConf);
   return effectiveCap * initFactor;
@@ -110,20 +110,20 @@ function tornadoEval(ing: Ingredients): RawHazard {
   // Discrete supercells are overwhelmingly the tornado producer.
   // Linear storms (QLCS) can produce weaker tornadoes at lower rates.
   const modeFactor =
-    ing.stormMode === 'discrete' ? 0.78 :
-    ing.stormMode === 'mixed' ? 0.30 :
-    ing.stormMode === 'linear' ? 0.12 : 0.06;
+    ing.stormMode === 'discrete' ? 0.70 :
+    ing.stormMode === 'mixed' ? 0.24 :
+    ing.stormMode === 'linear' ? 0.09 : 0.04;
   const frontalModeCap =
-    ing.stormMode === 'linear' ? 0.025 :
-    ing.stormMode === 'mixed' && ing.frontSignal === 'strong' ? 0.049 :
-    ing.stormMode === 'mixed' ? 0.065 :
-    ing.frontSignal === 'strong' ? 0.09 :
+    ing.stormMode === 'linear' ? 0.019 :
+    ing.stormMode === 'mixed' && ing.frontSignal === 'strong' ? 0.039 :
+    ing.stormMode === 'mixed' ? 0.049 :
+    ing.frontSignal === 'strong' ? 0.075 :
     1.0;
   const environmentGate =
-    (ing.stp >= 0.8 ? 1 : 0.58) *
-    (ing.lclM <= 1400 ? 1 : 0.65) *
-    (ing.srh01 >= 120 ? 1 : 0.70);
-  const raw = (stpTerm + srh01Term + lclTerm + capeTerm + ehiTerm) * initiationModifier(ing, 0.20) * modeFactor * environmentGate;
+    (ing.stp >= 1.0 ? 1 : 0.48) *
+    (ing.lclM <= 1250 ? 1 : 0.55) *
+    (ing.srh01 >= 150 ? 1 : 0.60);
+  const raw = (stpTerm + srh01Term + lclTerm + capeTerm + ehiTerm) * initiationModifier(ing, 0.15) * modeFactor * environmentGate;
   const probability = clamp01(Math.min(raw, frontalModeCap));
 
   // Significant tornado (EF2+): requires STP >= 1.5, strong SRH, low LCL.
@@ -179,14 +179,19 @@ function hailEval(ing: Ingredients): RawHazard {
   // Very moist BL → lower freezing level → less hail growth potential
   const moistDrag  = ing.sfcDewpointF > 72 ? 0.02 : 0;
   const modeBoost  = ing.stormMode === 'discrete' ? 0.025 : ing.stormMode === 'mixed' ? 0.01 : 0;
-  const raw = (muCapeTerm + shipTerm + shearTerm + lapseProxy + srWindTerm + modeBoost - moistDrag) * initiationModifier(ing, 0.32);
+  const hailEnvironmentGate =
+    (ing.mucape >= 1250 ? 1 : 0.62) *
+    (ing.shear06Kt >= 35 ? 1 : 0.70);
+  const raw = (muCapeTerm + shipTerm + shearTerm + lapseProxy + srWindTerm + modeBoost - moistDrag) *
+    initiationModifier(ing, 0.26) *
+    hailEnvironmentGate;
   const probability = clamp01(raw);
 
   // Significant hail (≥2"): SHIP ≥ 1.5, strong shear, MUCAPE ≥ 2500,
   // and ideally discrete mode for the longest updraft residence times.
-  const sigBase = Math.min(Math.max(0, ing.ship - 1.0) / 2.5, 1) * 0.10 +
-                  (ing.mucape >= 2500 ? 0.04 : 0) +
-                  (ing.shear06Kt >= 40 ? 0.025 : 0) +
+  const sigBase = Math.min(Math.max(0, ing.ship - 1.2) / 2.8, 1) * 0.10 +
+                  (ing.mucape >= 3000 ? 0.04 : 0) +
+                  (ing.shear06Kt >= 45 ? 0.025 : 0) +
                   (ing.stormMode === 'discrete' ? 0.02 : 0);
   const sigSevereProb = clamp01(sigBase * initiationModifier(ing, 0.38));
 
@@ -217,12 +222,12 @@ function hailEval(ing: Ingredients): RawHazard {
 function windEval(ing: Ingredients): RawHazard {
   const moistQuality =
     ing.sfcDewpointF >= 65 ? 1.00 :
-    ing.sfcDewpointF >= 60 ? 0.90 :
-    ing.sfcDewpointF >= 56 ? 0.74 : 0.58;
+    ing.sfcDewpointF >= 60 ? 0.84 :
+    ing.sfcDewpointF >= 56 ? 0.64 : 0.46;
   const organizedWindQuality =
-    ing.shear06Kt >= 40 ? 1.00 :
-    ing.shear06Kt >= 35 ? 0.82 :
-    ing.shear06Kt >= 30 ? 0.72 : 0.62;
+    ing.shear06Kt >= 45 ? 1.00 :
+    ing.shear06Kt >= 40 ? 0.78 :
+    ing.shear06Kt >= 35 ? 0.64 : 0.50;
   const capeTerm  = Math.min(ing.mlcape / 3000, 1) * 0.10;
   const shearTerm = Math.min(ing.shear06Kt / 55, 1) * 0.11;
   const srWindTerm = Math.min(ing.stormRelWindKt / 50, 1) * 0.035;
@@ -234,7 +239,7 @@ function windEval(ing: Ingredients): RawHazard {
     ing.stormMode === 'mixed'  ? 0.03 :
     ing.stormMode === 'multicell' ? 0.015 : 0;
   const raw = (capeTerm + shearTerm + srWindTerm + dryTerm + modeBoost) *
-    initiationModifier(ing, 0.30) *
+    initiationModifier(ing, 0.24) *
     moistQuality *
     organizedWindQuality;
   const probability = clamp01(raw);
@@ -243,8 +248,8 @@ function windEval(ing: Ingredients): RawHazard {
   // exceptionally strong mixed-mode environment. Avoid hatching ordinary
   // SLGT wind setups from shear+CAPE alone.
   const sigSetup =
-    ing.stormMode === 'linear' ||
-    (ing.stormMode === 'mixed' && ing.shear06Kt >= 65 && ing.mlcape >= 3000);
+    (ing.stormMode === 'linear' && ing.shear06Kt >= 55 && ing.mlcape >= 1500) ||
+    (ing.stormMode === 'mixed' && ing.shear06Kt >= 70 && ing.mlcape >= 3500);
   const sigBase = sigSetup
     ? (ing.stormMode === 'linear' ? 0.045 : 0.020) +
       Math.min(ing.shear06Kt / 65, 1) * 0.040 +
@@ -290,8 +295,8 @@ function floodEval(ing: Ingredients): RawHazard {
   const trainBoost = ing.shear06Kt < 25 && ing.mlcape > 1500 ? 0.045 : 0;
   const modeBoost  = ing.stormMode === 'linear' ? 0.02 :
                      ing.stormMode === 'multicell' ? 0.015 : 0;
-  const raw = (pwatTerm + depthTerm + capeTerm + trainBoost + modeBoost) * initiationModifier(ing, 0.45) * motionFactor;
-  const broadFloodCap = trainSignal || ing.pwatIn >= 2.05 ? 0.30 : 0.14;
+  const raw = (pwatTerm + depthTerm + capeTerm + trainBoost + modeBoost) * initiationModifier(ing, 0.38) * motionFactor;
+  const broadFloodCap = trainSignal || ing.pwatIn >= 2.10 ? 0.24 : 0.10;
   const probability = clamp01(Math.min(raw, broadFloodCap));
 
   // This is not SPC "significant severe"; keep the board from showing SIG

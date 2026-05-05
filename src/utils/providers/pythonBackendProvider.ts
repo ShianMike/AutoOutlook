@@ -26,8 +26,9 @@ import { buildOutlook } from '../outlookEngine';
 import { buildHazards, lvlFromProb } from '../hazardEngine';
 import { buildRiskPolygons } from '../polygonBuilder';
 import { applyLeadTimeUncertainty } from '../leadTimeUncertainty';
+import { apiUrl } from '../apiBase';
 
-const ENDPOINT = 'http://127.0.0.1:8765/api/forecast';
+const ENDPOINT = apiUrl('/api/forecast');
 
 interface BackendHour {
   forecastHour: number;

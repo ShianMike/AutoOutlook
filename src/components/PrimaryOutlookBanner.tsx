@@ -1,12 +1,20 @@
 import type { HourSnapshot } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import {
+  getArtifactMainHazard,
+  getArtifactMaxCategory,
+} from '../utils/artifactProbabilities';
 import RetroBadge from './retro/RetroBadge';
 
 interface PrimaryOutlookBannerProps {
   snapshot: HourSnapshot | null;
+  artifacts?: OutlookArtifacts | null;
+  artifactStatus?: ArtifactStatus;
 }
 
-export default function PrimaryOutlookBanner({ snapshot }: PrimaryOutlookBannerProps) {
+export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStatus }: PrimaryOutlookBannerProps) {
   if (!snapshot) {
     return (
       <section className="border-[4px] border-ink shadow-retro-lg bg-paper p-6 min-h-[180px] flex items-center justify-center font-mono text-ink/60">
@@ -15,10 +23,25 @@ export default function PrimaryOutlookBanner({ snapshot }: PrimaryOutlookBannerP
     );
   }
   const { outlook } = snapshot;
-  const meta = RISK_META[outlook.category];
-  const hazard = HAZARD_META[outlook.mainHazard];
+  const artifactCategory = artifactStatus === 'ready'
+    ? getArtifactMaxCategory(artifacts ?? null, snapshot.forecastHour)
+    : undefined;
+  const usingGeneratedArtifacts = artifactStatus === 'ready';
+  const displayCategory = artifactCategory && artifactCategory !== 'NONE'
+    ? artifactCategory === 'MDT' ? 'MOD' : artifactCategory
+    : usingGeneratedArtifacts ? 'TSTM' : outlook.category;
+  const artifactHazard = artifactStatus === 'ready'
+    ? getArtifactMainHazard(artifacts ?? null, snapshot.forecastHour)
+    : undefined;
+  const meta = RISK_META[displayCategory];
+  const hazard = HAZARD_META[artifactHazard ?? outlook.mainHazard];
   const confPct = Math.round(outlook.confidence * 100);
   const isDarkChip = meta.tw.includes('text-paper');
+  const headline = usingGeneratedArtifacts
+    ? artifactCategory
+    ? `${meta.label} risk for the selected forecast hour.`
+      : 'No generated risk polygons for the selected forecast hour.'
+    : outlook.headline;
 
   return (
     <section
@@ -38,11 +61,11 @@ export default function PrimaryOutlookBanner({ snapshot }: PrimaryOutlookBannerP
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {outlook.significantSevere && (
+          {!usingGeneratedArtifacts && outlook.significantSevere && (
             <RetroBadge tone="red">SIG SEVERE</RetroBadge>
           )}
           <RetroBadge tone={isDarkChip ? 'paper' : 'ink'}>
-            CONF {confPct}%
+            {usingGeneratedArtifacts ? 'ARTIFACT' : `CONF ${confPct}%`}
           </RetroBadge>
         </div>
       </div>
@@ -69,7 +92,7 @@ export default function PrimaryOutlookBanner({ snapshot }: PrimaryOutlookBannerP
             Forecast headline
           </span>
           <p className="font-display text-lg sm:text-xl font-extrabold leading-tight">
-            {outlook.headline}
+            {headline}
           </p>
         </div>
 

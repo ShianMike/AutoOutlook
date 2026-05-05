@@ -1,15 +1,20 @@
 import type { ForecastBundle } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import { buildRiskTimeline } from '../utils/riskTimeline';
 import RetroPanel from './retro/RetroPanel';
 
 interface RiskTimelineProps {
   bundle: ForecastBundle | null;
   selectedForecastHour?: number;
+  artifacts?: OutlookArtifacts | null;
+  artifactStatus?: ArtifactStatus;
 }
 
-export default function RiskTimeline({ bundle, selectedForecastHour }: RiskTimelineProps) {
-  const segs = bundle ? buildRiskTimeline(bundle) : [];
+export default function RiskTimeline({ bundle, selectedForecastHour, artifacts, artifactStatus }: RiskTimelineProps) {
+  const artifactHours = artifactStatus === 'ready' ? artifacts?.timelineSummary?.hours ?? [] : [];
+  const segs = bundle ? buildRiskTimeline(bundle, artifactHours) : [];
   return (
     <RetroPanel
       title="Risk Timeline"

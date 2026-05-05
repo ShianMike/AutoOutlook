@@ -661,6 +661,46 @@ def _empty_full_conus_500mb_overlay(target_dt: datetime, forecast_hour: int, err
     return {"upperAirLines": [], "upperAirVectors": [], "metadata": metadata}
 
 
+def _overlay_has_content(overlay: dict[str, Any] | None) -> bool:
+    if not overlay:
+        return False
+    metadata = overlay.get("metadata") or {}
+    return bool(
+        overlay.get("upperAirLines")
+        and overlay.get("upperAirVectors")
+        and metadata.get("domain") == "CONUS"
+        and metadata.get("level") == "500mb"
+    )
+
+
+def _nearest_full_conus_500mb_overlay(
+    overlays: dict[int, dict[str, Any]],
+    forecast_hour: int,
+    target_dt: datetime,
+) -> dict[str, Any] | None:
+    candidates = [
+        (abs(hour - forecast_hour), hour, overlay)
+        for hour, overlay in overlays.items()
+        if _overlay_has_content(overlay)
+    ]
+    if not candidates:
+        return None
+    _, source_hour, source_overlay = min(candidates, key=lambda item: (item[0], item[1]))
+    metadata = dict(source_overlay.get("metadata") or {})
+    metadata.update({
+        "forecastHour": int(forecast_hour),
+        "validTimeISO": target_dt.isoformat().replace("+00:00", "Z"),
+        "fallbackFromForecastHour": int(source_hour),
+        "fallbackFromValidTimeISO": metadata.get("validTimeISO"),
+        "fallbackReason": "nearest_full_conus_500mb_overlay",
+    })
+    return {
+        "upperAirLines": list(source_overlay.get("upperAirLines", [])),
+        "upperAirVectors": list(source_overlay.get("upperAirVectors", [])),
+        "metadata": metadata,
+    }
+
+
 def _attach_full_conus_500mb_overlay(payload: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return {
         **payload,
@@ -1288,14 +1328,13 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
     ml_used_hours = 0
     hours_out = []
     for h in FORECAST_HOURS:
-        payload = _payload_for_hour_from_anchors(h, _valid_iso(_valid_dt_for_hour(now, h)), anchor_payloads)
+        valid_dt = _valid_dt_for_hour(now, h)
+        payload = _payload_for_hour_from_anchors(h, _valid_iso(valid_dt), anchor_payloads)
         overlay = upper_air_overlays.get(h)
+        if not _overlay_has_content(overlay):
+            overlay = _nearest_full_conus_500mb_overlay(upper_air_overlays, h, valid_dt)
         if overlay is None:
-            overlay = _empty_full_conus_500mb_overlay(
-                _valid_dt_for_hour(now, h),
-                h,
-                "Full-CONUS HRRR 500 mb overlay unavailable",
-            )
+            overlay = _empty_full_conus_500mb_overlay(valid_dt, h, "Full-CONUS HRRR 500 mb overlay unavailable")
         payload = _attach_full_conus_500mb_overlay(payload, overlay)
         ml_hazards = predict_ml_hazards(payload.get("ingredients", {}), h)
         if ml_hazards is not None:

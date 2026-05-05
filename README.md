@@ -66,6 +66,57 @@ The service listens on `http://127.0.0.1:8765` with:
 
 When the backend is up, the dashboard's `SOURCE` badge will read the HRRR backend provider and the System Status panel will show `WINNER` next to the backend provider.
 
+## Production Deployment
+
+AutoOutlook deploys as two services:
+
+- **Frontend**: static Vite build from `dist/`
+- **Backend**: Python WSGI service exposing `backend.server:app`
+
+Copy `.env.example` to your deployment environment and set these values:
+
+```bash
+VITE_AUTOOUTLOOK_API_BASE=https://your-backend.example.com
+AUTOOUTLOOK_HOST=0.0.0.0
+AUTOOUTLOOK_PORT=8765
+AUTOOUTLOOK_CORS_ORIGINS=https://your-frontend.example.com
+```
+
+If the frontend and backend are served from the same origin, leave `VITE_AUTOOUTLOOK_API_BASE` empty and route `/api/*` to the backend.
+
+Build the frontend:
+
+```bash
+npm ci
+npm run build
+```
+
+Start the backend with a production WSGI server:
+
+```bash
+python -m pip install -r backend/requirements.txt
+gunicorn "backend.server:app" --bind "0.0.0.0:${PORT:-8765}" --timeout 180 --workers 1
+```
+
+Use one worker unless artifact generation and HRRR cache paths are moved to a shared persistent volume. For persistent generated outlooks, set:
+
+```bash
+AUTOOUTLOOK_ARTIFACT_DIR=/var/lib/autooutlook/artifacts/latest
+AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR=/var/lib/autooutlook/artifacts/latest_incremental
+```
+
+Health check:
+
+```bash
+curl https://your-backend.example.com/api/health
+```
+
+Expected response:
+
+```json
+{"service":"autooutlook-backend","status":"ok"}
+```
+
 ### 3) Deployable HRRR/XGBoost outlook artifacts
 
 Generate the latest deployable outlook once:

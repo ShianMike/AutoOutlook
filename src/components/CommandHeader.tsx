@@ -1,11 +1,16 @@
 import type { ForecastBundle, ForecastSource } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { getArtifactMainHazard, getArtifactMaxCategory } from '../utils/artifactProbabilities';
 import RetroBadge from './retro/RetroBadge';
 
 interface CommandHeaderProps {
   bundle: ForecastBundle | null;
   selectedValidTime?: string;
   selectedHourLabel?: string;
+  artifacts?: OutlookArtifacts | null;
+  artifactStatus?: ArtifactStatus;
 }
 
 function fmtTimeUTC(iso: string | undefined): { time: string; date: string } {
@@ -47,10 +52,23 @@ export default function CommandHeader({
   bundle,
   selectedValidTime,
   selectedHourLabel,
+  artifacts,
+  artifactStatus,
 }: CommandHeaderProps) {
   const snapshot = selectedValidTime
     ? bundle?.hours.find((hour) => hour.validTimeISO === selectedValidTime)
     : bundle?.hours[0];
+  const artifactCategory = artifactStatus === 'ready'
+    ? getArtifactMaxCategory(artifacts ?? null, snapshot?.forecastHour)
+    : undefined;
+  const displayCategory = artifactCategory && artifactCategory !== 'NONE'
+    ? artifactCategory === 'MDT' ? 'MOD' : artifactCategory
+    : artifactStatus === 'ready' ? 'TSTM' : snapshot?.outlook.category;
+  const artifactHazard = artifactStatus === 'ready'
+    ? getArtifactMainHazard(artifacts ?? null, snapshot?.forecastHour)
+    : undefined;
+  const displayHazard = artifactHazard ?? snapshot?.outlook.mainHazard;
+  const usingGeneratedArtifacts = artifactStatus === 'ready';
 
   return (
     <header className="bg-ink text-paper border-b-[3px] border-paper/10 relative retro-scanline">
@@ -77,10 +95,10 @@ export default function CommandHeader({
         <div className="flex-1 min-w-0 grid grid-cols-[1fr_1fr_1.4fr_0.6fr_1fr_auto] items-center gap-x-4 xl:gap-x-5 font-mono text-[11px]">
           <Stat
             label="OUTLOOK"
-            value={snapshot ? RISK_META[snapshot.outlook.category].label : '—'}
-            accent={snapshot ? RISK_META[snapshot.outlook.category].tw : undefined}
+            value={displayCategory ? RISK_META[displayCategory].label : '—'}
+            accent={displayCategory ? RISK_META[displayCategory].tw : undefined}
           />
-          <Stat label="HAZARD" value={snapshot ? HAZARD_META[snapshot.outlook.mainHazard].label : '—'} />
+          <Stat label="HAZARD" value={displayHazard ? HAZARD_META[displayHazard].label : '—'} />
           <Stat
             label="FOCUS"
             value={snapshot ? truncateLabel(snapshot.region.label) : '—'}
@@ -102,8 +120,20 @@ export default function CommandHeader({
       {/* Bottom ticker strip */}
       <div className="border-t border-paper/15 bg-navy text-paper/70 font-mono text-[10px] uppercase tracking-widest overflow-hidden">
         <div className="flex animate-ticker whitespace-nowrap">
-          <TickerSpan bundle={bundle} />
-          <TickerSpan bundle={bundle} />
+          <TickerSpan
+            bundle={bundle}
+            snapshot={snapshot}
+            displayCategory={displayCategory}
+            displayHazard={displayHazard}
+            usingGeneratedArtifacts={usingGeneratedArtifacts}
+          />
+          <TickerSpan
+            bundle={bundle}
+            snapshot={snapshot}
+            displayCategory={displayCategory}
+            displayHazard={displayHazard}
+            usingGeneratedArtifacts={usingGeneratedArtifacts}
+          />
         </div>
       </div>
     </header>
@@ -126,21 +156,34 @@ function Stat({ label, value, sub, accent }: { label: string; value: string; sub
   );
 }
 
-function TickerSpan({ bundle }: { bundle: ForecastBundle | null }) {
-  const peak = bundle?.hours.length
-    ? bundle.hours.reduce((best, hour) => (
-      RISK_META[hour.outlook.category].ord > RISK_META[best.outlook.category].ord ? hour : best
-    ))
-    : undefined;
-
-  const sigTag = peak?.outlook.significantSevere ? '► ⚠ SIGNIFICANT SEVERE POSSIBLE' : null;
+function TickerSpan({
+  bundle,
+  snapshot,
+  displayCategory,
+  displayHazard,
+  usingGeneratedArtifacts,
+}: {
+  bundle: ForecastBundle | null;
+  snapshot: ForecastBundle['hours'][number] | undefined;
+  displayCategory?: keyof typeof RISK_META;
+  displayHazard?: keyof typeof HAZARD_META;
+  usingGeneratedArtifacts: boolean;
+}) {
+  const risk = displayCategory ? RISK_META[displayCategory] : undefined;
+  const hazard = displayHazard ? HAZARD_META[displayHazard] : undefined;
+  const headline = snapshot
+    ? usingGeneratedArtifacts && risk
+      ? `Generated HRRR/XGBoost outlook: ${risk.label} risk for the selected forecast hour.`
+      : snapshot.outlook.headline
+    : 'GENERATING FORECAST HEADLINE';
+  const sigTag = !usingGeneratedArtifacts && snapshot?.outlook.significantSevere ? '► ⚠ SIGNIFICANT SEVERE POSSIBLE' : null;
   const items = bundle
     ? [
-        `► PEAK ${peak ? RISK_META[peak.outlook.category].label : 'OUTLOOK PENDING'}`,
-        `► PRIMARY ${peak ? HAZARD_META[peak.outlook.mainHazard].label : 'HAZARD PENDING'}`,
-        `► FOCUS ${peak ? truncateLabel(peak.region.label, 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
+        `► OUTLOOK ${risk?.label ?? 'OUTLOOK PENDING'}`,
+        `► PRIMARY ${hazard?.label ?? 'HAZARD PENDING'}`,
+        `► FOCUS ${snapshot ? truncateLabel(snapshot.region.label, 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
         ...(sigTag ? [sigTag] : []),
-        `► ${peak?.outlook.headline ?? 'GENERATING FORECAST HEADLINE'}`,
+        `► ${headline}`,
         `► ${bundle.hours.length} FORECAST HOURS LOADED`,
       ]
     : ['► BOOTING AUTOOUTLOOK', '► LOADING FORECAST PROVIDERS', '► STAND BY'];
