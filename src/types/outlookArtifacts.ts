@@ -21,10 +21,44 @@ export interface OutlookArtifactFeatureCollection {
   features: OutlookArtifactFeature[];
 }
 
+export interface OutlookCycleCheck {
+  runDate?: string;
+  runCycle?: number;
+  cycleTimeISO?: string;
+  label?: string;
+  complete?: boolean;
+  hours?: Array<{
+    forecastHour?: number;
+    idxAvailable?: boolean;
+    requiredFieldsPresent?: boolean;
+    statusCode?: number;
+    error?: string;
+  }>;
+}
+
+export interface OutlookCyclePolicy {
+  name?: 'complete-requested' | 'complete-48' | 'latest-startable' | string;
+  model?: string;
+  allowedRunCyclesUTC?: number[];
+  requestedForecastHours?: number[];
+  requiredForecastHourForCycle?: number;
+  requiredForecastHoursChecked?: number[];
+  requireCompleteHourOverride?: number | null;
+  description?: string;
+}
+
 export interface OutlookArtifactMetadata {
   generatedAtISO: string;
   cycle: string;
   cycleTimeISO?: string;
+  latestExtendedCandidate?: OutlookCycleCheck | null;
+  selectedCycleWasFallback?: boolean;
+  fallbackReason?: string | null;
+  requiredForecastHourForCycle?: number;
+  requiredForecastHoursChecked?: number[];
+  requestedForecastHours?: number[];
+  checkedCycles?: OutlookCycleCheck[];
+  cyclePolicy?: OutlookCyclePolicy;
   selectedArtifactForecastHour?: number;
   artifactForecastHour?: number;
   artifactValidTimeISO?: string;

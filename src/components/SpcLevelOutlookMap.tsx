@@ -776,12 +776,12 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
     }),
     [snapshot],
   );
-  const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
+  const windVectors = useMemo(() => map500mbWindVectors(snapshot, 150), [snapshot]);
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
-      <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="min-w-0 font-display font-extrabold uppercase text-[13px] leading-tight tracking-wider">
+      <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
+        <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[13px] leading-none tracking-normal">
           SPC Levels Outlook
         </span>
         <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0">
@@ -1056,24 +1056,24 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
 
 function WindBarb({ vector, top = false }: { vector: UpperAirVector; top?: boolean }) {
   if (!top || vector.speedKt < 22) return null;
-  const length = 12;
+  const length = 10;
   const featherCount = Math.max(1, Math.min(4, Math.round(vector.speedKt / 22)));
   const angleDeg = (Math.atan2(-vector.vKt, vector.uKt) * 180 / Math.PI) + 180;
-  const opacity = 0.82;
+  const opacity = 0.36;
   const stroke = '#50565c';
   const halo = '#ffffff';
   const feathers = (prefix: string) => Array.from({ length: featherCount }, (_, i) => {
-    const x = length - i * 3.0;
-    return <path key={`${prefix}-${i}`} d={`M ${x} 0 L ${x - 4.0} 5.2`} />;
+    const x = length - i * 2.6;
+    return <path key={`${prefix}-${i}`} d={`M ${x} 0 L ${x - 3.4} 4.6`} />;
   });
 
   return (
     <g transform={`rotate(${angleDeg})`} opacity={opacity} strokeLinecap="square">
-      <g stroke={halo} strokeWidth={3.2} fill="none" opacity={0.72}>
+      <g stroke={halo} strokeWidth={2.2} fill="none" opacity={0.42}>
         <path d={`M ${-length} 0 L ${length} 0`} />
         {feathers('halo')}
       </g>
-      <g stroke={stroke} strokeWidth={1.7} fill="none">
+      <g stroke={stroke} strokeWidth={1.15} fill="none">
         <path d={`M ${-length} 0 L ${length} 0`} />
         {feathers('main')}
       </g>

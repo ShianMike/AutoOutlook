@@ -16,7 +16,6 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
-import MapWatermark from './MapWatermark';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -28,7 +27,6 @@ interface GeneratedHazardProbabilityMapProps {
   title: string;
   artifacts: OutlookArtifacts | null;
   status: ArtifactStatus;
-  showWatermark?: boolean;
 }
 
 export function hasGeneratedHazardTile(
@@ -46,7 +44,6 @@ export default function GeneratedHazardProbabilityMap({
   title,
   artifacts,
   status,
-  showWatermark = false,
 }: GeneratedHazardProbabilityMapProps) {
   const forecastHour = snapshot?.forecastHour;
   const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
@@ -63,6 +60,7 @@ export default function GeneratedHazardProbabilityMap({
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
   const peakPct = peakProb >= 0.005 ? `${Math.round(peakProb * 100)}%` : '--';
   const metricLabel = hazard === 'thunder' ? `COVER ${peakPct}` : `PEAK ${peakPct}`;
+  const headerTitle = title.replace(/\s+Outlook$/i, '');
   const legendItems = cfg.thresholds.map((threshold, i) => ({ label: cfg.labels[i], color: cfg.colors[i], threshold }));
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
   const upperAirLineCollection = useMemo(
@@ -95,17 +93,16 @@ export default function GeneratedHazardProbabilityMap({
     }),
     [snapshot, upperAirLines],
   );
-  const windVectors = useMemo(() => map500mbWindVectors(snapshot), [snapshot]);
+  const windVectors = useMemo(() => map500mbWindVectors(snapshot, 55), [snapshot]);
   const hasUpperAirOverlay = snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
-      <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="min-w-0 font-display font-extrabold uppercase text-[12px] leading-tight tracking-wider">
-          {title}
+      <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
+        <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[12px] leading-none tracking-normal">
+          {headerTitle}
         </span>
         <div className="flex shrink-0 items-center gap-2">
-          {showWatermark && <MapWatermark className="hidden sm:inline-flex" />}
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
             {metricLabel}
           </span>
@@ -307,7 +304,7 @@ export default function GeneratedHazardProbabilityMap({
 
         <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper px-2 py-1 shadow-retro-sm">
           <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
-            HRRR/XGBoost {title}
+            {title}
           </div>
           <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
             {legendItems.map((item) => (
@@ -338,7 +335,7 @@ function WindBarb({ vector, top = false }: { vector: UpperAirVector; top?: boole
   const length = 7;
   const featherCount = Math.max(1, Math.min(4, Math.round(vector.speedKt / 22)));
   const angleDeg = (Math.atan2(-vector.vKt, vector.uKt) * 180 / Math.PI) + 180;
-  const opacity = 0.72;
+  const opacity = 0.30;
   const stroke = '#50565c';
   const halo = '#ffffff';
   const feathers = (prefix: string) => Array.from({ length: featherCount }, (_, i) => {
@@ -348,11 +345,11 @@ function WindBarb({ vector, top = false }: { vector: UpperAirVector; top?: boole
 
   return (
     <g transform={`rotate(${angleDeg})`} opacity={opacity} strokeLinecap="square">
-      <g stroke={halo} strokeWidth={2.1} fill="none" opacity={0.68}>
+      <g stroke={halo} strokeWidth={1.8} fill="none" opacity={0.36}>
         <path d={`M ${-length} 0 L ${length} 0`} />
         {feathers('halo')}
       </g>
-      <g stroke={stroke} strokeWidth={1.05} fill="none">
+      <g stroke={stroke} strokeWidth={0.9} fill="none">
         <path d={`M ${-length} 0 L ${length} 0`} />
         {feathers('main')}
       </g>

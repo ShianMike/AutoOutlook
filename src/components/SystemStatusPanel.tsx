@@ -39,12 +39,14 @@ export default function SystemStatusPanel({
   const artifactIndex = outlookArtifacts.artifacts?.incrementalIndex;
   const artifactMetadata = outlookArtifacts.artifacts?.metadata;
   const readyHours = artifactIndex?.readyForecastHours ?? artifactMetadata?.readyForecastHours ?? [];
-  const requestedHours = artifactIndex?.requestedForecastHours ?? artifactMetadata?.forecastHours ?? [];
+  const requestedHours = artifactIndex?.requestedForecastHours ?? artifactMetadata?.requestedForecastHours ?? artifactMetadata?.forecastHours ?? [];
   const failedHours = artifactIndex?.failedForecastHours ?? artifactMetadata?.failedForecastHours ?? [];
   const pendingHours = artifactIndex?.pendingForecastHours ?? artifactMetadata?.pendingForecastHours ?? [];
   const selectedArtifactHour = outlookArtifacts.artifacts?.selectedArtifactForecastHour ?? artifactMetadata?.selectedArtifactForecastHour;
   const artifactReadyPct = requestedHours.length > 0 ? Math.round((readyHours.length / requestedHours.length) * 100) : 0;
   const cycleSynced = Boolean(bundle?.issuedAtISO && artifactMetadata?.cycleTimeISO && sameHour(bundle.issuedAtISO, artifactMetadata.cycleTimeISO));
+  const latestCandidate = artifactMetadata?.latestExtendedCandidate ?? undefined;
+  const staleArtifacts = isNewerCycle(latestCandidate?.cycleTimeISO, artifactMetadata?.cycleTimeISO);
   const fetchStatusLabel =
     status === 'loading' ? 'FETCHING'
       : status === 'error' ? 'ERROR'
@@ -76,7 +78,12 @@ export default function SystemStatusPanel({
         <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-2 gap-2">
           <StatusTile label="Forecast Feed" value={fetchStatusLabel} sub={bundle?.cycle ?? 'No bundle'} tone={status === 'error' ? 'red' : status === 'loading' ? 'amber' : 'lime'} />
           <StatusTile label="Artifacts" value={artifactStatusLabel} sub={`${readyHours.length}/${requestedHours.length || '—'} ready`} tone={artifactTone} />
-          <StatusTile label="Cycle Sync" value={cycleSynced ? 'LOCKED' : 'CHECK'} sub={artifactMetadata?.cycle ?? 'Artifact cycle pending'} tone={cycleSynced ? 'lime' : 'amber'} />
+          <StatusTile
+            label="HRRR Cycle"
+            value={staleArtifacts ? 'STALE' : cycleSynced ? 'LOCKED' : 'CHECK'}
+            sub={artifactMetadata?.cycle ?? 'Artifact cycle pending'}
+            tone={staleArtifacts ? 'amber' : cycleSynced ? 'lime' : 'amber'}
+          />
           <StatusTile label="Refresh" value={`${minutes} MIN`} sub={bundle ? `${bundle.latencyMs} ms last fetch` : 'Awaiting fetch'} tone="paper" />
         </div>
 
@@ -84,9 +91,12 @@ export default function SystemStatusPanel({
           <InfoCard title="Selected Valid Hour" badge={selectedArtifactHour !== undefined ? `F${String(selectedArtifactHour).padStart(2, '0')}` : 'F--'}>
             <KvGrid rows={[
               ['Forecast hour', selectedHour !== undefined ? FORECAST_HOUR_LABELS[selectedHour] ?? `+${selectedHour}h` : '—'],
-              ['Valid time', fmtUTC(selectedValidTime)],
+              ['Forecast valid time', fmtUTC(selectedValidTime)],
+              ['HRRR cycle time', fmtUTC(artifactMetadata?.cycleTimeISO)],
               ['Generated hour', selectedArtifactHour !== undefined ? `F${String(selectedArtifactHour).padStart(2, '0')}` : '—'],
-              ['Artifact valid', fmtUTC(artifactMetadata?.artifactValidTimeISO)],
+              ['Artifact valid time', fmtUTC(artifactMetadata?.artifactValidTimeISO)],
+              ['Artifact generated', fmtUTC(artifactMetadata?.generatedAtISO)],
+              ['Latest candidate', latestCandidate?.label ?? '—'],
             ]} />
           </InfoCard>
 
@@ -103,7 +113,9 @@ export default function SystemStatusPanel({
               ['Ready', compactHourRange(readyHours)],
               ['Pending', compactHourRange(pendingHours)],
               ['Failed', compactHourRange(failedHours)],
-              ['Generated', fmtUTC(artifactMetadata?.generatedAtISO)],
+              ['Cycle policy', artifactMetadata?.cyclePolicy?.name ?? '—'],
+              ['Required cycle hour', artifactMetadata?.requiredForecastHourForCycle !== undefined ? `F${String(artifactMetadata.requiredForecastHourForCycle).padStart(2, '0')}` : '—'],
+              ['Fallback reason', artifactMetadata?.fallbackReason ?? (staleArtifacts ? 'Artifacts older than latest extended HRRR candidate.' : 'none')],
             ]} />
           </InfoCard>
         </div>
@@ -226,6 +238,12 @@ function sameHour(a: string, b: string): boolean {
   const aMs = Date.parse(a);
   const bMs = Date.parse(b);
   return Number.isFinite(aMs) && Number.isFinite(bMs) && Math.abs(aMs - bMs) < 60 * 1000;
+}
+
+function isNewerCycle(candidateISO: string | undefined, selectedISO: string | undefined): boolean {
+  const candidateMs = Date.parse(candidateISO ?? '');
+  const selectedMs = Date.parse(selectedISO ?? '');
+  return Number.isFinite(candidateMs) && Number.isFinite(selectedMs) && candidateMs > selectedMs;
 }
 
 function compactHourRange(hours: number[]): string {

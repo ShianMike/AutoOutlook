@@ -1,4 +1,4 @@
-# AutoOutlook
+  # AutoOutlook
 
 **Automated Convective Risk Intelligence**
 
@@ -14,7 +14,7 @@ Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shad
   1. **Python backend** (Flask + HRRR GRIB2 byte-range filtering + MetPy-style diagnostics) — pulls selected HRRR fields, derives severe-weather ingredients, and activates XGBoost hazard probabilities when model artifacts are valid.
   2. **Open-Meteo** (browser-side) — free GFS-Seamless JSON endpoints used as an automatic fallback if the backend isn't running.
   3. **Mock** — deterministic Plains severe-weather day used when both live providers fail.
-- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest complete extended HRRR cycle, processes production forecast hours by default, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
+- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest available extended HRRR cycle, processes forecast hours `0..48`, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
 
 ## Run
 
@@ -66,57 +66,6 @@ The service listens on `http://127.0.0.1:8765` with:
 
 When the backend is up, the dashboard's `SOURCE` badge will read the HRRR backend provider and the System Status panel will show `WINNER` next to the backend provider.
 
-## Production Deployment
-
-AutoOutlook deploys as two services:
-
-- **Frontend**: static Vite build from `dist/`
-- **Backend**: Python WSGI service exposing `backend.server:app`
-
-Copy `.env.example` to your deployment environment and set these values:
-
-```bash
-VITE_AUTOOUTLOOK_API_BASE=https://your-backend.example.com
-AUTOOUTLOOK_HOST=0.0.0.0
-AUTOOUTLOOK_PORT=8765
-AUTOOUTLOOK_CORS_ORIGINS=https://your-frontend.example.com
-```
-
-If the frontend and backend are served from the same origin, leave `VITE_AUTOOUTLOOK_API_BASE` empty and route `/api/*` to the backend.
-
-Build the frontend:
-
-```bash
-npm ci
-npm run build
-```
-
-Start the backend with a production WSGI server:
-
-```bash
-python -m pip install -r backend/requirements.txt
-gunicorn "backend.server:app" --bind "0.0.0.0:${PORT:-8765}" --timeout 180 --workers 1
-```
-
-Use one worker unless artifact generation and HRRR cache paths are moved to a shared persistent volume. For persistent generated outlooks, set:
-
-```bash
-AUTOOUTLOOK_ARTIFACT_DIR=/var/lib/autooutlook/artifacts/latest
-AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR=/var/lib/autooutlook/artifacts/latest_incremental
-```
-
-Health check:
-
-```bash
-curl https://your-backend.example.com/api/health
-```
-
-Expected response:
-
-```json
-{"service":"autooutlook-backend","status":"ok"}
-```
-
 ### 3) Deployable HRRR/XGBoost outlook artifacts
 
 Generate the latest deployable outlook once:
@@ -131,15 +80,7 @@ Run it as a scheduler loop:
 python -m backend.ml.outlook_pipeline --loop --interval-minutes 30
 ```
 
-By default the pipeline processes `0..18` hourly, then `21,24,27,30,33,36,39,42,45,48`. Use `--all-hours` for every `0..48` hour, or `--forecast-hours 0 3 6 9 12` for an explicit subset.
-
-Deployment hardening flags:
-
-```powershell
-python -m backend.ml.outlook_pipeline --grid-stride 3 --min-successful-hours 8 --cache-ttl-hours 12
-```
-
-The pipeline writes to `backend/artifacts/latest/` by default and caches decoded selected HRRR hours under `backend/cache/hrrr_selected/`. Both directories are intentionally git-ignored because they contain generated runtime artifacts. If a new run fails below the minimum successful-hour threshold, the previous `latest/` artifact folder is preserved and failure details are written to `backend/artifacts/latest.failed.json`.
+The pipeline writes to `backend/artifacts/latest/` by default. That directory is intentionally git-ignored because it contains generated runtime artifacts.
 
 Important leakage guard: the pipeline writes prediction artifacts first, then downloads the current official SPC Day 1 GeoJSON for verification. The official SPC outlook is never passed into the model feature matrix.
 

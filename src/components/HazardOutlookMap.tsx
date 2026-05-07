@@ -207,12 +207,13 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
   );
 
   const peakPct = peakProb >= 0.005 ? `${Math.round(peakProb * 100)}%` : '—';
+  const headerTitle = title.replace(/\s+Outlook$/i, '');
 
   return (
     <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
-      <header className="border-b-[2px] border-ink bg-ink text-paper px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="min-w-0 font-display font-extrabold uppercase text-[12px] leading-tight tracking-wider">
-          {title}
+      <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
+        <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[12px] leading-none tracking-normal">
+          {headerTitle}
         </span>
         <div className="font-mono text-[10px] uppercase tracking-widest text-paper/70 shrink-0 flex items-center gap-2">
           {sourceLabel && <span>{sourceLabel}</span>}

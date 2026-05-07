@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,12 +29,14 @@ from backend.hrrr_selected import (
     hour_ref,
     latest_available_hrrr_cycle_with_metadata,
 )
+from backend.bundle_builder import _hgt500_lines_from_field, _wind500_vectors_from_fields
 from backend.ml.features import FEATURE_NAMES, feature_schema_hash
 from backend.ml.gridded_outlook import (
     SPC_RISK_LABELS,
     GriddedFeatures,
     apply_category_probability_ceiling,
     apply_environmental_probability_caps,
+    apply_offshore_probability_suppression,
     category_counts,
     category_grid_from_probabilities,
     feature_stats,
@@ -47,15 +50,33 @@ from backend.ml.gridded_outlook import (
 from backend.ml.inference import model_status
 from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
 
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "latest"
-DEFAULT_INCREMENTAL_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "latest_incremental"
+DEFAULT_ARTIFACT_ROOT = Path(os.environ.get(
+    "AUTOOUTLOOK_ARTIFACT_ROOT",
+    Path(__file__).resolve().parents[1] / "artifacts",
+))
+DEFAULT_OUTPUT_DIR = Path(os.environ.get(
+    "AUTOOUTLOOK_ARTIFACT_DIR",
+    DEFAULT_ARTIFACT_ROOT / "latest",
+))
+DEFAULT_INCREMENTAL_OUTPUT_DIR = Path(os.environ.get(
+    "AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR",
+    DEFAULT_ARTIFACT_ROOT / "latest_incremental",
+))
+DEFAULT_INCREMENTAL_COMPLETE_OUTPUT_DIR = Path(os.environ.get(
+    "AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR",
+    DEFAULT_INCREMENTAL_OUTPUT_DIR.with_name(f"{DEFAULT_INCREMENTAL_OUTPUT_DIR.name}_complete"),
+))
 ALL_FORECAST_HOURS = tuple(range(49))
 PRODUCTION_FORECAST_HOURS = tuple(list(range(19)) + list(range(21, 49, 3)))
 FORECAST_HOURS = PRODUCTION_FORECAST_HOURS
+CYCLE_POLICIES = ("complete-requested", "complete-48", "latest-startable")
+DEFAULT_CYCLE_POLICY = "complete-requested"
+DEFAULT_INCREMENTAL_CYCLE_POLICY = "latest-startable"
 
 FetchHourFn = Callable[[HrrrHourRef, requests.Session], tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour]
 PredictorFn = Callable[[GriddedFeatures], dict[str, np.ndarray] | None]
 SpcFetchFn = Callable[[requests.Session, Path | None], dict[str, Any]]
+CycleDetectFn = Callable[[requests.Session, datetime | None], HrrrCycle | HrrrCycleDetection]
 
 
 @dataclass(frozen=True)
@@ -79,7 +100,9 @@ def run_pipeline(
     no_cache: bool = False,
     verify_spc: bool = True,
     preview: bool = True,
-    detect_cycle_fn: Callable[[requests.Session, datetime | None], HrrrCycle | HrrrCycleDetection] | None = None,
+    cycle_policy: str = DEFAULT_CYCLE_POLICY,
+    require_complete_hour: int | None = None,
+    detect_cycle_fn: CycleDetectFn | None = None,
     fetch_hour_fn: FetchHourFn | None = None,
     predictor_fn: PredictorFn | None = None,
     spc_fetch_fn: SpcFetchFn | None = None,
@@ -93,11 +116,16 @@ def run_pipeline(
         shutil.rmtree(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
     hours = resolve_forecast_hours(forecast_hours)
+    resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=False)
+    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
     effective_min_successful = min(max(1, int(min_successful_hours)), len(hours))
     tile_stride = max(1, int(tile_stride if tile_stride is not None else grid_stride))
     grid_stride = max(1, int(grid_stride))
     failure_context: dict[str, Any] = {
         "requestedForecastHours": hours,
+        "requiredForecastHourForCycle": required_forecast_hour,
+        "requiredForecastHoursChecked": sorted({0, required_forecast_hour}),
+        "cyclePolicy": resolved_cycle_policy,
         "minSuccessfulHours": int(min_successful_hours),
         "effectiveMinSuccessfulHours": effective_min_successful,
         "gridStride": grid_stride,
@@ -107,14 +135,22 @@ def run_pipeline(
     session = requests.Session()
     session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0"
     try:
-        detect = detect_cycle_fn or (lambda sess, dt: latest_available_hrrr_cycle_with_metadata(sess, dt))
         predictor = predictor_fn or predict_hazard_grids
         spc_fetch = spc_fetch_fn or fetch_current_spc_day1_category
 
-        detection = detect(session, now)
-        cycle, cycle_detection_metadata = _normalize_cycle_detection(detection)
+        print(f"[cycle check] requested hours require f{required_forecast_hour:02d}", flush=True)
+        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn)
+        cycle, cycle_detection_metadata = _normalize_cycle_detection(
+            detection,
+            hours,
+            required_forecast_hour,
+            resolved_cycle_policy,
+            require_complete_hour,
+        )
+        print(f"[cycle selected] HRRR {cycle.run_cycle:02d}Z {cycle.run_date}", flush=True)
         failure_context["cycle"] = cycle.label
         failure_context["cycleDetection"] = cycle_detection_metadata
+        failure_context.update(_cycle_detection_artifact_fields(cycle_detection_metadata))
         model = model_status()
         failure_context["model"] = model
         if not model.get("active"):
@@ -262,6 +298,7 @@ def run_pipeline(
             "cycleDetection": cycle_detection_metadata,
             "forecastHours": successful_hours,
             "requestedForecastHours": hours,
+            **_cycle_detection_artifact_fields(cycle_detection_metadata),
             "successfulForecastHours": successful_hours,
             "failedHours": failed_hours,
             "minSuccessfulHours": int(min_successful_hours),
@@ -321,7 +358,9 @@ def run_incremental_pipeline(
     stop_after_hour: int | None = None,
     continue_on_hour_failure: bool = True,
     force: bool = False,
-    detect_cycle_fn: Callable[[requests.Session, datetime | None], HrrrCycle | HrrrCycleDetection] | None = None,
+    cycle_policy: str = DEFAULT_INCREMENTAL_CYCLE_POLICY,
+    require_complete_hour: int | None = None,
+    detect_cycle_fn: CycleDetectFn | None = None,
     fetch_hour_fn: FetchHourFn | None = None,
     predictor_fn: PredictorFn | None = None,
 ) -> dict[str, Any]:
@@ -333,6 +372,8 @@ def run_incremental_pipeline(
     (output_dir / "hours").mkdir(parents=True, exist_ok=True)
     requested_force_hours = set(resolve_forecast_hours(forecast_hours))
     hours = sorted(requested_force_hours)
+    resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=True)
+    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
     tile_stride = max(1, int(tile_stride if tile_stride is not None else grid_stride))
     grid_stride = max(1, int(grid_stride))
 
@@ -341,14 +382,29 @@ def run_incremental_pipeline(
     ready_hours: list[int] = []
     failed_hours: list[dict[str, Any]] = []
     try:
-        detect = detect_cycle_fn or (lambda sess, dt: latest_available_hrrr_cycle_with_metadata(sess, dt))
         predictor = predictor_fn or predict_hazard_grids
-        detection = detect(session, now)
-        cycle, cycle_detection_metadata = _normalize_cycle_detection(detection)
+        print(f"[cycle check] requested hours require f{required_forecast_hour:02d}", flush=True)
+        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn)
+        cycle, cycle_detection_metadata = _normalize_cycle_detection(
+            detection,
+            hours,
+            required_forecast_hour,
+            resolved_cycle_policy,
+            require_complete_hour,
+        )
+        print(f"[cycle selected] HRRR {cycle.run_cycle:02d}Z {cycle.run_date}", flush=True)
         model = model_status()
         if not model.get("active"):
             raise RuntimeError(f"ML model inactive; refusing incremental outlook generation: {model.get('reason', 'unknown')}")
-        existing_index = _read_incremental_index(output_dir, cycle)
+        previous_index = _read_incremental_index_payload(output_dir)
+        existing_index = previous_index if previous_index.get("cycle") == cycle.label else None
+        previous_cycle = previous_index.get("cycle")
+        if existing_index is None and previous_cycle and previous_cycle != cycle.label:
+            print(
+                f"[incremental reset] clearing stale hour artifacts from {previous_cycle} before writing {cycle.label}",
+                flush=True,
+            )
+            _clear_incremental_hour_artifacts(output_dir)
         if existing_index is not None:
             existing_ready = [
                 hour for hour in _int_list(existing_index.get("readyForecastHours"))
@@ -387,6 +443,7 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
+                **_cycle_detection_artifact_fields(cycle_detection_metadata),
                 "readyForecastHours": ready,
                 "failedForecastHours": failed,
                 "failedHours": failed_hours,
@@ -405,7 +462,7 @@ def run_incremental_pipeline(
                 "artifacts": {
                     "index": "index.json",
                     "metadata": "metadata.json",
-                    "hours": "hours/fXX/{risk_polygons.geojson,probability_tile.json,metadata.json}",
+                    "hours": "hours/fXX/{risk_polygons.geojson,probability_tile.json,upper_air_overlay.json,metadata.json}",
                 },
                 "latencyMs": int((time.perf_counter() - started) * 1000),
             }
@@ -420,12 +477,9 @@ def run_incremental_pipeline(
                 should_force_hour = force and forecast_hour in requested_force_hours
                 if not should_force_hour and forecast_hour in ready_hours and _incremental_hour_ready(output_dir, forecast_hour):
                     print(f"[incremental skip] F{forecast_hour:02d} already ready", flush=True)
-                    status = "running"
                     if stop_after_hour is not None and forecast_hour >= stop_after_hour:
-                        status = "partial"
-                        index = write_index(status)
+                        index = write_index("partial")
                         break
-                    index = write_index(status)
                     continue
                 failed_hours = [
                     item for item in failed_hours
@@ -461,11 +515,14 @@ def run_incremental_pipeline(
                     "artifacts": {
                         "riskPolygons": "risk_polygons.geojson",
                         "probabilityTile": "probability_tile.json",
+                        "upperAirOverlay": "upper_air_overlay.json",
                         "metadata": "metadata.json",
                     },
+                    "upperAirOverlay": built["upperAirOverlay"]["metadata"],
                 }
                 _write_json(hour_dir / "risk_polygons.geojson", built["polygons"])
                 _write_json(hour_dir / "probability_tile.json", built["tile"])
+                _write_json(hour_dir / "upper_air_overlay.json", built["upperAirOverlay"])
                 _write_json(hour_dir / "metadata.json", hour_metadata)
                 if forecast_hour not in ready_hours:
                     ready_hours.append(forecast_hour)
@@ -476,6 +533,25 @@ def run_incremental_pipeline(
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
+                if resolved_cycle_policy == "latest-startable" and isinstance(exc, FileNotFoundError):
+                    hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
+                    hour_dir.mkdir(parents=True, exist_ok=True)
+                    pending_metadata = {
+                        "forecastHour": forecast_hour,
+                        "status": "pending",
+                        "stage": "incremental",
+                        "reason": "hrrr_hour_not_ready",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "generatedAtISO": _now_iso(),
+                    }
+                    _write_json(hour_dir / "metadata.json", pending_metadata)
+                    print(
+                        f"[incremental pending] F{forecast_hour:02d} HRRR hour not ready; "
+                        "leaving this and later requested hours pending",
+                        flush=True,
+                    )
+                    index = write_index("partial")
+                    break
                 failure = {
                     "forecastHour": forecast_hour,
                     "stage": "incremental",
@@ -500,6 +576,7 @@ def run_incremental_pipeline(
                 time.sleep(hour_delay_seconds)
         else:
             index = write_index("complete" if not failed_hours else "partial")
+        _publish_complete_incremental_snapshot(output_dir, index, hours)
         return index
     except Exception:
         if output_dir.exists():
@@ -508,6 +585,11 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
+                **_cycle_detection_artifact_fields(cycle_detection_metadata if "cycle_detection_metadata" in locals() else {
+                    "requestedForecastHours": hours,
+                    "requiredForecastHourForCycle": required_forecast_hour,
+                    "requiredForecastHoursChecked": sorted({0, required_forecast_hour}),
+                }),
                 "readyForecastHours": sorted(ready_hours),
                 "failedForecastHours": failed,
                 "failedHours": failed_hours,
@@ -643,11 +725,17 @@ def _build_hour_artifact(
         fetched.lats,
         fetched.lons,
     )
-    final_probability_result = apply_category_probability_ceiling(cap_result.probabilities, post_result.category_grid)
+    category_probability_result = apply_category_probability_ceiling(cap_result.probabilities, post_result.category_grid)
+    final_probability_result = apply_offshore_probability_suppression(
+        category_probability_result.probabilities,
+        fetched.lats,
+        fetched.lons,
+    )
     probability_report = {
         **cap_result.report,
         "environmentalCappedProbabilityMax": cap_result.report.get("cappedProbabilityMax"),
-        "cappedProbabilityMax": final_probability_result.report.get("categoryConsistencyProbabilityMax"),
+        "cappedProbabilityMax": final_probability_result.report.get("offshoreSuppressedProbabilityMax"),
+        **category_probability_result.report,
         **final_probability_result.report,
     }
     valid_time_iso = _valid_iso(cycle, forecast_hour)
@@ -661,6 +749,7 @@ def _build_hour_artifact(
         valid_time_iso,
         stride=tile_stride,
     )
+    upper_air_overlay = _upper_air_overlay_from_fetched(cycle, forecast_hour, fetched, valid_time_iso)
     return {
         "features": features,
         "rawProbabilities": raw_probabilities,
@@ -673,6 +762,49 @@ def _build_hour_artifact(
         "validTimeISO": valid_time_iso,
         "polygons": polygons,
         "tile": tile,
+        "upperAirOverlay": upper_air_overlay,
+    }
+
+
+def _upper_air_overlay_from_fetched(
+    cycle: HrrrCycle,
+    forecast_hour: int,
+    fetched: FetchedHour,
+    valid_time_iso: str,
+) -> dict[str, Any]:
+    fields = fetched.fields
+    lines = _hgt500_lines_from_field(fields.get("hgt500"), fetched.lats, fetched.lons)
+    grid_stride = int(fetched.metadata.get("gridStride", 1) or 1)
+    wind_stride = max(4, round(22 / max(1, grid_stride)))
+    vectors = _wind500_vectors_from_fields(
+        fields.get("u500"),
+        fields.get("v500"),
+        fetched.lats,
+        fetched.lons,
+        stride=wind_stride,
+    )
+    return {
+        "upperAirLines": lines,
+        "upperAirVectors": vectors,
+        "metadata": {
+            "domain": "CONUS",
+            "level": "500mb",
+            "fields": ["hgt500", "u500", "v500"],
+            "gridStride": grid_stride,
+            "windBarbStride": wind_stride,
+            "source": "HRRR",
+            "sourceMode": "incremental_artifact_pipeline",
+            "hasHeightContours": len(lines) > 0,
+            "hasWindVectors": len(vectors) > 0,
+            "windVectorCount": len(vectors),
+            "heightContourCount": len(lines),
+            "sourceCycle": cycle.label,
+            "forecastHour": int(forecast_hour),
+            "runDate": cycle.run_date,
+            "runCycle": cycle.run_cycle,
+            "modelForecastHour": int(forecast_hour),
+            "validTimeISO": valid_time_iso,
+        },
     }
 
 
@@ -802,6 +934,57 @@ def _publish_working_dir(working_dir: Path, output_dir: Path) -> None:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+def _publish_complete_incremental_snapshot(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    requested_hours: Iterable[int],
+) -> None:
+    if not _incremental_index_covers_requested_hours(index, requested_hours):
+        return
+    complete_dir = _incremental_complete_output_dir(output_dir)
+    complete_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = complete_dir.with_name(f"{complete_dir.name}.tmp")
+    backup_dir = complete_dir.with_name(f"{complete_dir.name}.previous")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    shutil.copytree(output_dir, tmp_dir)
+    try:
+        if complete_dir.exists():
+            shutil.move(str(complete_dir), str(backup_dir))
+        shutil.move(str(tmp_dir), str(complete_dir))
+    except Exception:
+        shutil.rmtree(complete_dir, ignore_errors=True)
+        if backup_dir.exists():
+            shutil.move(str(backup_dir), str(complete_dir))
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _incremental_complete_output_dir(output_dir: Path) -> Path:
+    output_dir = Path(output_dir)
+    configured = os.environ.get("AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR")
+    if configured and output_dir == DEFAULT_INCREMENTAL_OUTPUT_DIR:
+        return Path(configured)
+    return output_dir.with_name(f"{output_dir.name}_complete")
+
+
+def _incremental_index_covers_requested_hours(
+    index: Mapping[str, Any],
+    requested_hours: Iterable[int],
+) -> bool:
+    if index.get("status") != "complete":
+        return False
+    model = index.get("model")
+    if isinstance(model, Mapping) and model.get("active") is False:
+        return False
+    requested = {int(hour) for hour in requested_hours}
+    ready = set(_int_list(index.get("readyForecastHours")))
+    return requested.issubset(ready)
+
+
 def _write_failed_run_metadata(
     output_dir: Path,
     working_dir: Path,
@@ -826,24 +1009,36 @@ def _write_failed_run_metadata(
         pass
 
 
-def _read_incremental_index(output_dir: Path, cycle: HrrrCycle) -> dict[str, Any] | None:
+def _read_incremental_index_payload(output_dir: Path) -> dict[str, Any]:
     index_path = output_dir / "index.json"
     if not index_path.exists():
-        return None
+        return {}
     try:
         payload = json.loads(index_path.read_text(encoding="utf-8"))
     except Exception:
-        return None
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_incremental_index(output_dir: Path, cycle: HrrrCycle) -> dict[str, Any] | None:
+    payload = _read_incremental_index_payload(output_dir)
     if payload.get("cycle") != cycle.label:
         return None
-    return payload if isinstance(payload, dict) else None
+    return payload
+
+
+def _clear_incremental_hour_artifacts(output_dir: Path) -> None:
+    hours_dir = output_dir / "hours"
+    if hours_dir.exists():
+        shutil.rmtree(hours_dir, ignore_errors=True)
+    hours_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _incremental_hour_ready(output_dir: Path, forecast_hour: int) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
     return all(
         (hour_dir / name).exists()
-        for name in ("risk_polygons.geojson", "probability_tile.json", "metadata.json")
+        for name in ("risk_polygons.geojson", "probability_tile.json", "upper_air_overlay.json", "metadata.json")
     )
 
 
@@ -908,15 +1103,153 @@ def resolve_forecast_hours(
     return hours
 
 
-def _normalize_cycle_detection(detection: HrrrCycle | HrrrCycleDetection) -> tuple[HrrrCycle, dict[str, Any]]:
+def resolve_required_forecast_hour(
+    forecast_hours: Iterable[int],
+    require_complete_hour: int | None = None,
+    cycle_policy: str = DEFAULT_CYCLE_POLICY,
+) -> int:
+    if require_complete_hour is not None:
+        required = int(require_complete_hour)
+    elif cycle_policy == "complete-48":
+        required = 48
+    elif cycle_policy == "latest-startable":
+        required = 0
+    else:
+        hours = sorted({int(hour) for hour in forecast_hours})
+        if not hours:
+            raise ValueError("At least one forecast hour is required")
+        required = max(hours)
+    if required < 0 or required > 48:
+        raise ValueError(f"Required complete HRRR forecast hour must be in 0..48: {required}")
+    return required
+
+
+def resolve_cycle_policy(cycle_policy: str | None = None, incremental: bool = False) -> str:
+    policy = cycle_policy or (DEFAULT_INCREMENTAL_CYCLE_POLICY if incremental else DEFAULT_CYCLE_POLICY)
+    if policy not in CYCLE_POLICIES:
+        raise ValueError(f"Cycle policy must be one of {', '.join(CYCLE_POLICIES)}: {policy}")
+    return policy
+
+
+def _detect_hrrr_cycle(
+    session: requests.Session,
+    now: datetime | None,
+    required_forecast_hour: int,
+    detect_cycle_fn: CycleDetectFn | None,
+) -> HrrrCycle | HrrrCycleDetection:
+    if detect_cycle_fn is not None:
+        return detect_cycle_fn(session, now)
+    return latest_available_hrrr_cycle_with_metadata(
+        session=session,
+        now=now,
+        require_forecast_hour=required_forecast_hour,
+    )
+
+
+def _normalize_cycle_detection(
+    detection: HrrrCycle | HrrrCycleDetection,
+    requested_forecast_hours: Iterable[int],
+    required_forecast_hour: int,
+    cycle_policy: str,
+    require_complete_hour: int | None = None,
+) -> tuple[HrrrCycle, dict[str, Any]]:
+    requested_hours = sorted({int(hour) for hour in requested_forecast_hours})
+    required_hours = sorted({0, int(required_forecast_hour)})
     if isinstance(detection, HrrrCycleDetection):
-        return detection.selected, detection.metadata
-    return detection, {
-        "selected": _cycle_metadata(detection),
-        "checkedCycles": [],
-        "preferredCyclesUTC": [0, 6, 12, 18],
-        "requiredForecastHours": [0, 48],
+        cycle = detection.selected
+        metadata = dict(detection.metadata)
+    else:
+        cycle = detection
+        metadata = {
+            "selected": _cycle_metadata(detection),
+            "checkedCycles": [],
+            "preferredCyclesUTC": [0, 6, 12, 18],
+        }
+    checked_cycles = list(metadata.get("checkedCycles") or [])
+    latest_extended_candidate = metadata.get("latestExtendedCandidate") or (checked_cycles[0] if checked_cycles else _cycle_metadata(cycle))
+    metadata.update({
+        "selected": metadata.get("selected") or _cycle_metadata(cycle),
+        "latestExtendedCandidate": latest_extended_candidate,
+        "checkedCycles": checked_cycles,
+        "requestedForecastHours": requested_hours,
+        "requiredForecastHourForCycle": int(required_forecast_hour),
+        "requiredForecastHours": _int_list(metadata.get("requiredForecastHours")) or required_hours,
+        "requiredForecastHoursChecked": _int_list(metadata.get("requiredForecastHoursChecked")) or required_hours,
+        "cyclePolicy": _cycle_policy_metadata(
+            cycle_policy,
+            requested_hours,
+            required_forecast_hour,
+            require_complete_hour,
+        ),
+    })
+    selected_was_fallback = bool(
+        metadata.get("selectedCycleWasFallback", _selected_cycle_was_fallback(cycle, checked_cycles))
+    )
+    metadata["selectedCycleWasFallback"] = selected_was_fallback
+    metadata["fallbackReason"] = metadata.get("fallbackReason") or (
+        _cycle_fallback_reason(checked_cycles, required_forecast_hour) if selected_was_fallback else None
+    )
+    return cycle, metadata
+
+
+def _cycle_detection_artifact_fields(cycle_detection_metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "requiredForecastHourForCycle": cycle_detection_metadata.get("requiredForecastHourForCycle"),
+        "requiredForecastHoursChecked": cycle_detection_metadata.get("requiredForecastHoursChecked", []),
+        "latestExtendedCandidate": cycle_detection_metadata.get("latestExtendedCandidate"),
+        "selectedCycleWasFallback": bool(cycle_detection_metadata.get("selectedCycleWasFallback")),
+        "cyclePolicy": cycle_detection_metadata.get("cyclePolicy"),
+        "checkedCycles": cycle_detection_metadata.get("checkedCycles", []),
+        "fallbackReason": cycle_detection_metadata.get("fallbackReason"),
     }
+
+
+def _cycle_policy_metadata(
+    cycle_policy: str,
+    requested_forecast_hours: Iterable[int],
+    required_forecast_hour: int,
+    require_complete_hour: int | None = None,
+) -> dict[str, Any]:
+    required_hours = sorted({0, int(required_forecast_hour)})
+    requested_hours = sorted({int(hour) for hour in requested_forecast_hours})
+    return {
+        "name": cycle_policy,
+        "model": "HRRR",
+        "allowedRunCyclesUTC": [0, 6, 12, 18],
+        "requestedForecastHours": requested_hours,
+        "requiredForecastHourForCycle": int(required_forecast_hour),
+        "requiredForecastHoursChecked": required_hours,
+        "requireCompleteHourOverride": require_complete_hour,
+        "description": (
+            "Select the newest 00Z/06Z/12Z/18Z HRRR cycle with usable selected-field "
+            f".idx files for {', '.join(f'f{hour:02d}' for hour in required_hours)}."
+        ),
+    }
+
+
+def _selected_cycle_was_fallback(cycle: HrrrCycle, checked_cycles: list[dict[str, Any]]) -> bool:
+    if not checked_cycles:
+        return False
+    first = checked_cycles[0]
+    try:
+        return str(first.get("runDate")) != cycle.run_date or int(first.get("runCycle")) != cycle.run_cycle
+    except (TypeError, ValueError):
+        return len(checked_cycles) > 1
+
+
+def _cycle_fallback_reason(checked_cycles: list[dict[str, Any]], required_forecast_hour: int) -> str | None:
+    if len(checked_cycles) <= 1:
+        return None
+    latest = checked_cycles[0]
+    missing_hours = [
+        int(report.get("forecastHour", required_forecast_hour))
+        for report in latest.get("hours", [])
+        if not (report.get("idxAvailable") and report.get("requiredFieldsPresent"))
+    ]
+    missing = ", ".join(f"f{hour:02d}" for hour in sorted(set(missing_hours)) if hour >= 0)
+    if missing:
+        return f"{latest.get('label', 'Latest extended HRRR cycle')} incomplete for {missing}"
+    return f"{latest.get('label', 'Latest extended HRRR cycle')} failed completeness checks"
 
 
 def _cycle_metadata(cycle: HrrrCycle) -> dict[str, Any]:
@@ -947,9 +1280,22 @@ def _cache_metadata(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, help="Artifact output directory.")
     parser.add_argument("--forecast-hours", type=int, nargs="+")
     parser.add_argument("--all-hours", action="store_true", help="Process every forecast hour f00 through f48.")
+    parser.add_argument(
+        "--require-complete-hour",
+        type=int,
+        help="Override the HRRR forecast hour used for cycle-completeness checks.",
+    )
+    parser.add_argument(
+        "--cycle-policy",
+        choices=CYCLE_POLICIES,
+        help=(
+            "HRRR cycle selection policy. Normal mode defaults to complete-requested; "
+            "incremental mode defaults to latest-startable."
+        ),
+    )
     parser.add_argument("--max-workers", type=int, default=3)
     parser.add_argument("--grid-stride", type=int, default=3, help="Downsample decoded HRRR grids after decode.")
     parser.add_argument("--tile-stride", type=int, default=None, help="Optional probability-tile stride; defaults to grid stride.")
@@ -991,10 +1337,12 @@ def main() -> None:
     args = parse_args()
     incremental_mode = args.incremental or args.publish_each_hour
     forecast_hours = resolve_cli_forecast_hours(args)
+    cycle_policy = resolve_cycle_policy(args.cycle_policy, incremental=incremental_mode)
+    output_dir = args.output_dir or (DEFAULT_INCREMENTAL_OUTPUT_DIR if incremental_mode else DEFAULT_OUTPUT_DIR)
     while True:
         if incremental_mode:
             metadata = run_incremental_pipeline(
-                output_dir=DEFAULT_INCREMENTAL_OUTPUT_DIR,
+                output_dir=output_dir,
                 forecast_hours=forecast_hours,
                 max_workers=max(1, args.max_workers),
                 tile_stride=args.tile_stride,
@@ -1006,11 +1354,12 @@ def main() -> None:
                 stop_after_hour=args.stop_after_hour,
                 continue_on_hour_failure=args.continue_on_hour_failure,
                 force=args.force,
+                cycle_policy=cycle_policy,
+                require_complete_hour=args.require_complete_hour,
             )
-            output_dir = DEFAULT_INCREMENTAL_OUTPUT_DIR
         else:
             metadata = run_pipeline(
-                output_dir=args.output_dir,
+                output_dir=output_dir,
                 forecast_hours=forecast_hours,
                 max_workers=args.max_workers,
                 tile_stride=args.tile_stride,
@@ -1021,8 +1370,9 @@ def main() -> None:
                 no_cache=args.no_cache,
                 verify_spc=not args.no_spc_verify,
                 preview=not args.no_preview,
+                cycle_policy=cycle_policy,
+                require_complete_hour=args.require_complete_hour,
             )
-            output_dir = args.output_dir
         print(json.dumps({
             "outputDir": str(output_dir),
             "cycle": metadata["cycle"],

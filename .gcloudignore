@@ -14,7 +14,6 @@ __pycache__
 backend/__pycache__
 backend/cache
 backend/ml_data
-backend/models
 backend/archive_data
 *.parquet
 backend_aws.zip

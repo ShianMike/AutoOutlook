@@ -138,44 +138,44 @@ def apply_environmental_probability_caps(
     storm_rel = features.raw["stormRelWindKt"]
 
     hail_cap = np.ones(shape, dtype=float)
-    hail_cap = _cap_where(hail_cap, (mucape < 750.0) | (shear < 30.0), 0.04, reason_counts, "weakInstability")
-    hail_cap = _cap_where(hail_cap, (mucape < 1250.0) | (shear < 40.0), 0.14, reason_counts, "weakKinematics")
-    hail_cap = _cap_where(hail_cap, (mucape < 2000.0) | (shear < 45.0), 0.29, reason_counts, "weakKinematics")
-    hail_cap = _cap_where(hail_cap, (mucape < 3000.0) | (shear < 50.0), 0.44, reason_counts, "weakInstability")
-    hail_cap = _cap_where(hail_cap, (mucape < 3500.0) | (shear < 55.0), 0.59, reason_counts, "weakInstability")
-    hail_cap = _cap_where(hail_cap, (cin <= -150.0) | (dewpoint < 55.0), 0.14, reason_counts, "strongCapOrDryAir")
-    hail_cap = _cap_where(hail_cap, (cin <= -225.0) | (dewpoint < 50.0), 0.04, reason_counts, "strongCapOrDryAir")
+    hail_cap = _cap_where(hail_cap, (mucape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
+    hail_cap = _cap_where(hail_cap, (mucape < 1000.0) | (shear < 32.0), 0.14, reason_counts, "weakKinematics")
+    hail_cap = _cap_where(hail_cap, (mucape < 1500.0) | (shear < 38.0), 0.29, reason_counts, "weakKinematics")
+    hail_cap = _cap_where(hail_cap, (mucape < 2500.0) | (shear < 45.0), 0.44, reason_counts, "weakInstability")
+    hail_cap = _cap_where(hail_cap, (mucape < 3200.0) | (shear < 50.0), 0.59, reason_counts, "weakInstability")
+    hail_cap = _cap_where(hail_cap, (cin <= -175.0) | (dewpoint < 52.0), 0.14, reason_counts, "strongCapOrDryAir")
+    hail_cap = _cap_where(hail_cap, (cin <= -250.0) | (dewpoint < 48.0), 0.04, reason_counts, "strongCapOrDryAir")
 
     tornado_cap = np.ones(shape, dtype=float)
-    tornado_cap = _cap_where(tornado_cap, (srh01 < 100.0) | (lcl > 1600.0) | (mlcape < 750.0), 0.019, reason_counts, "weakKinematics")
-    tornado_cap = _cap_where(tornado_cap, (srh01 < 150.0) | (lcl > 1350.0) | (mlcape < 1000.0), 0.049, reason_counts, "weakKinematics")
-    tornado_cap = _cap_where(tornado_cap, (srh01 < 225.0) | (lcl > 1100.0) | (mlcape < 1250.0), 0.099, reason_counts, "weakKinematics")
+    tornado_cap = _cap_where(tornado_cap, (srh01 < 75.0) | (lcl > 1800.0) | (mlcape < 500.0), 0.019, reason_counts, "weakKinematics")
+    tornado_cap = _cap_where(tornado_cap, (srh01 < 125.0) | (lcl > 1500.0) | (mlcape < 750.0), 0.049, reason_counts, "weakKinematics")
+    tornado_cap = _cap_where(tornado_cap, (srh01 < 190.0) | (lcl > 1250.0) | (mlcape < 1000.0), 0.099, reason_counts, "weakKinematics")
     tornado_cap = _cap_where(
         tornado_cap,
-        (srh03 < 200.0) | (shear < 35.0) | (dewpoint < 58.0) | (cin <= -175.0),
+        (srh03 < 150.0) | (shear < 30.0) | (dewpoint < 55.0) | (cin <= -200.0),
         0.049,
         reason_counts,
         "weakKinematics",
     )
 
     wind_cap = np.ones(shape, dtype=float)
-    wind_cap = _cap_where(wind_cap, (mlcape < 750.0) | (shear < 30.0), 0.04, reason_counts, "weakInstability")
-    wind_cap = _cap_where(wind_cap, (mlcape < 1250.0) | (shear < 40.0), 0.14, reason_counts, "weakKinematics")
+    wind_cap = _cap_where(wind_cap, (mlcape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
+    wind_cap = _cap_where(wind_cap, (mlcape < 1000.0) | (shear < 32.0), 0.14, reason_counts, "weakKinematics")
     wind_cap = _cap_where(
         wind_cap,
-        (storm_rel < 30.0) & (shear < 50.0),
+        (storm_rel < 24.0) & (shear < 42.0),
         0.14,
         reason_counts,
         "weakKinematics",
     )
     wind_cap = _cap_where(
         wind_cap,
-        (storm_rel < 38.0) & (shear < 60.0),
+        (storm_rel < 32.0) & (shear < 52.0),
         0.29,
         reason_counts,
         "weakKinematics",
     )
-    wind_cap = _cap_where(wind_cap, (dewpoint < 55.0) | (cin <= -200.0), 0.14, reason_counts, "strongCapOrDryAir")
+    wind_cap = _cap_where(wind_cap, (dewpoint < 52.0) | (cin <= -225.0), 0.14, reason_counts, "strongCapOrDryAir")
 
     capped["hail"] = np.minimum(capped["hail"], hail_cap)
     capped["tornado"] = np.minimum(capped["tornado"], tornado_cap)
@@ -224,6 +224,39 @@ def apply_category_probability_ceiling(
     })
 
 
+def apply_offshore_probability_suppression(
+    probabilities: Mapping[str, np.ndarray],
+    lats: np.ndarray,
+    lons: np.ndarray,
+) -> ProbabilityCapResult:
+    """Remove severe hazard probabilities over open Gulf/Atlantic water."""
+    first = next(iter(probabilities.values()))
+    shape = np.asarray(first).shape
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, shape)
+    masks = _strict_offshore_masks(lat_grid, lon_grid)
+    offshore_mask = np.zeros(shape, dtype=bool)
+    for mask in masks.values():
+        offshore_mask |= mask
+
+    capped: dict[str, np.ndarray] = {}
+    capped_counts: dict[str, int] = {}
+    for hazard, values in probabilities.items():
+        arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
+        capped_values = np.where(offshore_mask, 0.0, arr)
+        capped[hazard] = capped_values
+        capped_counts[hazard] = int(np.sum(arr > capped_values))
+
+    return ProbabilityCapResult(capped, {
+        "offshoreProbabilitySuppressionApplied": True,
+        "offshoreProbabilitySuppressedCells": {
+            name: int(np.sum(mask))
+            for name, mask in masks.items()
+        },
+        "offshoreProbabilitySuppressedHazardCells": capped_counts,
+        "offshoreSuppressedProbabilityMax": _probability_max(capped),
+    })
+
+
 def category_grid_from_probabilities(
     probabilities: Mapping[str, np.ndarray],
     features: GriddedFeatures,
@@ -234,40 +267,40 @@ def category_grid_from_probabilities(
     wind = _hazard_ord("wind", np.asarray(probabilities["wind"], dtype=float))
     severe_ord = np.maximum.reduce([tornado, hail, wind])
     organized_severe_mask = (
-        (features.raw["mucape"] >= 750.0)
-        & (features.raw["sfcDewpointF"] >= 52.0)
-        & (features.raw["shear06Kt"] >= 30.0)
-        & (features.raw["cin"] > -200.0)
+        (features.raw["mucape"] >= 500.0)
+        & (features.raw["sfcDewpointF"] >= 50.0)
+        & (features.raw["shear06Kt"] >= 25.0)
+        & (features.raw["cin"] > -225.0)
     )
     severe_kinematic_mask = (
-        (features.raw["shear06Kt"] >= 40.0)
+        (features.raw["shear06Kt"] >= 35.0)
         & (
-            (features.raw["stormRelWindKt"] >= 28.0)
-            | (features.raw["srh01"] >= 100.0)
-            | (features.raw["srh03"] >= 200.0)
-            | ((features.raw["shear06Kt"] >= 55.0) & (features.raw["mucape"] >= 1250.0))
+            (features.raw["stormRelWindKt"] >= 24.0)
+            | (features.raw["srh01"] >= 75.0)
+            | (features.raw["srh03"] >= 150.0)
+            | ((features.raw["shear06Kt"] >= 50.0) & (features.raw["mucape"] >= 1000.0))
         )
     )
     significant_severe_mask = (
-        (features.raw["mucape"] >= 1500.0)
-        & (features.raw["sfcDewpointF"] >= 58.0)
-        & (features.raw["shear06Kt"] >= 40.0)
-        & (features.raw["cin"] > -150.0)
+        (features.raw["mucape"] >= 1250.0)
+        & (features.raw["sfcDewpointF"] >= 55.0)
+        & (features.raw["shear06Kt"] >= 35.0)
+        & (features.raw["cin"] > -175.0)
     )
     significant_kinematic_mask = (
-        (features.raw["shear06Kt"] >= 45.0)
+        (features.raw["shear06Kt"] >= 40.0)
         & (
-            (features.raw["stormRelWindKt"] >= 34.0)
-            | (features.raw["srh01"] >= 150.0)
-            | (features.raw["srh03"] >= 250.0)
-            | ((features.raw["shear06Kt"] >= 60.0) & (features.raw["mucape"] >= 2000.0))
+            (features.raw["stormRelWindKt"] >= 30.0)
+            | (features.raw["srh01"] >= 125.0)
+            | (features.raw["srh03"] >= 220.0)
+            | ((features.raw["shear06Kt"] >= 55.0) & (features.raw["mucape"] >= 1750.0))
         )
     )
     high_end_mask = (
-        (features.raw["mucape"] >= 2500.0)
-        & (features.raw["sfcDewpointF"] >= 62.0)
-        & (features.raw["shear06Kt"] >= 50.0)
-        & (features.raw["cin"] > -125.0)
+        (features.raw["mucape"] >= 2200.0)
+        & (features.raw["sfcDewpointF"] >= 59.0)
+        & (features.raw["shear06Kt"] >= 45.0)
+        & (features.raw["cin"] > -150.0)
     )
     severe_ord = np.where(organized_severe_mask, severe_ord, 0)
     severe_ord = np.where(severe_kinematic_mask, severe_ord, np.minimum(severe_ord, 2))
@@ -307,6 +340,11 @@ def postprocess_category_grid(
         "weakKinematics": 0,
         "isolatedComponent": 0,
         "coastalOffshore": 0,
+        "gulfOfMexico": 0,
+        "floridaGulf": 0,
+        "atlanticOcean": 0,
+        "southTexasGulfCoast": 0,
+        "texasMexicoBorder": 0,
         "missingCategoryBuffer": 0,
     }
     try:
@@ -316,9 +354,20 @@ def postprocess_category_grid(
 
     lat_grid = lon_grid = None
     land_mask = None
+    gulf_offshore_mask = None
+    florida_gulf_mask = None
+    atlantic_offshore_mask = None
+    south_texas_gulf_mask = None
+    texas_mexico_border_mask = None
     if lats is not None and lons is not None:
         lat_grid, lon_grid = _lat_lon_grid(lats, lons, grid.shape)
         land_mask = _rough_conus_land_mask(lat_grid, lon_grid)
+        offshore_masks = _strict_offshore_masks(lat_grid, lon_grid)
+        gulf_offshore_mask = offshore_masks["gulfOfMexico"]
+        florida_gulf_mask = offshore_masks["floridaGulf"]
+        atlantic_offshore_mask = offshore_masks["atlanticOcean"]
+        south_texas_gulf_mask = offshore_masks["southTexasGulfCoast"]
+        texas_mexico_border_mask = _strict_category_cap_masks(lat_grid, lon_grid)["texasMexicoBorder"]
 
     if ndimage is not None:
         organized = _organized_support_mask(features)
@@ -346,11 +395,46 @@ def postprocess_category_grid(
                 elif ordinal >= 5 and not _component_has_high_end_support(features, component):
                     target = SPC_RISK_LABELS.index("ENH")
                     reason = "weakInstability"
+                if florida_gulf_mask is not None and ordinal >= 2:
+                    florida_gulf_fraction = float(np.mean(florida_gulf_mask[component]))
+                    if florida_gulf_fraction >= 0.20:
+                        florida_gulf_cap = (
+                            SPC_RISK_LABELS.index("SLGT")
+                            if _component_has_high_end_support(features, component)
+                            else SPC_RISK_LABELS.index("MRGL")
+                        )
+                        if florida_gulf_cap < target:
+                            target = florida_gulf_cap
+                            reason = "floridaGulf"
+                if gulf_offshore_mask is not None and ordinal >= 2:
+                    gulf_fraction = float(np.mean(gulf_offshore_mask[component]))
+                    if gulf_fraction >= 0.20:
+                        gulf_cap = (
+                            SPC_RISK_LABELS.index("SLGT")
+                            if _component_has_high_end_support(features, component)
+                            else SPC_RISK_LABELS.index("MRGL")
+                        )
+                        if gulf_cap < target:
+                            target = gulf_cap
+                            reason = "gulfOfMexico"
+                if atlantic_offshore_mask is not None and ordinal >= 2:
+                    atlantic_fraction = float(np.mean(atlantic_offshore_mask[component]))
+                    if atlantic_fraction >= 0.20:
+                        atlantic_cap = (
+                            SPC_RISK_LABELS.index("SLGT")
+                            if _component_has_high_end_support(features, component)
+                            else SPC_RISK_LABELS.index("MRGL")
+                        )
+                        if atlantic_cap < target:
+                            target = atlantic_cap
+                            reason = "atlanticOcean"
                 if land_mask is not None and ordinal >= 3:
                     land_fraction = float(np.mean(land_mask[component]))
                     if land_fraction < 0.35 and not _component_has_high_end_support(features, component):
-                        target = min(target, max(ordinal - 1, 0))
-                        reason = "coastalOffshore"
+                        coastal_cap = max(ordinal - 1, 0)
+                        if coastal_cap < target:
+                            target = coastal_cap
+                            reason = "coastalOffshore"
                 if target < ordinal:
                     grid[component] = target
                     if reason is not None:
@@ -365,6 +449,23 @@ def postprocess_category_grid(
             buffer_mask &= organized
             buffer_mask &= grid < ordinal - 1
             grid[buffer_mask] = ordinal - 1
+
+        if gulf_offshore_mask is not None:
+            _force_offshore_none(grid, gulf_offshore_mask, downgraded, "gulfOfMexico")
+        if florida_gulf_mask is not None:
+            _force_offshore_none(grid, florida_gulf_mask, downgraded, "floridaGulf")
+        if atlantic_offshore_mask is not None:
+            _force_offshore_none(grid, atlantic_offshore_mask, downgraded, "atlanticOcean")
+        if south_texas_gulf_mask is not None:
+            _force_offshore_none(grid, south_texas_gulf_mask, downgraded, "southTexasGulfCoast")
+        if texas_mexico_border_mask is not None:
+            _cap_category_at_most(
+                grid,
+                texas_mexico_border_mask,
+                SPC_RISK_LABELS.index("MRGL"),
+                downgraded,
+                "texasMexicoBorder",
+            )
 
     report = {
         "morphologicalSmoothingApplied": ndimage is not None,
@@ -449,6 +550,20 @@ def probability_tile(
         probabilities,
         stride,
     )
+    strict_tile_mask = np.zeros(cats.shape, dtype=bool)
+    for mask in _strict_offshore_masks(tile_lats, tile_lons).values():
+        strict_tile_mask |= mask
+    cats = np.where(strict_tile_mask, 0, cats)
+    for hazard, grid in tile_probabilities.items():
+        tile_probabilities[hazard] = np.where(strict_tile_mask, 0.0, grid)
+    regional_cap = SPC_RISK_LABELS.index("MRGL")
+    regional_cap_mask = np.zeros(cats.shape, dtype=bool)
+    for mask in _strict_category_cap_masks(tile_lats, tile_lons).values():
+        regional_cap_mask |= mask
+    cats = np.where(regional_cap_mask & (cats > regional_cap), regional_cap, cats)
+    for hazard, grid in tile_probabilities.items():
+        regional_caps = _category_probability_cap_grid(hazard, np.full(cats.shape, regional_cap, dtype=np.int16))
+        tile_probabilities[hazard] = np.where(regional_cap_mask, np.minimum(grid, regional_caps), grid)
     return {
         "forecastHour": forecast_hour,
         "validTimeISO": valid_time_iso,
@@ -643,21 +758,21 @@ def _int_value(value: Any, default: int = 0) -> int:
 
 def _organized_support_mask(features: GriddedFeatures) -> np.ndarray:
     return (
-        (np.maximum(features.raw["mucape"], features.raw["mlcape"]) >= 750.0)
-        & (features.raw["sfcDewpointF"] >= 52.0)
-        & (features.raw["cin"] > -200.0)
-        & (features.raw["shear06Kt"] >= 30.0)
+        (np.maximum(features.raw["mucape"], features.raw["mlcape"]) >= 500.0)
+        & (features.raw["sfcDewpointF"] >= 50.0)
+        & (features.raw["cin"] > -225.0)
+        & (features.raw["shear06Kt"] >= 25.0)
     )
 
 
 def _min_component_cells(ordinal: int) -> int:
     return {
-        1: 12,
-        2: 10,
-        3: 8,
-        4: 7,
-        5: 6,
-        6: 6,
+        1: 8,
+        2: 7,
+        3: 5,
+        4: 5,
+        5: 4,
+        6: 4,
     }.get(int(ordinal), 4)
 
 
@@ -665,6 +780,29 @@ def _has_adjacent_support(grid: np.ndarray, component: np.ndarray, min_ordinal: 
     expanded = ndimage.binary_dilation(component, structure=np.ones((3, 3), dtype=bool), iterations=1)
     ring = expanded & ~component
     return bool(np.any(grid[ring] >= min_ordinal))
+
+
+def _force_offshore_none(
+    grid: np.ndarray,
+    mask: np.ndarray,
+    downgraded: dict[str, int],
+    reason: str,
+) -> None:
+    target = np.asarray(mask, dtype=bool) & (grid > 0)
+    downgraded[reason] += int(np.sum(target))
+    grid[target] = 0
+
+
+def _cap_category_at_most(
+    grid: np.ndarray,
+    mask: np.ndarray,
+    max_ordinal: int,
+    downgraded: dict[str, int],
+    reason: str,
+) -> None:
+    target = np.asarray(mask, dtype=bool) & (grid > max_ordinal)
+    downgraded[reason] += int(np.sum(target))
+    grid[target] = int(max_ordinal)
 
 
 def _component_has_significant_support(features: GriddedFeatures, component: np.ndarray) -> bool:
@@ -677,13 +815,13 @@ def _component_has_significant_support(features: GriddedFeatures, component: np.
     lcl = features.raw["lclM"][component]
     if mucape.size == 0:
         return False
-    instability = (np.nanmax(mucape) >= 2000.0) or (np.nanmax(mlcape) >= 1500.0)
-    organized_wind = (np.nanmax(shear) >= 55.0 and np.nanmax(storm_rel) >= 34.0)
+    instability = (np.nanmax(mucape) >= 1750.0) or (np.nanmax(mlcape) >= 1250.0)
+    organized_wind = (np.nanmax(shear) >= 50.0 and np.nanmax(storm_rel) >= 30.0)
     organized_rotation = (
-        np.nanmax(srh01) >= 150.0
-        and np.nanmax(srh03) >= 225.0
-        and np.nanmin(lcl) <= 1350.0
-        and np.nanmax(shear) >= 40.0
+        np.nanmax(srh01) >= 125.0
+        and np.nanmax(srh03) >= 200.0
+        and np.nanmin(lcl) <= 1500.0
+        and np.nanmax(shear) >= 35.0
     )
     return bool(instability and (organized_wind or organized_rotation))
 
@@ -698,13 +836,13 @@ def _component_has_high_end_support(features: GriddedFeatures, component: np.nda
     lcl = features.raw["lclM"][component]
     if mucape.size == 0:
         return False
-    high_hail_or_wind = np.nanmax(mucape) >= 3000.0 and np.nanmax(shear) >= 55.0 and np.nanmax(storm_rel) >= 38.0
+    high_hail_or_wind = np.nanmax(mucape) >= 2700.0 and np.nanmax(shear) >= 50.0 and np.nanmax(storm_rel) >= 34.0
     high_tornado = (
-        np.nanmax(mlcape) >= 2000.0
-        and np.nanmax(srh01) >= 225.0
-        and np.nanmax(srh03) >= 300.0
-        and np.nanmin(lcl) <= 1100.0
-        and np.nanmax(shear) >= 45.0
+        np.nanmax(mlcape) >= 1750.0
+        and np.nanmax(srh01) >= 190.0
+        and np.nanmax(srh03) >= 260.0
+        and np.nanmin(lcl) <= 1250.0
+        and np.nanmax(shear) >= 40.0
     )
     return bool(high_hail_or_wind or high_tornado)
 
@@ -724,6 +862,108 @@ def _rough_conus_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.nda
     points_lon = np.asarray(lon_grid, dtype=float)
     points_lat = np.asarray(lat_grid, dtype=float)
     return _points_in_polygon(points_lon, points_lat, conus_ring)
+
+
+def _interp_anchor(x: np.ndarray, anchors: list[tuple[float, float]]) -> np.ndarray:
+    xp = np.asarray([a[0] for a in anchors], dtype=float)
+    fp = np.asarray([a[1] for a in anchors], dtype=float)
+    return np.interp(x, xp, fp, left=fp[0], right=fp[-1])
+
+
+def _gulf_min_land_lat(lon_grid: np.ndarray) -> np.ndarray:
+    anchors = [
+        (-98.5, 26.7),
+        (-96.0, 28.2),
+        (-94.0, 29.2),
+        (-91.0, 29.4),
+        (-88.5, 30.0),
+        (-86.0, 30.2),
+        (-84.0, 29.9),
+        (-82.0, 28.5),
+        (-81.0, 27.0),
+    ]
+    return _interp_anchor(lon_grid, anchors)
+
+
+def _atlantic_max_land_lon(lat_grid: np.ndarray) -> np.ndarray:
+    anchors = [
+        (25.0, -80.1),
+        (27.0, -80.1),
+        (29.0, -80.7),
+        (30.5, -81.1),
+        (32.0, -80.2),
+        (34.0, -78.4),
+        (36.0, -75.5),
+        (38.0, -74.5),
+        (40.0, -73.7),
+        (42.0, -70.1),
+        (44.0, -69.0),
+        (46.0, -67.5),
+    ]
+    return _interp_anchor(lat_grid, anchors)
+
+
+def _gulf_of_mexico_offshore_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    gulf_domain = (lon_grid >= -98.5) & (lon_grid <= -81.0) & (lat_grid >= 18.0) & (lat_grid <= 31.0)
+    return gulf_domain & (lat_grid < (_gulf_min_land_lat(lon_grid) - 0.10))
+
+
+def _florida_gulf_offshore_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    florida_gulf_domain = (lon_grid >= -87.8) & (lon_grid <= -80.0) & (lat_grid >= 23.0) & (lat_grid <= 31.0)
+    west_florida_waters = lat_grid < (_gulf_min_land_lat(lon_grid) - 0.10)
+    florida_straits = (lat_grid < 25.1) & (lon_grid >= -83.5) & (lon_grid <= -80.0)
+    return florida_gulf_domain & (west_florida_waters | florida_straits)
+
+
+def _atlantic_ocean_offshore_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    atlantic_domain = (lat_grid >= 21.0) & (lat_grid <= 46.0) & (lon_grid >= -82.0) & (lon_grid <= -66.0)
+    bahamas_south_florida_waters = (
+        (lat_grid >= 21.0)
+        & (lat_grid < 25.15)
+        & (lon_grid > -82.0)
+        & (lon_grid < -73.0)
+    )
+    return (atlantic_domain & (lon_grid > (_atlantic_max_land_lon(lat_grid) + 0.10))) | bahamas_south_florida_waters
+
+
+def _south_texas_gulf_coast_strict_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    domain = (
+        (lat_grid >= 25.0)
+        & (lat_grid <= 29.45)
+        & (lon_grid >= -98.8)
+        & (lon_grid <= -94.4)
+    )
+    gulf_edge = _gulf_min_land_lat(np.clip(lon_grid, -98.5, -81.0))
+    return domain & (lat_grid <= (gulf_edge + 1.55))
+
+
+def _texas_mexico_border_mrgl_cap_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    corridor = [
+        (-106.70, 25.00),
+        (-106.70, 32.35),
+        (-99.00, 32.35),
+        (-96.15, 32.15),
+        (-95.55, 31.15),
+        (-96.25, 29.00),
+        (-97.20, 25.55),
+        (-106.70, 25.00),
+    ]
+    return _points_in_polygon(lon_grid, lat_grid, corridor)
+
+
+def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
+    return {
+        "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid),
+        "floridaGulf": _florida_gulf_offshore_mask(lat_grid, lon_grid),
+        "atlanticOcean": _atlantic_ocean_offshore_mask(lat_grid, lon_grid),
+        "southTexasGulfCoast": _south_texas_gulf_coast_strict_mask(lat_grid, lon_grid),
+    }
+
+
+def _strict_category_cap_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
+    return {
+        "texasMexicoBorder": _texas_mexico_border_mrgl_cap_mask(lat_grid, lon_grid),
+    }
 
 
 def _points_in_polygon(x: np.ndarray, y: np.ndarray, ring: list[tuple[float, float]]) -> np.ndarray:

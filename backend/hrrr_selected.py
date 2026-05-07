@@ -241,11 +241,14 @@ def latest_available_hrrr_cycle_with_metadata(
     require_forecast_hour: int = 48,
 ) -> HrrrCycleDetection:
     """Return newest complete extended HRRR cycle plus checked-cycle metadata."""
+    require_forecast_hour = int(require_forecast_hour)
+    if require_forecast_hour < 0 or require_forecast_hour > 48:
+        raise ValueError(f"Required HRRR forecast hour must be in 0..48: {require_forecast_hour}")
     own_session = session is None
     session = session or requests.Session()
     session.headers.setdefault("User-Agent", "AutoOutlook/1.0")
     checked: list[dict[str, Any]] = []
-    required_hours = (0, int(require_forecast_hour))
+    required_hours = tuple(sorted({0, require_forecast_hour}))
     try:
         if now is None:
             now = datetime.now(timezone.utc)
@@ -260,11 +263,18 @@ def latest_available_hrrr_cycle_with_metadata(
                 candidate = _cycle_completeness(session, cycle, required_hours)
                 checked.append(candidate)
                 if candidate["complete"]:
+                    selected_was_fallback = len(checked) > 1
                     metadata = {
                         "selected": _cycle_metadata(cycle),
+                        "latestExtendedCandidate": checked[0] if checked else _cycle_metadata(cycle),
                         "checkedCycles": checked,
                         "preferredCyclesUTC": list(EXTENDED_CYCLE_HOURS),
                         "requiredForecastHours": list(required_hours),
+                        "requiredForecastHourForCycle": require_forecast_hour,
+                        "requiredForecastHoursChecked": list(required_hours),
+                        "selectedCycleWasFallback": selected_was_fallback,
+                        "cyclePolicy": _cycle_policy_metadata(require_forecast_hour),
+                        "fallbackReason": _fallback_reason(checked, require_forecast_hour) if selected_was_fallback else None,
                         "maxLookbackHours": max_lookback_hours,
                     }
                     return HrrrCycleDetection(selected=cycle, metadata=metadata)
@@ -609,6 +619,35 @@ def _cycle_metadata(cycle: HrrrCycle) -> dict[str, Any]:
         "cycleTimeISO": cycle.cycle_time.isoformat().replace("+00:00", "Z"),
         "label": cycle.label,
     }
+
+
+def _cycle_policy_metadata(require_forecast_hour: int) -> dict[str, Any]:
+    required_hours = sorted({0, int(require_forecast_hour)})
+    return {
+        "name": "extended_hrrr_complete_required_hours",
+        "model": "HRRR",
+        "allowedRunCyclesUTC": list(EXTENDED_CYCLE_HOURS),
+        "requiredForecastHoursChecked": required_hours,
+        "description": (
+            "Select the newest 00Z/06Z/12Z/18Z HRRR cycle with usable selected-field "
+            f".idx files for {', '.join(f'f{hour:02d}' for hour in required_hours)}."
+        ),
+    }
+
+
+def _fallback_reason(checked_cycles: list[dict[str, Any]], require_forecast_hour: int) -> str | None:
+    if len(checked_cycles) <= 1:
+        return None
+    latest = checked_cycles[0]
+    missing_hours = [
+        int(report.get("forecastHour", require_forecast_hour))
+        for report in latest.get("hours", [])
+        if not (report.get("idxAvailable") and report.get("requiredFieldsPresent"))
+    ]
+    missing = ", ".join(f"f{hour:02d}" for hour in sorted(set(missing_hours)) if hour >= 0)
+    if missing:
+        return f"{latest.get('label', 'Latest extended HRRR cycle')} incomplete for {missing}"
+    return f"{latest.get('label', 'Latest extended HRRR cycle')} failed completeness checks"
 
 
 def _cycle_completeness(

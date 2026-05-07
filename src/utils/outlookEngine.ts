@@ -52,10 +52,10 @@ function capCategory(category: RiskCategory, maxCategory: RiskCategory): RiskCat
 }
 
 function comfortableForCategory(hazard: HazardKey, probability: number, category: RiskCategory): boolean {
-  if (category === 'SLGT') return hazard === 'tornado' ? probability >= 0.06 : probability >= 0.18;
-  if (category === 'ENH') return hazard === 'tornado' ? probability >= 0.13 : probability >= 0.36;
-  if (category === 'MOD') return hazard === 'tornado' ? probability >= 0.20 : probability >= 0.50;
-  if (category === 'HIGH') return hazard === 'tornado' ? probability >= 0.36 : probability >= 0.68;
+  if (category === 'SLGT') return hazard === 'tornado' ? probability >= 0.05 : probability >= 0.15;
+  if (category === 'ENH') return hazard === 'tornado' ? probability >= 0.11 : probability >= 0.32;
+  if (category === 'MOD') return hazard === 'tornado' ? probability >= 0.17 : probability >= 0.47;
+  if (category === 'HIGH') return hazard === 'tornado' ? probability >= 0.32 : probability >= 0.64;
   return true;
 }
 
@@ -78,28 +78,28 @@ function strictCategoryGate(
       : a,
   'wind' as HazardKey);
 
-  if (ing.initiationConf < 0.50 || maxCape < 1000 || ing.shear06Kt < 30) return 'MRGL';
-  if (ing.capStrength === 'strong' && ing.frontSignal !== 'strong') return 'MRGL';
+  if (ing.initiationConf < 0.40 || maxCape < 750 || ing.shear06Kt < 25) return 'MRGL';
+  if (ing.capStrength === 'strong' && ing.frontSignal === 'none') return 'MRGL';
   if (!comfortableForCategory(driver, hazards[driver].probability, 'SLGT')) return 'MRGL';
 
   let gated = category;
   if (catOrd(gated) >= 3) {
     const enhEnvironment =
-      ing.initiationConf >= 0.65 &&
-      maxCape >= 2000 &&
-      ing.shear06Kt >= 42 &&
-      confidence >= 0.68 &&
-      severeHazards.length >= 2 &&
+      ing.initiationConf >= 0.58 &&
+      maxCape >= 1500 &&
+      ing.shear06Kt >= 35 &&
+      confidence >= 0.58 &&
+      severeHazards.length >= 1 &&
       comfortableForCategory(driver, hazards[driver].probability, 'ENH');
     if (!enhEnvironment) gated = capCategory(gated, 'SLGT');
   }
 
   if (catOrd(gated) >= 4) {
     const modEnvironment =
-      ing.initiationConf >= 0.78 &&
-      maxCape >= 3000 &&
-      ing.shear06Kt >= 50 &&
-      confidence >= 0.78 &&
+      ing.initiationConf >= 0.70 &&
+      maxCape >= 2500 &&
+      ing.shear06Kt >= 45 &&
+      confidence >= 0.70 &&
       sigSevere &&
       comfortableForCategory(driver, hazards[driver].probability, 'MOD');
     if (!modEnvironment) gated = capCategory(gated, 'ENH');
@@ -107,10 +107,10 @@ function strictCategoryGate(
 
   if (catOrd(gated) >= 5) {
     const highEnvironment =
-      ing.initiationConf >= 0.88 &&
-      maxCape >= 4000 &&
-      ing.shear06Kt >= 60 &&
-      confidence >= 0.88 &&
+      ing.initiationConf >= 0.82 &&
+      maxCape >= 3500 &&
+      ing.shear06Kt >= 55 &&
+      confidence >= 0.82 &&
       sigSevere &&
       comfortableForCategory(driver, hazards[driver].probability, 'HIGH');
     if (!highEnvironment) gated = capCategory(gated, 'MOD');

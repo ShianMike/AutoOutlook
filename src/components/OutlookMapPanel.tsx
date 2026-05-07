@@ -29,11 +29,27 @@ function waitForPaint(): Promise<void> {
   });
 }
 
+function fmtUTC(iso: string | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}${String(d.getUTCMinutes()).padStart(2, '0')}Z`;
+}
+
+function isNewerCycle(candidateISO: string | undefined, selectedISO: string | undefined): boolean {
+  const candidateMs = Date.parse(candidateISO ?? '');
+  const selectedMs = Date.parse(selectedISO ?? '');
+  return Number.isFinite(candidateMs) && Number.isFinite(selectedMs) && candidateMs > selectedMs;
+}
+
 export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
+  const artifactMetadata = outlookArtifacts.artifacts?.metadata;
+  const latestCandidate = artifactMetadata?.latestExtendedCandidate ?? undefined;
+  const staleArtifacts = isNewerCycle(latestCandidate?.cycleTimeISO, artifactMetadata?.cycleTimeISO);
   const generatedHazardsReady = hasGeneratedHazardTile(outlookArtifacts.artifacts, snapshot?.forecastHour, outlookArtifacts.status);
   const mlDriven = Boolean(snapshot?.mlHazards);
   const useRuleHazardFallback = !mlDriven && outlookArtifacts.status === 'missing';
@@ -57,6 +73,11 @@ export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookM
 
   const shear = snapshot ? `${Math.round(snapshot.ingredients.shear06Kt)} kt SHR` : '—';
   const cape = snapshot ? `${Math.round(snapshot.ingredients.mucape)} CAPE` : '—';
+  const timeRows = [
+    ['HRRR cycle', artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO)],
+    ['Forecast valid', fmtUTC(snapshot?.validTimeISO)],
+    ['Artifact generated', fmtUTC(artifactMetadata?.generatedAtISO)],
+  ] as const;
 
   const saveCurrentMap = async () => {
     if (!snapshot || !exportRef.current || isExporting) return;
@@ -127,6 +148,27 @@ export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookM
         )}
       </div>
 
+      <div className="mb-2 grid grid-cols-1 gap-2 lg:grid-cols-[1fr_auto]">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {timeRows.map(([label, value]) => (
+            <div key={label} className="border-[2px] border-ink bg-paper px-2 py-1.5 shadow-retro-sm">
+              <div className="font-mono text-[8px] font-bold uppercase tracking-[0.24em] text-ink/55">{label}</div>
+              <div className="mt-0.5 font-mono text-[11px] font-bold uppercase tracking-wider text-ink">{value}</div>
+            </div>
+          ))}
+        </div>
+        <div
+          className={[
+            'border-[2px] border-ink px-2 py-1.5 font-mono text-[10px] font-bold uppercase tracking-widest shadow-retro-sm',
+            staleArtifacts ? 'bg-signal-amber text-ink' : 'bg-paper text-ink/65',
+          ].join(' ')}
+        >
+          {staleArtifacts
+            ? `Artifact lag: latest ${latestCandidate?.label ?? 'extended HRRR'}`
+            : `Cycle policy: ${artifactMetadata?.cyclePolicy?.name ?? '—'}`}
+        </div>
+      </div>
+
       <div ref={exportRef} className="bg-paper" data-testid="outlook-export-area">
         <div
           className={[
@@ -134,11 +176,14 @@ export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookM
             isExporting ? 'flex' : 'hidden',
           ].join(' ')}
         >
-          <div className="border-[3px] border-ink bg-paper px-3 py-2 shadow-retro-sm">
-            <div className="font-display text-[24px] font-extrabold uppercase leading-none tracking-tight text-ink">
-              Auto<span className="text-signal-amber">Outlook</span>
+          <div className="w-[320px] shrink-0 overflow-hidden border-[3px] border-ink bg-paper px-3 py-2 shadow-retro-sm">
+            <div
+              className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap font-display text-[18px] font-extrabold uppercase leading-none tracking-normal text-ink"
+              title="AutoOutlook"
+            >
+              AUTO<span className="text-signal-amber">OUTLOOK</span>
             </div>
-            <div className="mt-1 font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
+            <div className="mt-1 max-w-full overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/65">
               autooutlook.tech
             </div>
           </div>
@@ -161,7 +206,9 @@ export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookM
             isExporting ? 'flex' : 'hidden',
           ].join(' ')}
         >
-          <span className="shrink-0">Valid: {validTime}</span>
+          <span className="shrink-0">HRRR cycle: {fmtUTC(artifactMetadata?.cycleTimeISO)}</span>
+          <span className="shrink-0">Forecast valid: {validTime}</span>
+          <span className="shrink-0">Generated: {fmtUTC(artifactMetadata?.generatedAtISO)}</span>
           <span className="min-w-[220px] flex-1 text-center leading-snug text-paper/80">
             {snapshot ? snapshot.region.label : 'AWAITING REGION DETECTION…'}
           </span>
@@ -189,7 +236,6 @@ export default function OutlookMapPanel({ snapshot, outlookArtifacts }: OutlookM
                   title="Thunderstorm Outlook"
                   artifacts={outlookArtifacts.artifacts}
                   status={outlookArtifacts.status}
-                  showWatermark
                 />
                 <GeneratedHazardProbabilityMap
                   snapshot={snapshot}
