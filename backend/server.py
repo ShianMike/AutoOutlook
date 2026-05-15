@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import json
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,6 +55,8 @@ CORS(app, resources={r"/api/*": {"origins": _cors_origins()}})
 cache = TTLCache(ttl_seconds=600)  # 10 min
 _build_locks: dict[str, threading.Lock] = {}
 _build_locks_guard = threading.Lock()
+_gcs_client = None
+_gcs_client_guard = threading.Lock()
 ARTIFACT_DIR = Path(os.environ.get(
     "AUTOOUTLOOK_ARTIFACT_DIR",
     Path(__file__).resolve().parent / "artifacts" / "latest",
@@ -62,11 +65,16 @@ INCREMENTAL_ARTIFACT_DIR = Path(os.environ.get(
     "AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR",
     Path(__file__).resolve().parent / "artifacts" / "latest_incremental",
 ))
-INCREMENTAL_COMPLETE_ARTIFACT_DIR = Path(os.environ.get(
-    "AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR",
-    INCREMENTAL_ARTIFACT_DIR.with_name(f"{INCREMENTAL_ARTIFACT_DIR.name}_complete"),
-))
+_INCREMENTAL_COMPLETE_ARTIFACT_DIR_ENV = os.environ.get("AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR")
+INCREMENTAL_COMPLETE_ARTIFACT_DIR = (
+    Path(_INCREMENTAL_COMPLETE_ARTIFACT_DIR_ENV)
+    if _INCREMENTAL_COMPLETE_ARTIFACT_DIR_ENV
+    else None
+)
 FULL_INCREMENTAL_FORECAST_HOURS = set(range(49))
+JSON_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_JSON_CACHE_SECONDS", "300"))
+PNG_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_PNG_CACHE_SECONDS", "900"))
+STATIC_ASSET_CACHE_SECONDS = 31536000
 
 
 def _singleflight_lock(key: str) -> threading.Lock:
@@ -97,12 +105,8 @@ def _parse_iso_utc(value: object) -> datetime | None:
 
 def _artifact_cycle_time() -> datetime | None:
     index_path = _selected_incremental_artifact_dir() / "index.json"
-    if not index_path.exists():
-        return None
-    try:
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        log.info("Could not read incremental artifact index for forecast cycle sync: %s", exc)
+    index = _read_json_path(index_path)
+    if not isinstance(index, dict):
         return None
     cycle_time = _parse_iso_utc(index.get("cycleTimeISO"))
     ready = index.get("readyForecastHours")
@@ -120,6 +124,30 @@ def health():
     return jsonify({"status": "ok", "service": "autooutlook-backend"})
 
 
+def _json_response(payload, cache_seconds: int | None = JSON_ARTIFACT_CACHE_SECONDS):
+    response = jsonify(payload)
+    if cache_seconds is not None and cache_seconds > 0:
+        response.headers["Cache-Control"] = f"public, max-age={int(cache_seconds)}"
+    return response
+
+
+def _json_error(payload: dict, status_code: int):
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status_code
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _live_build_enabled() -> bool:
+    return _bool_env("AUTOOUTLOOK_ENABLE_LIVE_BUILD", True)
+
+
 @app.get("/")
 def frontend_index():
     return _static_file("index.html")
@@ -131,21 +159,26 @@ def forecast():
     if _prefer_artifact_forecast():
         artifact_bundle = _artifact_forecast_bundle()
         if artifact_bundle is not None:
-            return jsonify(artifact_bundle)
+            return _json_response(artifact_bundle)
+        if not _live_build_enabled():
+            return _artifact_not_ready_response(INCREMENTAL_ARTIFACT_DIR / "index.json", status_code=503)
+
+    if not _live_build_enabled():
+        return _artifact_not_ready_response(INCREMENTAL_ARTIFACT_DIR / "index.json", status_code=503)
 
     base_time = _forecast_base_time(now)
     key = _cycle_key(base_time)
     cached = cache.get(key)
     if cached is not None:
         log.info("cache HIT  %s", key)
-        return jsonify(cached)
+        return _json_response(cached, cache_seconds=120)
 
     lock = _singleflight_lock(key)
     with lock:
         cached = cache.get(key)
         if cached is not None:
             log.info("cache HIT after wait %s", key)
-            return jsonify(cached)
+            return _json_response(cached, cache_seconds=120)
 
         log.info("cache MISS %s -> fetching NOMADS HRRR GRIB", key)
         try:
@@ -154,15 +187,15 @@ def forecast():
             log.warning("NOMADS fetch failed: %s", exc)
             artifact_bundle = _artifact_forecast_bundle()
             if artifact_bundle is not None:
-                return jsonify(artifact_bundle)
-            return jsonify({"error": str(exc), "code": "nomads_fetch_failed"}), 503
+                return _json_response(artifact_bundle)
+            return _json_error({"error": str(exc), "code": "nomads_fetch_failed"}, 503)
         except Exception as exc:  # noqa: BLE001
             log.exception("unexpected backend failure")
-            return jsonify({"error": str(exc), "code": "backend_error"}), 500
+            return _json_error({"error": str(exc), "code": "backend_error"}, 500)
 
         cache.set(key, bundle)
         log.info("cache SET  %s (%d ms)", key, bundle.get("latencyMs", -1))
-        return jsonify(bundle)
+        return _json_response(bundle, cache_seconds=120)
 
 
 @app.get("/api/outlook/latest")
@@ -204,15 +237,19 @@ def incremental_outlook_available_hours():
 def incremental_outlook_summary():
     artifact_dir = _selected_incremental_artifact_dir()
     index_path = artifact_dir / "index.json"
-    if not index_path.exists():
+    if not _artifact_exists(index_path):
         return _json_path(index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_json_path(index_path)
+    if not isinstance(index, dict):
+        return _json_path(index_path)
     hours = []
     for forecast_hour in index.get("readyForecastHours", []):
         metadata_path = _incremental_hour_path(int(forecast_hour), artifact_dir) / "metadata.json"
-        if not metadata_path.exists():
+        if not _artifact_exists(metadata_path):
             continue
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = _read_json_path(metadata_path)
+        if not isinstance(metadata, dict):
+            continue
         category_counts = metadata.get("categoryCounts") or {}
         probability_stats = metadata.get("probabilityStats") or {}
         probability_max = probability_stats.get("categoryConsistencyProbabilityMax") or probability_stats.get("cappedProbabilityMax") or {}
@@ -232,7 +269,7 @@ def incremental_outlook_summary():
             "categoryCounts": category_counts,
             "probabilityMax": display_probability_max,
         })
-    return jsonify({
+    return _json_response({
         "cycle": index.get("cycle"),
         "cycleTimeISO": index.get("cycleTimeISO"),
         "generatedAtISO": index.get("generatedAtISO"),
@@ -258,9 +295,9 @@ def incremental_outlook_hour_metadata(forecast_hour: int):
 @app.get("/api/outlook/preview.png")
 def latest_outlook_preview():
     path = _artifact_path("preview.png")
-    if not path.exists():
-        return jsonify({"error": "outlook preview artifact missing", "code": "artifact_missing"}), 404
-    return send_file(path, mimetype="image/png", conditional=True)
+    if not _artifact_exists(path):
+        return _artifact_not_ready_response(path)
+    return _png_artifact_response(path)
 
 
 def _artifact_path(name: str) -> Path:
@@ -270,6 +307,94 @@ def _artifact_path(name: str) -> Path:
 def _incremental_hour_path(forecast_hour: int, artifact_dir: Path | None = None) -> Path:
     base_dir = artifact_dir or _selected_incremental_artifact_dir()
     return base_dir / "hours" / f"f{int(forecast_hour):02d}"
+
+
+def _artifact_bucket_name() -> str:
+    return os.environ.get("AUTOOUTLOOK_ARTIFACT_BUCKET", "").strip()
+
+
+def _artifact_prefix() -> str:
+    return os.environ.get("AUTOOUTLOOK_ARTIFACT_PREFIX", "").strip().strip("/")
+
+
+def _using_gcs_artifacts() -> bool:
+    return bool(_artifact_bucket_name())
+
+
+def _get_gcs_client():
+    global _gcs_client
+    with _gcs_client_guard:
+        if _gcs_client is None:
+            try:
+                from google.cloud import storage  # type: ignore
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("google-cloud-storage is required when AUTOOUTLOOK_ARTIFACT_BUCKET is set") from exc
+            _gcs_client = storage.Client()
+        return _gcs_client
+
+
+def _artifact_storage_key(path: Path) -> str:
+    roots = [
+        ARTIFACT_DIR.parent,
+        INCREMENTAL_ARTIFACT_DIR.parent,
+        _incremental_complete_artifact_dir().parent,
+    ]
+    for root in roots:
+        try:
+            relative = path.resolve().relative_to(root.resolve())
+        except ValueError:
+            continue
+        key = relative.as_posix()
+        prefix = _artifact_prefix()
+        return f"{prefix}/{key}" if prefix else key
+    key = path.name
+    prefix = _artifact_prefix()
+    return f"{prefix}/{key}" if prefix else key
+
+
+def _artifact_blob(path: Path):
+    bucket = _get_gcs_client().bucket(_artifact_bucket_name())
+    return bucket.blob(_artifact_storage_key(path))
+
+
+def _artifact_exists(path: Path) -> bool:
+    if not _using_gcs_artifacts():
+        return path.exists()
+    try:
+        return bool(_artifact_blob(path).exists())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not check artifact object %s: %s", _artifact_storage_key(path), exc)
+        return False
+
+
+def _download_artifact_bytes(path: Path) -> bytes | None:
+    if not _using_gcs_artifacts():
+        if not path.exists():
+            return None
+        return path.read_bytes()
+    try:
+        return _artifact_blob(path).download_as_bytes()
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ not in {"NotFound", "Forbidden"}:
+            log.warning("Could not read artifact object %s: %s", _artifact_storage_key(path), exc)
+        return None
+
+
+def _png_artifact_response(path: Path):
+    if _using_gcs_artifacts():
+        data = _download_artifact_bytes(path)
+        if data is None:
+            return _artifact_not_ready_response(path)
+        response = send_file(
+            BytesIO(data),
+            mimetype="image/png",
+            download_name=path.name,
+            conditional=True,
+        )
+    else:
+        response = send_file(path, mimetype="image/png", conditional=True)
+    response.headers["Cache-Control"] = f"public, max-age={PNG_ARTIFACT_CACHE_SECONDS}"
+    return response
 
 
 def _prefer_artifact_forecast() -> bool:
@@ -316,7 +441,7 @@ def _artifact_forecast_bundle():
                 "mainHazard": main_hazard,
                 "confidence": _artifact_confidence(category, probability_max),
                 "significantSevere": _has_significant_probability(probability_max, category, main_hazard),
-                "headline": f"{_frontend_category(category)} risk for F{forecast_hour:02d}.",
+                "headline": _artifact_headline(category, main_hazard, valid_time_iso),
             },
             "riskPolygons": [],
             "cities": _cities_for_region(region, _frontend_category(category)),
@@ -392,6 +517,19 @@ def _frontend_category(category: str) -> str:
     return "MOD" if category == "MDT" else "TSTM" if category == "NONE" else category
 
 
+def _artifact_headline(category: str, main_hazard: str, valid_time_iso: str) -> str:
+    valid = _parse_iso_utc(valid_time_iso)
+    time_label = f"{valid.hour:02d}Z" if valid is not None else "the selected hour"
+    hazard_label = {
+        "tornado": "tornado potential",
+        "hail": "hail potential",
+        "wind": "damaging wind potential",
+    }.get(main_hazard, "severe potential")
+    if _frontend_category(category) == "TSTM":
+        return f"General thunder around {time_label}, with organized severe weather limited."
+    return f"Severe storms possible around {time_label}, mainly {hazard_label}."
+
+
 def _artifact_confidence(category: str, probabilities: dict[str, float]) -> float:
     category_floor = {
         "NONE": 0.45,
@@ -453,7 +591,7 @@ def _region_from_feature_collection(payload, category: str) -> dict:
                 points.extend(_geojson_positions((feature.get("geometry") or {}).get("coordinates")))
     if not points:
         return {
-            "label": "Generated Outlook Focus",
+            "label": "Highlighted corridor",
             "centerLat": 37.0,
             "centerLon": -97.0,
             "bbox": [-105.0, 30.0, -89.0, 43.0],
@@ -472,7 +610,7 @@ def _region_from_feature_collection(payload, category: str) -> dict:
         min(55.0, max_lat + pad_lat),
     ]
     return {
-        "label": f"Generated {_frontend_category(category)} Outlook Focus",
+        "label": "Highlighted corridor",
         "centerLat": (bbox[1] + bbox[3]) / 2,
         "centerLon": (bbox[0] + bbox[2]) / 2,
         "bbox": bbox,
@@ -558,14 +696,14 @@ def _incremental_hour_json(forecast_hour: int, artifact_name: str):
             if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
         }
         if hour not in ready_hours:
-            return jsonify({
+            return _json_error({
                 "error": f"incremental outlook hour F{hour:02d} is not ready for the selected HRRR cycle",
                 "code": "incremental_hour_pending",
                 "cycle": index.get("cycle"),
                 "cycleTimeISO": index.get("cycleTimeISO"),
                 "readyForecastHours": sorted(ready_hours),
                 "pendingForecastHours": index.get("pendingForecastHours", []),
-            }), 404
+            }, 404)
     return _json_path(_incremental_hour_path(hour) / artifact_name)
 
 
@@ -633,24 +771,27 @@ def _json_artifact(name: str):
 
 def _json_artifact_or_incremental(name: str):
     path = _artifact_path(name)
-    if path.exists():
+    if _artifact_exists(path):
         return _json_path(path)
     if name == "metadata.json":
         return _json_path(_selected_incremental_artifact_dir() / "index.json")
     if name in {"risk_polygons.geojson", "aggregate_risk_polygons.geojson"}:
         payload = _merged_incremental_risk_polygons()
         if payload is not None:
-            return jsonify(payload)
+            return _json_response(payload)
     if name == "probability_tiles.json":
         payload = _incremental_probability_tiles()
         if payload is not None:
-            return jsonify(payload)
+            return _json_response(payload)
     return _json_path(path)
 
 
 def _read_json_path(path: Path) -> dict | list | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = _download_artifact_bytes(path)
+        if data is None:
+            return None
+        return json.loads(data.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
         log.info("Could not read JSON artifact %s: %s", path, exc)
         return None
@@ -665,15 +806,20 @@ def _selected_incremental_artifact_dir() -> Path:
     current = _read_incremental_index_from_dir(INCREMENTAL_ARTIFACT_DIR)
     if _incremental_index_has_full_coverage(current):
         return INCREMENTAL_ARTIFACT_DIR
-    fallback = _read_incremental_index_from_dir(INCREMENTAL_COMPLETE_ARTIFACT_DIR)
+    complete_dir = _incremental_complete_artifact_dir()
+    fallback = _read_incremental_index_from_dir(complete_dir)
     if _incremental_index_has_full_coverage(fallback):
-        return INCREMENTAL_COMPLETE_ARTIFACT_DIR
+        return complete_dir
     return INCREMENTAL_ARTIFACT_DIR
+
+
+def _incremental_complete_artifact_dir() -> Path:
+    return INCREMENTAL_COMPLETE_ARTIFACT_DIR or INCREMENTAL_ARTIFACT_DIR.with_name(f"{INCREMENTAL_ARTIFACT_DIR.name}_complete")
 
 
 def _read_incremental_index_from_dir(artifact_dir: Path) -> dict | None:
     index_path = artifact_dir / "index.json"
-    if not index_path.exists():
+    if not _artifact_exists(index_path):
         return None
     index = _read_json_path(index_path)
     return index if isinstance(index, dict) else None
@@ -755,21 +901,48 @@ def _incremental_probability_tiles() -> dict | None:
     }
 
 
+def _artifact_status_context() -> dict:
+    context: dict[str, object] = {}
+    for artifact_dir in [INCREMENTAL_ARTIFACT_DIR, _incremental_complete_artifact_dir()]:
+        index = _read_incremental_index_from_dir(artifact_dir)
+        if not isinstance(index, dict):
+            continue
+        for key in (
+            "cycle",
+            "cycleTimeISO",
+            "generatedAtISO",
+            "status",
+            "readyForecastHours",
+            "pendingForecastHours",
+            "failedForecastHours",
+        ):
+            if key in index:
+                context[key] = index.get(key)
+        break
+    return context
+
+
+def _artifact_not_ready_response(path: Path, status_code: int = 404):
+    payload = {
+        "error": "outlook not ready",
+        "code": "outlook_not_ready",
+        "artifact": path.name,
+    }
+    payload.update(_artifact_status_context())
+    return _json_error(payload, status_code)
+
+
 def _json_path(path: Path):
-    if not path.exists():
-        return jsonify({
-            "error": f"outlook artifact missing: {path.name}",
-            "code": "artifact_missing",
-            "artifactDir": str(path.parent),
-        }), 404
+    if not _artifact_exists(path):
+        return _artifact_not_ready_response(path)
     payload = _read_json_path(path)
     if payload is None:
-        return jsonify({
+        return _json_error({
             "error": f"outlook artifact unreadable: {path.name}",
             "code": "artifact_unreadable",
-            "artifactDir": str(path.parent),
-        }), 500
-    return jsonify(payload)
+            "artifact": path.name,
+        }, 500)
+    return _json_response(payload)
 
 
 @app.get("/<path:path>")
@@ -784,12 +957,16 @@ def frontend_static_or_spa(path: str):
 
 def _static_file(path: str):
     if not STATIC_DIR.exists():
-        return jsonify({
+        return _json_error({
             "error": "frontend build missing",
             "code": "frontend_build_missing",
-            "distDir": str(STATIC_DIR),
-        }), 404
-    return send_from_directory(STATIC_DIR, path)
+        }, 404)
+    response = send_from_directory(STATIC_DIR, path)
+    if path.startswith("assets/"):
+        response.headers["Cache-Control"] = f"public, max-age={STATIC_ASSET_CACHE_SECONDS}, immutable"
+    elif path == "index.html":
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 if __name__ == "__main__":

@@ -13,12 +13,45 @@ export interface OutlookArtifactFeature {
     validTimeISO: string;
     component?: number;
     cellCount?: number;
+    sourceCellCount?: number;
+    cumulativeCellCount?: number;
+    componentCount?: number;
+    vectorization?: Record<string, unknown>;
   };
 }
 
 export interface OutlookArtifactFeatureCollection {
   type: 'FeatureCollection';
   features: OutlookArtifactFeature[];
+}
+
+export interface OutlookProbabilityShapeFeature {
+  type: 'Feature';
+  geometry: {
+    type: 'Polygon' | 'MultiPolygon';
+    coordinates: number[][][] | number[][][][];
+  };
+  properties: {
+    hazard: 'tornado' | 'hail' | 'wind' | 'thunder' | 'thunderstorm';
+    hazardLabel?: string;
+    probability: number;
+    threshold?: number;
+    thresholdPercent?: number;
+    bucket: number;
+    label: string;
+    color: string;
+    forecastHour?: number;
+    validTimeISO?: string;
+    cellCount?: number;
+    sourceCellCount?: number;
+    componentCount?: number;
+    vectorization?: Record<string, unknown>;
+  };
+}
+
+export interface OutlookProbabilityShapeFeatureCollection {
+  type: 'FeatureCollection';
+  features: OutlookProbabilityShapeFeature[];
 }
 
 export interface OutlookCycleCheck {
@@ -98,6 +131,8 @@ export interface OutlookProbabilityTile {
     hail: number[][];
     wind: number[][];
   };
+  riskShapes?: OutlookArtifactFeatureCollection;
+  hazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection;
 }
 
 export interface OutlookProbabilityHour {

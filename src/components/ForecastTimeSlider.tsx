@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useRef } from 'react';
+import type { PointerEvent } from 'react';
 import type { ForecastBundle } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
 import type { OutlookIncrementalIndex } from '../types/outlookArtifacts';
@@ -26,6 +28,8 @@ function fmtValid(iso?: string): string {
 
 const HOUR_MS = 60 * 60 * 1000;
 const VALID_TIME_TOLERANCE_MS = 20 * 60 * 1000;
+const HOLD_REPEAT_DELAY_MS = 260;
+const HOLD_REPEAT_INTERVAL_MS = 110;
 
 function artifactHourForStop(
   artifactIndex: OutlookIncrementalIndex | undefined,
@@ -62,6 +66,51 @@ export default function ForecastTimeSlider({
   const atStart = safeIndex <= 0;
   const atEnd = stops.length === 0 || safeIndex >= stops.length - 1 || (current?.forecastHour ?? 0) >= 48;
   const isHourly = stops.length > 24;
+  const holdDelayRef = useRef<number | null>(null);
+  const holdIntervalRef = useRef<number | null>(null);
+  const didHoldRepeatRef = useRef(false);
+
+  const clearHoldRepeat = useCallback(() => {
+    if (holdDelayRef.current !== null) {
+      window.clearTimeout(holdDelayRef.current);
+      holdDelayRef.current = null;
+    }
+    if (holdIntervalRef.current !== null) {
+      window.clearInterval(holdIntervalRef.current);
+      holdIntervalRef.current = null;
+    }
+  }, []);
+
+  const startHoldRepeat = useCallback((step: () => void, disabled: boolean) =>
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (disabled) return;
+      clearHoldRepeat();
+      didHoldRepeatRef.current = false;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      holdDelayRef.current = window.setTimeout(() => {
+        didHoldRepeatRef.current = true;
+        step();
+        holdIntervalRef.current = window.setInterval(step, HOLD_REPEAT_INTERVAL_MS);
+      }, HOLD_REPEAT_DELAY_MS);
+    }, [clearHoldRepeat]);
+
+  const handlePrevClick = useCallback(() => {
+    if (didHoldRepeatRef.current) {
+      didHoldRepeatRef.current = false;
+      return;
+    }
+    onPrev();
+  }, [onPrev]);
+
+  const handleNextClick = useCallback(() => {
+    if (didHoldRepeatRef.current) {
+      didHoldRepeatRef.current = false;
+      return;
+    }
+    onNext();
+  }, [onNext]);
+
+  useEffect(() => clearHoldRepeat, [clearHoldRepeat]);
 
   return (
     <section className="bg-paper border-[3px] border-ink shadow-retro p-2 sm:p-3">
@@ -84,7 +133,16 @@ export default function ForecastTimeSlider({
           <RetroBadge tone={isPlaying ? 'lime' : 'paper'} pulse={isPlaying}>
             {isPlaying ? 'AUTOSTEP' : 'PAUSED'}
           </RetroBadge>
-          <RetroButton onClick={onPrev} aria-label="Previous forecast hour" iconOnly disabled={atStart}>
+          <RetroButton
+            onClick={handlePrevClick}
+            onPointerDown={startHoldRepeat(onPrev, atStart)}
+            onPointerUp={clearHoldRepeat}
+            onPointerCancel={clearHoldRepeat}
+            onLostPointerCapture={clearHoldRepeat}
+            aria-label="Previous forecast hour"
+            iconOnly
+            disabled={atStart}
+          >
             <Triangle direction="left" />
           </RetroButton>
           <RetroButton
@@ -95,7 +153,16 @@ export default function ForecastTimeSlider({
           >
             {isPlaying ? '■  PAUSE' : '▶  PLAY'}
           </RetroButton>
-          <RetroButton onClick={onNext} aria-label="Next forecast hour" iconOnly disabled={atEnd}>
+          <RetroButton
+            onClick={handleNextClick}
+            onPointerDown={startHoldRepeat(onNext, atEnd)}
+            onPointerUp={clearHoldRepeat}
+            onPointerCancel={clearHoldRepeat}
+            onLostPointerCapture={clearHoldRepeat}
+            aria-label="Next forecast hour"
+            iconOnly
+            disabled={atEnd}
+          >
             <Triangle direction="right" />
           </RetroButton>
         </div>

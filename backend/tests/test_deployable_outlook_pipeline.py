@@ -4,7 +4,10 @@ import json
 import argparse
 import os
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +38,7 @@ from backend.ml.gridded_outlook import (
     apply_offshore_probability_suppression,
     category_grid_from_probabilities,
     gridded_features_from_fields,
+    hazard_probability_shapes_from_grids,
     postprocess_category_grid,
     probability_tile,
     risk_polygons_from_grid,
@@ -74,6 +78,18 @@ def small_fields(shape: tuple[int, int] = (5, 5)) -> dict[str, np.ndarray]:
     }
 
 
+def skipped_category_adjacencies(grid: np.ndarray) -> list[tuple[int, int]]:
+    arr = np.asarray(grid, dtype=np.int16)
+    pairs: list[tuple[int, int]] = []
+    for row_offset, col_offset in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        a = arr[max(0, row_offset): arr.shape[0] + min(0, row_offset), max(0, col_offset): arr.shape[1] + min(0, col_offset)]
+        b = arr[max(0, -row_offset): arr.shape[0] - max(0, row_offset), max(0, -col_offset): arr.shape[1] - max(0, col_offset)]
+        skipped = (a > 0) & (b > 0) & (np.abs(a - b) > 1)
+        if np.any(skipped):
+            pairs.extend((int(x), int(y)) for x, y in zip(a[skipped], b[skipped], strict=False))
+    return pairs
+
+
 def fake_spc_geojson() -> dict:
     return {
         "type": "FeatureCollection",
@@ -98,6 +114,30 @@ def fake_spc_geojson() -> dict:
             },
         }],
     }
+
+
+def polygon_area(ring: list[list[float]]) -> float:
+    coords = ring[:-1] if ring and ring[0] == ring[-1] else ring
+    area = 0.0
+    for idx, (x0, y0) in enumerate(coords):
+        x1, y1 = coords[(idx + 1) % len(coords)]
+        area += x0 * y1 - x1 * y0
+    return area / 2.0
+
+
+def projected_geojson_geometry(geometry: dict):
+    from pyproj import Transformer
+    from shapely.geometry import shape
+    from shapely.ops import transform
+
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform
+    return transform(transformer, shape(geometry))
+
+
+def area_coverage_fraction(candidate, target) -> float:
+    if target.is_empty or float(target.area) <= 0.0:
+        return 0.0
+    return float(candidate.intersection(target).area) / float(target.area)
 
 
 def required_idx_text() -> str:
@@ -403,6 +443,17 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         lons = np.linspace(-125.0, -70.0, 5)
 
         self.assertEqual(_hgt500_lines_from_field(None, lats, lons), [])
+
+    def test_hrrr_500mb_contours_are_safe_under_parallel_hours(self) -> None:
+        lats = np.linspace(25.0, 50.0, 80)
+        lons = np.linspace(-125.0, -70.0, 100)
+        lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
+        hgt500 = 5250.0 + ((lat_grid - 25.0) / 25.0) * 760.0 + np.sin((lon_grid + 100.0) / 5.0) * 30.0
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda _: _hgt500_lines_from_field(hgt500, lats, lons), range(8)))
+
+        self.assertTrue(all(lines for lines in results))
 
     def test_500mb_overlay_uses_real_full_conus_fields(self) -> None:
         lats = np.linspace(20.0, 55.0, 48)
@@ -721,6 +772,52 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(np.all(processed.category_grid == SPC_RISK_LABELS.index("MRGL")))
         self.assertGreater(processed.report["downgradedCells"]["texasMexicoBorder"], 0)
 
+    def test_postprocess_adds_mrgl_buffer_around_slgt(self) -> None:
+        fields = small_fields((11, 11))
+        fields["cape_mu"] = np.full((11, 11), 2400.0)
+        fields["cape_ml"] = np.full((11, 11), 1700.0)
+        fields["u500"] = np.full((11, 11), 34.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        category_grid = np.full((11, 11), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        category_grid[3:8, 3:8] = SPC_RISK_LABELS.index("SLGT")
+        probabilities = {
+            "tornado": np.full((11, 11), 0.01),
+            "hail": np.full((11, 11), 0.14),
+            "wind": np.full((11, 11), 0.14),
+        }
+
+        processed = postprocess_category_grid(category_grid, probabilities, features)
+
+        self.assertTrue(np.any(processed.category_grid == SPC_RISK_LABELS.index("MRGL")))
+        self.assertFalse(skipped_category_adjacencies(processed.category_grid))
+        self.assertGreater(processed.report["hierarchyBuffers"]["addedCellsByCategory"]["MRGL"], 0)
+
+    def test_postprocess_adds_all_intermediate_buffers_around_enh(self) -> None:
+        fields = small_fields((13, 13))
+        fields["cape_mu"] = np.full((13, 13), 2800.0)
+        fields["cape_ml"] = np.full((13, 13), 2100.0)
+        fields["u500"] = np.full((13, 13), 45.0)
+        fields["srh01"] = np.full((13, 13), 220.0)
+        fields["srh03"] = np.full((13, 13), 300.0)
+        fields["td2m"] = np.full((13, 13), 296.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        category_grid = np.full((13, 13), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        category_grid[4:9, 4:9] = SPC_RISK_LABELS.index("ENH")
+        probabilities = {
+            "tornado": np.full((13, 13), 0.01),
+            "hail": np.full((13, 13), 0.29),
+            "wind": np.full((13, 13), 0.29),
+        }
+
+        processed = postprocess_category_grid(category_grid, probabilities, features)
+
+        self.assertTrue(np.any(processed.category_grid == SPC_RISK_LABELS.index("SLGT")))
+        self.assertTrue(np.any(processed.category_grid == SPC_RISK_LABELS.index("MRGL")))
+        self.assertFalse(skipped_category_adjacencies(processed.category_grid))
+        added = processed.report["hierarchyBuffers"]["addedCellsByCategory"]
+        self.assertGreater(added["SLGT"], 0)
+        self.assertGreater(added["MRGL"], 0)
+
     def test_offshore_probability_suppression_zeros_open_water_hazards(self) -> None:
         probabilities = {
             "tornado": np.full((3, 3), 0.10),
@@ -828,20 +925,191 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         self.assertEqual(geojson["type"], "FeatureCollection")
         self.assertTrue(any(feature["properties"]["category"] == "MRGL" for feature in geojson["features"]))
-        tstm_cells = [
-            feature["properties"]["cellCount"]
-            for feature in geojson["features"]
-            if feature["properties"]["category"] == "TSTM"
-        ]
-        self.assertTrue(tstm_cells)
-        self.assertLessEqual(max(tstm_cells), 16)
+        labels = [feature["properties"]["category"] for feature in geojson["features"]]
+        self.assertEqual(labels, ["TSTM", "MRGL"])
+        self.assertLessEqual(len(geojson["features"]), 2)
         for feature in geojson["features"]:
-            ring = feature["geometry"]["coordinates"][0]
-            area = 0.0
-            for idx, (x0, y0) in enumerate(ring[:-1]):
-                x1, y1 = ring[idx + 1]
-                area += x0 * y1 - x1 * y0
-            self.assertLessEqual(area / 2.0, 0.0)
+            self.assertIn(feature["geometry"]["type"], {"Polygon", "MultiPolygon"})
+            self.assertIn("sourceCellCount", feature["properties"])
+            rings = (
+                [feature["geometry"]["coordinates"][0]]
+                if feature["geometry"]["type"] == "Polygon"
+                else [polygon[0] for polygon in feature["geometry"]["coordinates"]]
+            )
+            for ring in rings:
+                area = 0.0
+                for idx, (x0, y0) in enumerate(ring[:-1]):
+                    x1, y1 = ring[idx + 1]
+                    area += x0 * y1 - x1 * y0
+                self.assertLessEqual(area / 2.0, 0.0)
+
+    def test_risk_polygon_features_follow_category_layer_order(self) -> None:
+        lats = np.linspace(30.0, 38.0, 9)
+        lons = np.linspace(-104.0, -96.0, 9)
+        category = np.full((9, 9), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        category[1:8, 1:8] = SPC_RISK_LABELS.index("MRGL")
+        category[2:7, 2:7] = SPC_RISK_LABELS.index("SLGT")
+        category[3:6, 3:6] = SPC_RISK_LABELS.index("ENH")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=1)
+
+        labels = [feature["properties"]["category"] for feature in geojson["features"]]
+        self.assertEqual(labels, ["TSTM", "MRGL", "SLGT", "ENH"])
+        self.assertLess(len(geojson["features"]), int(np.sum(category > 0)))
+        for feature in geojson["features"]:
+            self.assertIn(feature["geometry"]["type"], {"Polygon", "MultiPolygon"})
+            self.assertTrue(feature["properties"]["vectorization"]["cumulativeMask"])
+
+    def test_risk_polygon_generalization_merges_neighbors_and_removes_noise(self) -> None:
+        lats = np.linspace(25.0, 45.0, 40)
+        lons = np.linspace(-110.0, -80.0, 40)
+        category = np.zeros((40, 40), dtype=np.int16)
+        category[8:24, 8:18] = SPC_RISK_LABELS.index("TSTM")
+        category[8:24, 21:31] = SPC_RISK_LABELS.index("TSTM")
+        category[14:16, 14:16] = SPC_RISK_LABELS.index("NONE")
+        category[2:4, 2:4] = SPC_RISK_LABELS.index("TSTM")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        tstm = next(feature for feature in geojson["features"] if feature["properties"]["category"] == "TSTM")
+
+        self.assertEqual(tstm["properties"]["componentCount"], 1)
+        self.assertGreater(tstm["properties"]["cellCount"], tstm["properties"]["sourceCellCount"])
+        self.assertTrue(tstm["properties"]["vectorization"]["cartographicGeneralization"])
+        self.assertGreaterEqual(tstm["properties"]["vectorization"]["closeIterations"], 3)
+
+    def test_risk_polygon_generalization_prunes_thin_tendrils(self) -> None:
+        lats = np.linspace(25.0, 45.0, 60)
+        lons = np.linspace(-110.0, -80.0, 60)
+        category = np.zeros((60, 60), dtype=np.int16)
+        category[20:36, 10:25] = SPC_RISK_LABELS.index("TSTM")
+        category[20:36, 31:42] = SPC_RISK_LABELS.index("TSTM")
+        category[27, 42:57] = SPC_RISK_LABELS.index("TSTM")
+        category[4:7, 4:7] = SPC_RISK_LABELS.index("TSTM")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        tstm = next(feature for feature in geojson["features"] if feature["properties"]["category"] == "TSTM")
+        geometry = tstm["geometry"]
+        rings = (
+            [geometry["coordinates"][0]]
+            if geometry["type"] == "Polygon"
+            else [polygon[0] for polygon in geometry["coordinates"]]
+        )
+        max_lon = max(point[0] for ring in rings for point in ring)
+
+        self.assertEqual(tstm["properties"]["componentCount"], 1)
+        self.assertLess(max_lon, -85.0)
+        self.assertGreaterEqual(tstm["properties"]["vectorization"]["tendrilPruneIterations"], 2)
+
+    def test_risk_polygon_display_bands_have_metric_gaps(self) -> None:
+        lats = np.linspace(28.0, 40.0, 100)
+        lons = np.linspace(-104.0, -86.0, 120)
+        category = np.zeros((100, 120), dtype=np.int16)
+        category[12:88, 10:110] = SPC_RISK_LABELS.index("TSTM")
+        category[26:74, 28:92] = SPC_RISK_LABELS.index("MRGL")
+        category[40:60, 45:75] = SPC_RISK_LABELS.index("SLGT")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        features = {feature["properties"]["category"]: feature for feature in geojson["features"]}
+        tstm = projected_geojson_geometry(features["TSTM"]["geometry"])
+        mrgl = projected_geojson_geometry(features["MRGL"]["geometry"])
+        slgt = projected_geojson_geometry(features["SLGT"]["geometry"])
+
+        self.assertGreaterEqual(tstm.distance(mrgl), 12_000.0)
+        self.assertGreaterEqual(mrgl.distance(slgt), 12_000.0)
+        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["displayGeometry"], "band_with_metric_gap")
+        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
+
+    def test_risk_polygon_display_bands_add_minimum_lower_support_width(self) -> None:
+        lats = np.linspace(28.0, 40.0, 100)
+        lons = np.linspace(-104.0, -86.0, 120)
+        category = np.zeros((100, 120), dtype=np.int16)
+        category[28:72, 34:86] = SPC_RISK_LABELS.index("ENH")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        features = {feature["properties"]["category"]: feature for feature in geojson["features"]}
+        tstm = projected_geojson_geometry(features["TSTM"]["geometry"])
+        mrgl = projected_geojson_geometry(features["MRGL"]["geometry"])
+        slgt = projected_geojson_geometry(features["SLGT"]["geometry"])
+        enh = projected_geojson_geometry(features["ENH"]["geometry"])
+
+        mrgl_support = mrgl.buffer(50_000.0, quad_segs=8).difference(mrgl.buffer(20_000.0, quad_segs=8))
+        slgt_support = slgt.buffer(45_000.0, quad_segs=8).difference(slgt.buffer(20_000.0, quad_segs=8))
+        enh_support = enh.buffer(40_000.0, quad_segs=8).difference(enh.buffer(20_000.0, quad_segs=8))
+
+        self.assertGreater(area_coverage_fraction(tstm, mrgl_support), 0.40)
+        self.assertGreater(area_coverage_fraction(mrgl, slgt_support), 0.40)
+        self.assertGreater(area_coverage_fraction(slgt, enh_support), 0.40)
+        self.assertGreaterEqual(features["TSTM"]["properties"]["vectorization"]["displayMinimumSupportKm"], 45.0)
+        self.assertGreaterEqual(features["MRGL"]["properties"]["vectorization"]["displayMinimumSupportKm"], 40.0)
+        self.assertGreaterEqual(features["SLGT"]["properties"]["vectorization"]["displayMinimumSupportKm"], 35.0)
+
+    def test_risk_polygon_display_smoothing_removes_boxy_rectangles(self) -> None:
+        lats = np.linspace(28.0, 40.0, 80)
+        lons = np.linspace(-104.0, -86.0, 100)
+        category = np.zeros((80, 100), dtype=np.int16)
+        category[18:58, 20:76] = SPC_RISK_LABELS.index("TSTM")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        tstm = next(feature for feature in geojson["features"] if feature["properties"]["category"] == "TSTM")
+        geometry = tstm["geometry"]
+        rings = (
+            [geometry["coordinates"][0]]
+            if geometry["type"] == "Polygon"
+            else [polygon[0] for polygon in geometry["coordinates"]]
+        )
+        largest_ring = max(rings, key=len)
+        unique_lons = {round(point[0], 3) for point in largest_ring}
+        unique_lats = {round(point[1], 3) for point in largest_ring}
+
+        self.assertGreater(len(largest_ring), 8)
+        self.assertGreater(len(unique_lons), 4)
+        self.assertGreater(len(unique_lats), 4)
+        self.assertEqual(tstm["properties"]["vectorization"]["displayGeometry"], "band_with_metric_gap")
+
+    def test_broad_tstm_contour_does_not_fallback_to_bbox(self) -> None:
+        lats = np.linspace(23.0, 46.0, 120)
+        lons = np.linspace(-105.0, -74.0, 160)
+        category = np.zeros((120, 160), dtype=np.int16)
+        category[16:50, 12:92] = SPC_RISK_LABELS.index("TSTM")
+        category[44:78, 60:126] = SPC_RISK_LABELS.index("TSTM")
+        category[70:104, 102:150] = SPC_RISK_LABELS.index("TSTM")
+        category[28:44, 70:92] = SPC_RISK_LABELS.index("NONE")
+        category[60:72, 92:112] = SPC_RISK_LABELS.index("NONE")
+
+        geojson = risk_polygons_from_grid(lats, lons, category, 33, "2026-05-09T15:00:00Z", min_cells=10)
+        tstm = next(feature for feature in geojson["features"] if feature["properties"]["category"] == "TSTM")
+        geometry = tstm["geometry"]
+        rings = (
+            [geometry["coordinates"][0]]
+            if geometry["type"] == "Polygon"
+            else [polygon[0] for polygon in geometry["coordinates"]]
+        )
+        largest_ring = max(rings, key=lambda ring: abs(polygon_area(ring)))
+        lons_out = [point[0] for point in largest_ring]
+        lats_out = [point[1] for point in largest_ring]
+        bbox_area = (max(lons_out) - min(lons_out)) * (max(lats_out) - min(lats_out))
+        fill_fraction = abs(polygon_area(largest_ring)) / bbox_area
+
+        self.assertGreater(len(largest_ring), 12)
+        self.assertLess(fill_fraction, 0.85)
+        self.assertEqual(tstm["properties"]["vectorization"]["method"], "marching_squares_cumulative_contours")
+
+    def test_risk_polygon_contours_are_safe_under_parallel_hours(self) -> None:
+        lats = np.linspace(25.0, 50.0, 80)
+        lons = np.linspace(-124.0, -67.0, 120)
+        category = np.zeros((80, 120), dtype=int)
+        category[10:45, 20:85] = SPC_RISK_LABELS.index("TSTM")
+        category[20:40, 35:75] = SPC_RISK_LABELS.index("MRGL")
+        category[28:36, 50:65] = SPC_RISK_LABELS.index("SLGT")
+
+        def build(hour: int) -> dict[str, object]:
+            return risk_polygons_from_grid(lats, lons, category, hour, f"2024-05-04T{hour:02d}:00:00Z", min_cells=3)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(build, range(8)))
+
+        self.assertEqual([result["type"] for result in results], ["FeatureCollection"] * 8)
+        self.assertTrue(all(result["features"] for result in results))
 
     def test_probability_tile_downsampling_preserves_block_max_categories_and_probabilities(self) -> None:
         lats = np.linspace(34.0, 37.0, 4)
@@ -860,6 +1128,154 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(tile["shape"], [1, 1])
         self.assertEqual(tile["categoryLabel"], [["SLGT"]])
         self.assertEqual(tile["probabilities"]["hail"], [[0.29]])
+
+    def test_hazard_probability_shapes_use_vector_probability_contours(self) -> None:
+        lats = np.linspace(30.0, 39.0, 10)
+        lons = np.linspace(-104.0, -95.0, 10)
+        category = np.full((10, 10), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        category[2:8, 2:8] = SPC_RISK_LABELS.index("SLGT")
+        category[4:6, 4:6] = SPC_RISK_LABELS.index("ENH")
+        probabilities = {
+            "tornado": np.zeros((10, 10)),
+            "hail": np.full((10, 10), 0.05),
+            "wind": np.zeros((10, 10)),
+        }
+        probabilities["hail"][2:8, 2:8] = 0.15
+        probabilities["hail"][4:6, 4:6] = 0.30
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            3,
+            "2024-05-04T15:00:00Z",
+            min_cells=1,
+        )
+
+        hail = [feature for feature in shapes["features"] if feature["properties"]["hazard"] == "hail"]
+        self.assertEqual([feature["properties"]["label"] for feature in hail[:3]], ["5%", "15%", "30%"])
+        self.assertLess(len(hail), int(np.sum(probabilities["hail"] >= 0.05)))
+        for feature in hail:
+            self.assertIn(feature["geometry"]["type"], {"Polygon", "MultiPolygon"})
+            self.assertEqual(feature["properties"]["forecastHour"], 3)
+
+    def test_hazard_probability_shapes_add_lower_probability_support(self) -> None:
+        lats = np.linspace(30.0, 38.0, 9)
+        lons = np.linspace(-104.0, -96.0, 9)
+        category = np.full((9, 9), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        category[2:7, 2:7] = SPC_RISK_LABELS.index("SLGT")
+        probabilities = {
+            "tornado": np.zeros((9, 9)),
+            "hail": np.zeros((9, 9)),
+            "wind": np.zeros((9, 9)),
+        }
+        probabilities["hail"][4, 4] = 0.30
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=1,
+        )
+
+        hail = {feature["properties"]["label"]: feature["properties"] for feature in shapes["features"] if feature["properties"]["hazard"] == "hail"}
+        self.assertGreater(hail["15%"]["cellCount"], hail["15%"]["sourceCellCount"])
+        self.assertGreater(hail["5%"]["cellCount"], hail["5%"]["sourceCellCount"])
+        self.assertTrue(hail["15%"]["vectorization"]["hierarchyBuffersApplied"])
+
+    def test_hazard_probability_shapes_generalize_nearby_contours(self) -> None:
+        lats = np.linspace(25.0, 45.0, 40)
+        lons = np.linspace(-110.0, -80.0, 40)
+        category = np.full((40, 40), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.zeros((40, 40)),
+            "hail": np.zeros((40, 40)),
+            "wind": np.zeros((40, 40)),
+        }
+        probabilities["hail"][8:24, 8:18] = 0.05
+        probabilities["hail"][8:24, 21:31] = 0.05
+        probabilities["hail"][14:16, 14:16] = 0.0
+        probabilities["hail"][2:4, 2:4] = 0.05
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=10,
+        )
+        hail_5 = next(feature for feature in shapes["features"] if feature["properties"]["hazard"] == "hail" and feature["properties"]["label"] == "5%")
+
+        self.assertEqual(hail_5["properties"]["componentCount"], 1)
+        self.assertGreater(hail_5["properties"]["cellCount"], hail_5["properties"]["sourceCellCount"])
+        self.assertTrue(hail_5["properties"]["vectorization"]["cartographicGeneralization"])
+
+    def test_hazard_probability_display_bands_have_metric_gaps(self) -> None:
+        lats = np.linspace(28.0, 40.0, 100)
+        lons = np.linspace(-104.0, -86.0, 120)
+        category = np.full((100, 120), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.zeros((100, 120)),
+            "hail": np.zeros((100, 120)),
+            "wind": np.zeros((100, 120)),
+        }
+        probabilities["hail"][12:88, 10:110] = 0.05
+        probabilities["hail"][26:74, 28:92] = 0.15
+        probabilities["hail"][40:60, 45:75] = 0.30
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=10,
+        )
+        hail = {feature["properties"]["label"]: feature for feature in shapes["features"] if feature["properties"]["hazard"] == "hail"}
+        hail_5 = projected_geojson_geometry(hail["5%"]["geometry"])
+        hail_15 = projected_geojson_geometry(hail["15%"]["geometry"])
+        hail_30 = projected_geojson_geometry(hail["30%"]["geometry"])
+
+        self.assertGreaterEqual(hail_5.distance(hail_15), 12_000.0)
+        self.assertGreaterEqual(hail_15.distance(hail_30), 12_000.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayGeometry"], "band_with_metric_gap")
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
+
+    def test_hazard_probability_display_bands_add_minimum_lower_support_width(self) -> None:
+        lats = np.linspace(28.0, 40.0, 100)
+        lons = np.linspace(-104.0, -86.0, 120)
+        category = np.full((100, 120), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.zeros((100, 120)),
+            "hail": np.zeros((100, 120)),
+            "wind": np.zeros((100, 120)),
+        }
+        probabilities["hail"][30:70, 36:84] = 0.15
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=10,
+        )
+        hail = {feature["properties"]["label"]: feature for feature in shapes["features"] if feature["properties"]["hazard"] == "hail"}
+        hail_5 = projected_geojson_geometry(hail["5%"]["geometry"])
+        hail_15 = projected_geojson_geometry(hail["15%"]["geometry"])
+        support = hail_15.buffer(50_000.0, quad_segs=8).difference(hail_15.buffer(20_000.0, quad_segs=8))
+
+        self.assertGreater(area_coverage_fraction(hail_5, support), 0.40)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
+        self.assertGreaterEqual(hail["5%"]["properties"]["vectorization"]["displayMinimumSupportKm"], 45.0)
 
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
@@ -999,13 +1415,139 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(index["status"], "partial")
             self.assertEqual(index["readyForecastHours"], [0])
             self.assertEqual(index["failedForecastHours"], [1])
-            self.assertTrue((output_dir / "hours" / "f00" / "risk_polygons.geojson").exists())
-            self.assertTrue((output_dir / "hours" / "f00" / "probability_tile.json").exists())
-            self.assertTrue((output_dir / "hours" / "f00" / "upper_air_overlay.json").exists())
+            hour_dir = output_dir / "hours" / "f00"
+            self.assertTrue((hour_dir / "risk_polygons.geojson").exists())
+            self.assertTrue((hour_dir / "probability_tile.json").exists())
+            self.assertTrue((hour_dir / "upper_air_overlay.json").exists())
+            self.assertTrue((hour_dir / "hazard_probability_shapes.geojson").exists())
+            tile = json.loads((hour_dir / "probability_tile.json").read_text(encoding="utf-8"))
+            hour_metadata = json.loads((hour_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertIn("riskShapes", tile)
+            self.assertIn("hazardProbabilityShapes", tile)
+            self.assertEqual(hour_metadata["artifacts"]["riskPolygons"], "risk_polygons.geojson")
+            self.assertEqual(hour_metadata["artifacts"]["probabilityTile"], "probability_tile.json")
+            self.assertEqual(hour_metadata["artifacts"]["upperAirOverlay"], "upper_air_overlay.json")
             self.assertEqual(
                 json.loads((output_dir / "hours" / "f01" / "metadata.json").read_text(encoding="utf-8"))["status"],
                 "failed",
             )
+
+    def test_incremental_pipeline_processes_forecast_hours_in_parallel(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(_ref, _session):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return lats, lons, small_fields()
+            finally:
+                with lock:
+                    active -= 1
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            return {"tornado": probs, "hail": probs, "wind": probs}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            index = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0, 1, 2, 3],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                hour_workers=3,
+                range_workers=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+            disk_index = json.loads((output_dir / "index.json").read_text(encoding="utf-8"))
+            for hour in [0, 1, 2, 3]:
+                hour_dir = output_dir / "hours" / f"f{hour:02d}"
+                self.assertTrue((hour_dir / "risk_polygons.geojson").exists())
+                self.assertTrue((hour_dir / "probability_tile.json").exists())
+                self.assertTrue((hour_dir / "upper_air_overlay.json").exists())
+                self.assertTrue((hour_dir / "metadata.json").exists())
+
+        self.assertGreater(max_active, 1)
+        self.assertEqual(index["readyForecastHours"], [0, 1, 2, 3])
+        self.assertEqual(disk_index["readyForecastHours"], [0, 1, 2, 3])
+        self.assertEqual(disk_index["failedForecastHours"], [])
+        self.assertEqual(disk_index["pendingForecastHours"], [])
+
+    def test_incremental_pipeline_skips_ready_hours_unless_forced(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        fetched_hours: list[int] = []
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            fetched_hours.append(ref.forecast_hour)
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            return {"tornado": probs, "hail": probs, "wind": probs}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                hour_workers=2,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+            after_first = list(fetched_hours)
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                hour_workers=2,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+            after_skip = list(fetched_hours)
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                hour_workers=2,
+                force=True,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+        self.assertEqual(sorted(after_first), [0, 1])
+        self.assertEqual(after_skip, after_first)
+        self.assertEqual(sorted(fetched_hours), [0, 0, 1])
 
     def test_incremental_pipeline_publishes_complete_snapshot_for_fallback(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -1204,12 +1746,83 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             (artifact_dir / "metadata.json").write_text(json.dumps({"cycle": "unit"}), encoding="utf-8")
             from backend import server
 
-            with patch.object(server, "ARTIFACT_DIR", artifact_dir):
+            with (
+                patch.object(server, "ARTIFACT_DIR", artifact_dir),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
+            ):
                 client = server.app.test_client()
                 response = client.get("/api/outlook/latest")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["cycle"], "unit")
+            self.assertIn("max-age=", response.headers.get("Cache-Control", ""))
+
+    def test_server_missing_artifact_response_does_not_expose_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "latest"
+            incremental_dir = root / "latest_incremental"
+            artifact_dir.mkdir()
+            incremental_dir.mkdir()
+            from backend import server
+
+            with (
+                patch.object(server, "ARTIFACT_DIR", artifact_dir),
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", root / "latest_incremental_complete"),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
+            ):
+                client = server.app.test_client()
+                response = client.get("/api/outlook/latest")
+
+            payload = response.get_json()
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(payload["code"], "outlook_not_ready")
+            self.assertNotIn("artifactDir", payload)
+            self.assertNotIn(str(root), body)
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_server_artifact_only_forecast_missing_does_not_live_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            incremental_dir = root / "latest_incremental"
+            incremental_dir.mkdir()
+            from backend import server
+
+            with (
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", root / "latest_incremental_complete"),
+                patch.dict(os.environ, {
+                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifact",
+                    "AUTOOUTLOOK_ENABLE_LIVE_BUILD": "false",
+                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
+                }),
+                patch.object(server, "build_bundle", side_effect=AssertionError("live build should not run")) as build_mock,
+            ):
+                client = server.app.test_client()
+                response = client.get("/api/forecast")
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(payload["code"], "outlook_not_ready")
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            build_mock.assert_not_called()
+
+    def test_server_artifact_bucket_keys_match_artifact_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            from backend import server
+
+            with (
+                patch.object(server, "ARTIFACT_DIR", root / "latest"),
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", root / "latest_incremental"),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", root / "latest_incremental_complete"),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_PREFIX": "prod/artifacts"}),
+            ):
+                key = server._artifact_storage_key(root / "latest_incremental" / "hours" / "f03" / "metadata.json")
+
+            self.assertEqual(key, "prod/artifacts/latest_incremental/hours/f03/metadata.json")
 
     def test_server_serves_incremental_hour_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1222,7 +1835,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             (hour_dir / "metadata.json").write_text(json.dumps({"forecastHour": 0, "status": "ready"}), encoding="utf-8")
             from backend import server
 
-            with patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir):
+            with (
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
+            ):
                 client = server.app.test_client()
                 index_response = client.get("/api/outlook/incremental")
                 tile_response = client.get("/api/outlook/incremental/hour/0/probability-tile")
@@ -1245,7 +1861,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             (stale_hour_dir / "probability_tile.json").write_text(json.dumps({"forecastHour": 1}), encoding="utf-8")
             from backend import server
 
-            with patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir):
+            with (
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
+            ):
                 client = server.app.test_client()
                 response = client.get("/api/outlook/incremental/hour/1/probability-tile")
 
@@ -1280,6 +1899,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             with (
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", current_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", complete_dir),
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 index_response = client.get("/api/outlook/incremental")
@@ -1352,7 +1972,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
-                patch.dict(os.environ, {"AUTOOUTLOOK_FORECAST_SOURCE": "artifacts"}),
+                patch.dict(os.environ, {
+                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
+                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
+                }),
                 patch.object(server, "build_bundle", side_effect=AssertionError("should not build live bundle")),
             ):
                 client = server.app.test_client()

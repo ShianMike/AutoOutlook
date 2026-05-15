@@ -2,10 +2,8 @@ import type { HourSnapshot } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
-import {
-  getArtifactMainHazard,
-  getArtifactMaxCategory,
-} from '../utils/artifactProbabilities';
+import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
+import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroBadge from './retro/RetroBadge';
 
 interface PrimaryOutlookBannerProps {
@@ -23,25 +21,15 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
     );
   }
   const { outlook } = snapshot;
-  const artifactCategory = artifactStatus === 'ready'
-    ? getArtifactMaxCategory(artifacts ?? null, snapshot.forecastHour)
-    : undefined;
-  const usingGeneratedArtifacts = artifactStatus === 'ready';
-  const displayCategory = artifactCategory && artifactCategory !== 'NONE'
-    ? artifactCategory === 'MDT' ? 'MOD' : artifactCategory
-    : usingGeneratedArtifacts ? 'TSTM' : outlook.category;
-  const artifactHazard = artifactStatus === 'ready'
-    ? getArtifactMainHazard(artifacts ?? null, snapshot.forecastHour)
-    : undefined;
+  const outlookSummary = buildGeneratedOutlookSummary({ snapshot, artifacts, artifactStatus });
+  const usingGeneratedArtifacts = outlookSummary.usingGeneratedArtifacts;
+  const displayCategory = outlookSummary.category;
   const meta = RISK_META[displayCategory];
-  const hazard = HAZARD_META[artifactHazard ?? outlook.mainHazard];
+  const hazard = HAZARD_META[outlookSummary.hazard ?? outlook.mainHazard];
   const confPct = Math.round(outlook.confidence * 100);
   const isDarkChip = meta.tw.includes('text-paper');
-  const headline = usingGeneratedArtifacts
-    ? artifactCategory
-    ? `${meta.label} risk for the selected forecast hour.`
-      : 'No generated risk polygons for the selected forecast hour.'
-    : outlook.headline;
+  const headline = outlookSummary.headline;
+  const regionLabel = displayRegionLabel(snapshot.region.label, 'Highlighted corridor');
 
   return (
     <section
@@ -57,7 +45,7 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
             Primary outlook
           </span>
           <span className="font-mono text-[11px] uppercase tracking-widest">
-            {snapshot.region.label}
+            {regionLabel}
           </span>
         </div>
         <div className="flex items-center gap-2">

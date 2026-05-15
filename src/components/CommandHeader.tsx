@@ -2,7 +2,8 @@ import type { ForecastBundle, ForecastSource } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
-import { getArtifactMainHazard, getArtifactMaxCategory } from '../utils/artifactProbabilities';
+import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
+import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroBadge from './retro/RetroBadge';
 
 interface CommandHeaderProps {
@@ -58,17 +59,13 @@ export default function CommandHeader({
   const snapshot = selectedValidTime
     ? bundle?.hours.find((hour) => hour.validTimeISO === selectedValidTime)
     : bundle?.hours[0];
-  const artifactCategory = artifactStatus === 'ready'
-    ? getArtifactMaxCategory(artifacts ?? null, snapshot?.forecastHour)
+  const outlookSummary = snapshot
+    ? buildGeneratedOutlookSummary({ snapshot, artifacts, artifactStatus })
     : undefined;
-  const displayCategory = artifactCategory && artifactCategory !== 'NONE'
-    ? artifactCategory === 'MDT' ? 'MOD' : artifactCategory
-    : artifactStatus === 'ready' ? 'TSTM' : snapshot?.outlook.category;
-  const artifactHazard = artifactStatus === 'ready'
-    ? getArtifactMainHazard(artifacts ?? null, snapshot?.forecastHour)
-    : undefined;
-  const displayHazard = artifactHazard ?? snapshot?.outlook.mainHazard;
-  const usingGeneratedArtifacts = artifactStatus === 'ready';
+  const displayCategory = outlookSummary?.category;
+  const displayHazard = outlookSummary?.hazard;
+  const usingGeneratedArtifacts = outlookSummary?.usingGeneratedArtifacts ?? artifactStatus === 'ready';
+  const displayRegion = displayRegionLabel(snapshot?.region.label, 'Highlighted corridor');
 
   return (
     <header className="bg-ink text-paper border-b-[3px] border-paper/10 relative retro-scanline">
@@ -101,7 +98,7 @@ export default function CommandHeader({
           <Stat label="HAZARD" value={displayHazard ? HAZARD_META[displayHazard].label : '—'} />
           <Stat
             label="FOCUS"
-            value={snapshot ? truncateLabel(snapshot.region.label) : '—'}
+            value={snapshot ? truncateLabel(displayRegion) : '—'}
             sub={snapshot ? fmtCoordShort(snapshot.region.centerLat, snapshot.region.centerLon) : undefined}
           />
           <Stat label="CONF" value={snapshot ? `${Math.round(snapshot.outlook.confidence * 100)}%` : '—'} />
@@ -126,6 +123,7 @@ export default function CommandHeader({
             displayCategory={displayCategory}
             displayHazard={displayHazard}
             usingGeneratedArtifacts={usingGeneratedArtifacts}
+            headline={outlookSummary?.headline}
           />
           <TickerSpan
             bundle={bundle}
@@ -133,6 +131,7 @@ export default function CommandHeader({
             displayCategory={displayCategory}
             displayHazard={displayHazard}
             usingGeneratedArtifacts={usingGeneratedArtifacts}
+            headline={outlookSummary?.headline}
           />
         </div>
       </div>
@@ -162,28 +161,28 @@ function TickerSpan({
   displayCategory,
   displayHazard,
   usingGeneratedArtifacts,
+  headline,
 }: {
   bundle: ForecastBundle | null;
   snapshot: ForecastBundle['hours'][number] | undefined;
   displayCategory?: keyof typeof RISK_META;
   displayHazard?: keyof typeof HAZARD_META;
   usingGeneratedArtifacts: boolean;
+  headline?: string;
 }) {
   const risk = displayCategory ? RISK_META[displayCategory] : undefined;
   const hazard = displayHazard ? HAZARD_META[displayHazard] : undefined;
-  const headline = snapshot
-    ? usingGeneratedArtifacts && risk
-      ? `Generated HRRR/XGBoost outlook: ${risk.label} risk for the selected forecast hour.`
-      : snapshot.outlook.headline
+  const displayHeadline = snapshot
+    ? headline ?? snapshot.outlook.headline
     : 'GENERATING FORECAST HEADLINE';
   const sigTag = !usingGeneratedArtifacts && snapshot?.outlook.significantSevere ? '► ⚠ SIGNIFICANT SEVERE POSSIBLE' : null;
   const items = bundle
     ? [
         `► OUTLOOK ${risk?.label ?? 'OUTLOOK PENDING'}`,
         `► PRIMARY ${hazard?.label ?? 'HAZARD PENDING'}`,
-        `► FOCUS ${snapshot ? truncateLabel(snapshot.region.label, 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
+        `► FOCUS ${snapshot ? truncateLabel(displayRegionLabel(snapshot.region.label, 'Highlighted corridor'), 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
         ...(sigTag ? [sigTag] : []),
-        `► ${headline}`,
+        `► ${displayHeadline}`,
         `► ${bundle.hours.length} FORECAST HOURS LOADED`,
       ]
     : ['► BOOTING AUTOOUTLOOK', '► LOADING FORECAST PROVIDERS', '► STAND BY'];

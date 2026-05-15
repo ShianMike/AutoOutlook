@@ -7,6 +7,7 @@ ingredients through +48h in the TS frontend's Ingredients shape.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ FORECAST_HOURS = list(range(0, 49))
 HGT500_CONTOUR_LEVELS = tuple(range(5280, 5941, 60))
 FULL_CONUS_OVERLAY_GRID_STRIDE = 4
 FULL_CONUS_WIND_BARB_STRIDE = 22
+_MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
 
 QUICK_CATEGORY_ORD = {"TSTM": 0, "MRGL": 1, "SLGT": 2, "ENH": 3, "MOD": 4, "HIGH": 5}
 
@@ -1589,29 +1591,30 @@ def _hgt500_lines_from_field(
     if not valid_levels:
         return []
 
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return []
+    with _MATPLOTLIB_CONTOUR_LOCK:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception:
+            return []
 
-    fig = plt.figure(figsize=(1, 1))
-    try:
-        cs = plt.contour(lon_grid, lat_grid, hgt, levels=valid_levels)
-        lines: list[dict[str, Any]] = []
-        for level, segments in zip(cs.levels, cs.allsegs):
-            for seg in segments:
-                if len(seg) < 12:
-                    continue
-                decimated = seg[:: max(1, len(seg) // 80)]
-                coords = [
-                    [float(lon), float(lat)]
-                    for lon, lat in decimated
-                    if -130 <= lon <= -60 and 20 <= lat <= 55
-                ]
-                if len(coords) >= 8:
-                    lines.append({"level": "500mb", "value": float(level), "coords": coords})
-        return lines[:48]
-    finally:
-        plt.close(fig)
+        fig, ax = plt.subplots(figsize=(1, 1))
+        try:
+            cs = ax.contour(lon_grid, lat_grid, hgt, levels=valid_levels)
+            lines: list[dict[str, Any]] = []
+            for level, segments in zip(cs.levels, cs.allsegs):
+                for seg in segments:
+                    if len(seg) < 12:
+                        continue
+                    decimated = seg[:: max(1, len(seg) // 80)]
+                    coords = [
+                        [float(lon), float(lat)]
+                        for lon, lat in decimated
+                        if -130 <= lon <= -60 and 20 <= lat <= 55
+                    ]
+                    if len(coords) >= 8:
+                        lines.append({"level": "500mb", "value": float(level), "coords": coords})
+            return lines[:48]
+        finally:
+            plt.close(fig)

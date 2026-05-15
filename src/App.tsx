@@ -55,7 +55,15 @@ export default function App() {
           </section>
 
           <section id="outlook-map" className="scroll-mt-4">
-            <OutlookMapPanel snapshot={snapshot} outlookArtifacts={outlookArtifacts} />
+            <OutlookMapPanel
+              snapshot={snapshot}
+              outlookArtifacts={outlookArtifacts}
+              bundle={auto.bundle}
+              selectedIndex={hour.index}
+              isPlaying={hour.isPlaying}
+              onIndexChange={hour.setIndex}
+              setPlaying={hour.setPlaying}
+            />
           </section>
 
           <section id="primary-outlook" className="scroll-mt-4">

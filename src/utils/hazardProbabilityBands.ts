@@ -1,7 +1,7 @@
 // hazardProbabilityBands: per-hazard probability contour generator.
 // Mirrors the SPC / rawinsonde-style 4-panel outlook visual:
 // each hazard gets its own threshold ladder (e.g. 5%/15%/30%/45%/60%
-// for hail, 2%/5%/10%/15%/30% for tornado), and probability bands are
+// for hail, 2%/5%/10%/15%/30%/45%/60% for tornado), and probability bands are
 // drawn as SPC/rawinsonde-style swaths around the focus region. Secondary
 // lobes are generated when the local peak still exceeds a threshold, so the
 // outlook can break into disconnected areas instead of one resized ellipse.
@@ -82,9 +82,9 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
     ],
   },
   tornado: {
-    thresholds: [0.02, 0.05, 0.10, 0.15, 0.30],
-    colors:     ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1'],
-    labels:     ['2%', '5%', '10%', '15%', '30%'],
+    thresholds: [0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60],
+    colors:     ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1', '#6e0099', '#4b006b'],
+    labels:     ['2%', '5%', '10%', '15%', '30%', '45%', '60%'],
     baseLatRadius: 1.45,
     aspect: 1.7,
     tilt: -10,

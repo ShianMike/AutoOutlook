@@ -90,6 +90,17 @@ function displayRiskPolygonsForSelectedHour(
   };
 }
 
+function mergeRiskPolygonCache(
+  cache: Map<number, OutlookArtifactFeatureCollection>,
+): OutlookArtifactFeatureCollection {
+  return {
+    type: 'FeatureCollection',
+    features: Array.from(cache.entries())
+      .sort(([a], [b]) => a - b)
+      .flatMap(([, collection]) => collection.features),
+  };
+}
+
 function displayProbabilityHourForSelectedHour(
   tile: OutlookProbabilityTile,
   selectedForecastHour: number,
@@ -271,16 +282,28 @@ export function useOutlookArtifacts(
   refreshMs = 15 * 1000,
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
-  const inFlightRef = useRef(false);
   const probabilityHourCacheRef = useRef<Map<number, OutlookProbabilityHour>>(new Map());
+  const riskPolygonCacheRef = useRef<Map<number, OutlookArtifactFeatureCollection>>(new Map());
+  const mergedRiskPolygonsRef = useRef<OutlookArtifactFeatureCollection | undefined>(undefined);
   const prefetchingHoursRef = useRef<Set<number>>(new Set());
   const warmedFullTileCyclesRef = useRef<Set<string>>(new Set());
+  const warmedRiskPolygonCyclesRef = useRef<Set<string>>(new Set());
   const cacheCycleRef = useRef<string | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const resetProbabilityCacheIfNeeded = (incremental: OutlookIncrementalIndex) => {
     const cacheKey = incrementalCacheKey(incremental);
     if (cacheCycleRef.current !== cacheKey) {
       probabilityHourCacheRef.current.clear();
+      riskPolygonCacheRef.current.clear();
+      mergedRiskPolygonsRef.current = undefined;
       prefetchingHoursRef.current.clear();
       cacheCycleRef.current = cacheKey;
     }
@@ -320,7 +343,94 @@ export function useOutlookArtifacts(
 
   useEffect(() => {
     let cancelled = false;
+    let loadInFlight = false;
     const controller = new AbortController();
+
+    const showCachedSelectedHour = () => {
+      if (selectedForecastHour === undefined) return;
+      const cachedSelectedHour = probabilityHourCacheRef.current.get(selectedForecastHour);
+      setState((previous) => {
+        const incremental = previous.artifacts?.incrementalIndex;
+        if (!incremental) return previous;
+        const ready = incremental.readyForecastHours ?? [];
+        const failed = incremental.failedForecastHours ?? [];
+        const pending = incremental.pendingForecastHours ?? [];
+        const requested = incremental.requestedForecastHours ?? [];
+        const available = requested.length > 0
+          ? requested
+          : Array.from(new Set([...ready, ...failed, ...pending]));
+        const artifactForecastHour = resolveArtifactForecastHour(
+          incremental.cycleTimeISO,
+          selectedForecastHour,
+          selectedValidTimeISO,
+          available,
+        );
+        const cachedRiskPolygons = artifactForecastHour !== undefined
+          ? riskPolygonCacheRef.current.get(artifactForecastHour)
+          : undefined;
+        if (!cachedSelectedHour && !cachedRiskPolygons) return previous;
+        let next = cachedSelectedHour
+          ? mergeCachedHoursIntoState(previous, incremental, [cachedSelectedHour])
+          : previous;
+        if (cachedRiskPolygons && next.artifacts) {
+          next = {
+            status: 'ready',
+            artifacts: {
+              ...next.artifacts,
+              riskPolygons: displayRiskPolygonsForSelectedHour(
+                cachedRiskPolygons,
+                selectedForecastHour,
+                selectedValidTimeISO,
+              ),
+              selectedArtifactForecastHour: artifactForecastHour,
+              selectedHourStatus: 'ready',
+            },
+            message: null,
+          };
+        }
+        return next;
+      });
+    };
+
+    const warmMergedRiskPolygons = async (
+      incremental: OutlookIncrementalIndex,
+      cacheKey: string,
+    ) => {
+      if (warmedRiskPolygonCyclesRef.current.has(cacheKey)) return;
+      warmedRiskPolygonCyclesRef.current.add(cacheKey);
+      const readyHours = [...(incremental.readyForecastHours ?? [])]
+        .map((hour) => Number(hour))
+        .filter((hour) => Number.isFinite(hour) && hour >= 0 && hour <= 96)
+        .sort((a, b) => {
+          const selected = selectedForecastHour ?? 0;
+          return Math.abs(a - selected) - Math.abs(b - selected) || a - b;
+        });
+      if (readyHours.length === 0) {
+        warmedRiskPolygonCyclesRef.current.delete(cacheKey);
+        return;
+      }
+      await Promise.allSettled(readyHours.map(async (forecastHour) => {
+        if (riskPolygonCacheRef.current.has(forecastHour)) return;
+        const riskPolygons = await fetchJson<OutlookArtifactFeatureCollection>(
+          `/api/outlook/incremental/hour/${forecastHour}/risk-polygons`,
+        );
+        if (!isMountedRef.current || cacheCycleRef.current !== cacheKey) return;
+        riskPolygonCacheRef.current.set(forecastHour, riskPolygons);
+        const mergedRiskPolygons = mergeRiskPolygonCache(riskPolygonCacheRef.current);
+        mergedRiskPolygonsRef.current = mergedRiskPolygons;
+        setState((previous) => {
+          if (!previous.artifacts) return previous;
+          return {
+            ...previous,
+            artifacts: {
+              ...previous.artifacts,
+              aggregateRiskPolygons: mergedRiskPolygons,
+            },
+          };
+        });
+        showCachedSelectedHour();
+      }));
+    };
 
     const warmFullProbabilityTiles = async (
       incremental: OutlookIncrementalIndex,
@@ -336,6 +446,7 @@ export function useOutlookArtifacts(
         ).filter((hour) => hour.forecastHour >= 0 && hour.forecastHour <= 96);
         if (!displayHours.length) return;
         cacheProbabilityHours(displayHours);
+        if (!isMountedRef.current) return;
         setState((previous) => mergeCachedHoursIntoState(previous, incremental, displayHours));
       } catch {
         warmedFullTileCyclesRef.current.delete(cacheKey);
@@ -356,7 +467,9 @@ export function useOutlookArtifacts(
         : Array.from(new Set([...ready, ...failed, ...pending]));
       const targetDisplayHours = Array.from({ length: PREFETCH_RADIUS * 2 + 1 }, (_, index) =>
         selectedForecastHour - PREFETCH_RADIUS + index,
-      ).filter((hour) => hour >= 0 && hour <= 96 && hour !== selectedForecastHour);
+      )
+        .filter((hour) => hour >= 0 && hour <= 96 && hour !== selectedForecastHour)
+        .sort((a, b) => Math.abs(a - selectedForecastHour) - Math.abs(b - selectedForecastHour));
 
       await Promise.allSettled(targetDisplayHours.map(async (displayHour) => {
         if (cacheCycleRef.current !== cacheKey) return;
@@ -372,10 +485,10 @@ export function useOutlookArtifacts(
         prefetchingHoursRef.current.add(displayHour);
         try {
           const [tile, hourMetadata] = await Promise.all([
-            fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactHour}/probability-tile`, controller.signal),
-            fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactHour}/metadata`, controller.signal).catch(() => undefined),
+            fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactHour}/probability-tile`),
+            fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactHour}/metadata`).catch(() => undefined),
           ]);
-          if (cancelled || cacheCycleRef.current !== cacheKey) return;
+          if (!isMountedRef.current || cacheCycleRef.current !== cacheKey) return;
           const probabilityHour = displayProbabilityHourForSelectedHour(
             tile,
             displayHour,
@@ -383,6 +496,7 @@ export function useOutlookArtifacts(
             hourMetadata?.categoryCounts ?? hourMetadata?.aggregateCategoryCounts,
           );
           cacheProbabilityHours([probabilityHour]);
+          if (!isMountedRef.current) return;
           setState((previous) => mergeCachedHoursIntoState(previous, incremental, [probabilityHour]));
         } finally {
           prefetchingHoursRef.current.delete(displayHour);
@@ -391,9 +505,10 @@ export function useOutlookArtifacts(
     };
 
     const load = async () => {
-      if (inFlightRef.current) return;
-      inFlightRef.current = true;
+      if (loadInFlight) return;
+      loadInFlight = true;
       if (!cancelled) {
+        showCachedSelectedHour();
         setState((previous) => {
           if (hasTileForDisplayedHour(previous.artifacts, selectedForecastHour)) return previous;
           if (previous.status === 'loading') return previous;
@@ -409,6 +524,7 @@ export function useOutlookArtifacts(
           .catch(() => undefined);
         if (incremental && selectedForecastHour !== undefined) {
           const cacheKey = resetProbabilityCacheIfNeeded(incremental);
+          void warmMergedRiskPolygons(incremental, cacheKey);
           void warmFullProbabilityTiles(incremental, cacheKey);
           const ready = incremental.readyForecastHours ?? [];
           const failed = incremental.failedForecastHours ?? [];
@@ -433,43 +549,73 @@ export function useOutlookArtifacts(
             if (cachedSelectedHour && !cancelled) {
               setState((previous) => mergeCachedHoursIntoState(previous, incremental, [cachedSelectedHour]));
             }
-            const [riskPolygons, tile, hourMetadata, timelineSummary] = await Promise.all([
+            void prefetchNeighborProbabilityTiles(incremental, cacheKey);
+            const [riskPolygons, hourMetadata, timelineSummary] = await Promise.all([
               fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/incremental/hour/${artifactForecastHour}/risk-polygons`, controller.signal),
-              fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactForecastHour}/probability-tile`, controller.signal),
               fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactForecastHour}/metadata`, controller.signal).catch(() => undefined),
               fetchJson<OutlookIncrementalSummary>('/api/outlook/incremental/summary', controller.signal).catch(() => undefined),
             ]);
+            riskPolygonCacheRef.current.set(artifactForecastHour, riskPolygons);
             const displayRiskPolygons = displayRiskPolygonsForSelectedHour(riskPolygons, selectedForecastHour, selectedValidTimeISO);
-            const probabilityHour = displayProbabilityHourForSelectedHour(
-              tile,
-              selectedForecastHour,
-              selectedValidTimeISO,
-              hourMetadata?.categoryCounts ?? hourMetadata?.aggregateCategoryCounts,
-            );
-            const cachedHours = cacheProbabilityHours([probabilityHour]);
-            const probabilityTiles = probabilityTilesFromIncremental(incremental, cachedHours);
+            const readyMetadata: OutlookArtifactMetadata = {
+              ...incremental,
+              ...hourMetadata,
+              mode: 'incremental',
+              selectedArtifactForecastHour: artifactForecastHour,
+              artifactForecastHour,
+            };
+            const cachedHours = mergeProbabilityHours(Array.from(probabilityHourCacheRef.current.values()));
+            const cachedProbabilityTiles = cachedHours.length > 0
+              ? probabilityTilesFromIncremental(incremental, cachedHours)
+              : undefined;
             if (!cancelled) {
-              setState({
+              setState((previous) => ({
                 status: 'ready',
                 artifacts: {
-                  metadata: {
-                    ...incremental,
-                    ...hourMetadata,
-                    mode: 'incremental',
-                    selectedArtifactForecastHour: artifactForecastHour,
-                    artifactForecastHour,
-                    artifactValidTimeISO: tile.validTimeISO,
-                  },
+                  metadata: readyMetadata,
                   riskPolygons: displayRiskPolygons,
-                  probabilityTiles,
+                  aggregateRiskPolygons: previous.artifacts?.aggregateRiskPolygons ?? mergedRiskPolygonsRef.current,
+                  probabilityTiles: cachedProbabilityTiles,
                   timelineSummary,
                   incrementalIndex: incremental,
                   selectedArtifactForecastHour: artifactForecastHour,
                   selectedHourStatus: 'ready',
                 },
                 message: null,
-              });
-              void prefetchNeighborProbabilityTiles(incremental, cacheKey);
+              }));
+            }
+            let tile: OutlookProbabilityTile;
+            try {
+              tile = await fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactForecastHour}/probability-tile`, controller.signal);
+            } catch {
+              return;
+            }
+            if (!cancelled) {
+              const probabilityHour = displayProbabilityHourForSelectedHour(
+                tile,
+                selectedForecastHour,
+                selectedValidTimeISO,
+                hourMetadata?.categoryCounts ?? hourMetadata?.aggregateCategoryCounts,
+              );
+              const nextCachedHours = cacheProbabilityHours([probabilityHour]);
+              const probabilityTiles = probabilityTilesFromIncremental(incremental, nextCachedHours);
+              setState((previous) => ({
+                status: 'ready',
+                artifacts: {
+                  metadata: {
+                    ...readyMetadata,
+                    artifactValidTimeISO: tile.validTimeISO,
+                  },
+                  riskPolygons: previous.artifacts?.riskPolygons ?? displayRiskPolygons,
+                  aggregateRiskPolygons: previous.artifacts?.aggregateRiskPolygons ?? mergedRiskPolygonsRef.current,
+                  probabilityTiles,
+                  timelineSummary: previous.artifacts?.timelineSummary ?? timelineSummary,
+                  incrementalIndex: incremental,
+                  selectedArtifactForecastHour: artifactForecastHour,
+                  selectedHourStatus: 'ready',
+                },
+                message: null,
+              }));
             }
             return;
           }
@@ -567,7 +713,7 @@ export function useOutlookArtifacts(
         };
         setState((previous) => preserveReadySelectedHour(previous, selectedForecastHour, nextState));
       } finally {
-        inFlightRef.current = false;
+        loadInFlight = false;
       }
     };
 
@@ -575,7 +721,7 @@ export function useOutlookArtifacts(
     const interval = window.setInterval(load, refreshMs);
     return () => {
       cancelled = true;
-      inFlightRef.current = false;
+      loadInFlight = false;
       controller.abort();
       window.clearInterval(interval);
     };

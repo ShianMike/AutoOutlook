@@ -28,4 +28,4 @@ COPY backend ./backend
 COPY --from=frontend /app/dist ./dist
 
 EXPOSE 8080
-CMD ["sh", "-c", "gunicorn backend.server:app --bind 0.0.0.0:${PORT:-8080} --workers ${WEB_CONCURRENCY:-1} --threads ${WEB_THREADS:-8} --timeout ${GUNICORN_TIMEOUT:-300} --graceful-timeout 30 --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "gunicorn backend.server:app --bind 0.0.0.0:${PORT:-8080} --workers ${WEB_CONCURRENCY:-1} --threads ${WEB_THREADS:-8} --timeout ${GUNICORN_TIMEOUT:-120} --graceful-timeout 30 --access-logfile - --error-logfile -"]

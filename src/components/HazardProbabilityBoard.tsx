@@ -9,6 +9,7 @@ import {
   getArtifactHourTile,
   type ArtifactHazardKey,
 } from '../utils/artifactProbabilities';
+import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroPanel from './retro/RetroPanel';
 import RetroBadge from './retro/RetroBadge';
 
@@ -140,7 +141,7 @@ function describePeakLocation(snapshot: HourSnapshot | null, lat: number, lon: n
 
 function describeFallbackLocation(snapshot: HourSnapshot | null): string {
   if (!snapshot) return 'Location unavailable';
-  return `${snapshot.region.label} · ${formatCoord(snapshot.region.centerLat, snapshot.region.centerLon)}`;
+  return `${displayRegionLabel(snapshot.region.label, 'Highlighted corridor')} · ${formatCoord(snapshot.region.centerLat, snapshot.region.centerLon)}`;
 }
 
 function nearestCity(snapshot: HourSnapshot | null, lat: number, lon: number): string | null {

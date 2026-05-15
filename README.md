@@ -80,9 +80,59 @@ Run it as a scheduler loop:
 python -m backend.ml.outlook_pipeline --loop --interval-minutes 30
 ```
 
+Useful runtime controls for the incremental artifact pipeline:
+
+```powershell
+$env:AUTOOUTLOOK_HOUR_WORKERS = "4"   # forecast hours processed in parallel
+$env:AUTOOUTLOOK_RANGE_WORKERS = "6"  # HRRR byte-range downloads per hour
+$env:AUTOOUTLOOK_GRID_STRIDE = "4"    # decoded-grid downsample stride
+$env:AUTOOUTLOOK_TILE_STRIDE = "4"    # rendered probability-tile stride
+```
+
 The pipeline writes to `backend/artifacts/latest/` by default. That directory is intentionally git-ignored because it contains generated runtime artifacts.
 
 Important leakage guard: the pipeline writes prediction artifacts first, then downloads the current official SPC Day 1 GeoJSON for verification. The official SPC outlook is never passed into the model feature matrix.
+
+### 4) Cost-controlled production serving
+
+Production should keep the public website online while serving only finished artifacts from the web service. Normal visitors should not trigger HRRR/NOMADS downloads, XGBoost inference, f00-f48 generation, polygon regeneration, or preview image generation.
+
+Recommended public Cloud Run service environment:
+
+```powershell
+AUTOOUTLOOK_FORECAST_SOURCE=artifact
+AUTOOUTLOOK_ENABLE_LIVE_BUILD=false
+AUTOOUTLOOK_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest
+AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest_incremental
+AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest_incremental_complete
+```
+
+With `AUTOOUTLOOK_ENABLE_LIVE_BUILD=false`, `/api/forecast` returns the latest generated artifact bundle. If artifacts are missing or incomplete, the public service returns `{"code":"outlook_not_ready"}` instead of starting expensive model work. Raw artifact storage paths are not exposed in public API errors.
+
+If artifacts are stored in a private Cloud Storage bucket instead of a mounted filesystem, set:
+
+```powershell
+AUTOOUTLOOK_ARTIFACT_BUCKET=your-private-artifact-bucket
+AUTOOUTLOOK_ARTIFACT_PREFIX=optional/path/prefix
+```
+
+Cloud Run will read objects with its service account and still expose only controlled API responses such as `/api/outlook/incremental`, `/api/outlook/incremental/hour/:hour/risk-polygons`, `/api/outlook/incremental/hour/:hour/probability-tile`, and `/api/outlook/preview.png`.
+
+Recommended public Cloud Run service settings:
+
+```powershell
+gcloud run services update autooutlook `
+  --region us-central1 `
+  --min-instances 0 `
+  --max-instances 1 `
+  --concurrency 20 `
+  --cpu 2 `
+  --memory 2Gi `
+  --timeout 120 `
+  --cpu-boost
+```
+
+The `--timeout 120` setting is the maximum time an individual HTTP request can run before Cloud Run returns a timeout. That is enough for the public service because request handlers only serve existing JSON, GeoJSON, PNG, and frontend assets. Long HRRR/XGBoost generation belongs in the separate scheduled Cloud Run Job or a manual generation job that writes finalized artifacts for the public service to read.
 
 ## Project layout
 

@@ -19,8 +19,30 @@ Write-Host "  Backend  ->  http://127.0.0.1:8765  (Flask, hot-reload)" -Foregrou
 Write-Host "  Frontend ->  http://localhost:5173   (Vite, HMR)" -ForegroundColor Green
 Write-Host ""
 
+$artifactBucket = "autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963"
+$artifactProject = "project-f47ca9d9-31bc-4a21-963"
+$artifactRoot = Join-Path $root "backend\artifacts"
+$gcloud = Get-Command gcloud -ErrorAction SilentlyContinue
+if ($gcloud) {
+    Write-Host "  Syncing latest production artifacts from gs://$artifactBucket ..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+    foreach ($name in @("latest", "latest_incremental", "latest_incremental_complete")) {
+        $target = Join-Path $artifactRoot $name
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        & gcloud storage rsync -r "gs://$artifactBucket/$name" $target --project $artifactProject | Out-Host
+    }
+} else {
+    Write-Warning "gcloud was not found. Local dev will use any existing files under backend\artifacts."
+}
+
 # Backend: FLASK_DEBUG=1 enables Werkzeug file-watcher; any .py save restarts Flask
-$backendCmd = "Set-Location '$root'; `$env:FLASK_DEBUG='1'; & '$python' -m backend.server"
+$backendCmd = @"
+Set-Location '$root';
+`$env:FLASK_DEBUG='1';
+`$env:AUTOOUTLOOK_FORECAST_SOURCE='artifact';
+`$env:AUTOOUTLOOK_ENABLE_LIVE_BUILD='false';
+& '$python' -m backend.server
+"@
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd `
     -WindowStyle Normal
 

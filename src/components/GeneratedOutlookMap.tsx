@@ -2,7 +2,12 @@ import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { HourSnapshot, RiskCategory, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts, OutlookArtifactFeatureCollection, ArtifactRiskCategory } from '../types/outlookArtifacts';
-import { artifactRiskToFeatureCollection, getArtifactHourTile, getArtifactMaxCategory } from '../utils/artifactProbabilities';
+import {
+  artifactRiskShapesToFeatureCollection,
+  artifactRiskToFeatureCollection,
+  getArtifactHourTile,
+  getArtifactMaxCategory,
+} from '../utils/artifactProbabilities';
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
@@ -53,6 +58,7 @@ const LEVEL_STYLE: Record<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>, { fill:
 };
 
 const CATEGORY_RAMP: Array<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>> = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'];
+const RISK_BAND_OUTLINE_WIDTH = 0.75;
 const CATEGORY_ORD: Record<ArtifactRiskCategory, number> = {
   NONE: 0,
   TSTM: 1,
@@ -92,23 +98,35 @@ function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollectio
   if (!collection) return undefined;
   return {
     ...collection,
-    features: collection.features.map((feature) => {
+    features: [...collection.features].sort((a, b) => CATEGORY_ORD[a.properties.category] - CATEGORY_ORD[b.properties.category]).map((feature) => {
       if (feature.geometry.type === 'Polygon') {
-        const coordinates = (feature.geometry.coordinates as number[][][]).map(normalizeExteriorRing);
+        const coordinates = normalizePolygonRings(feature.geometry.coordinates as number[][][]);
         return { ...feature, geometry: { ...feature.geometry, coordinates } };
       }
       const coordinates = (feature.geometry.coordinates as number[][][][]).map((polygon) =>
-        polygon.map(normalizeExteriorRing),
+        normalizePolygonRings(polygon),
       );
       return { ...feature, geometry: { ...feature.geometry, coordinates } };
     }),
   };
 }
 
+function normalizePolygonRings(rings: number[][][]): number[][][] {
+  if (!Array.isArray(rings) || rings.length === 0) return rings;
+  return rings.map((ring, index) => (index === 0 ? normalizeExteriorRing(ring) : normalizeInteriorRing(ring)));
+}
+
 function normalizeExteriorRing(ring: number[][]): number[][] {
   if (!Array.isArray(ring) || ring.length < 4) return ring;
   const open = samePoint(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : [...ring];
   if (signedRingArea(open) > 0) open.reverse();
+  return samePoint(open[0], open[open.length - 1]) ? open : [...open, open[0]];
+}
+
+function normalizeInteriorRing(ring: number[][]): number[][] {
+  if (!Array.isArray(ring) || ring.length < 4) return ring;
+  const open = samePoint(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : [...ring];
+  if (signedRingArea(open) < 0) open.reverse();
   return samePoint(open[0], open[open.length - 1]) ? open : [...open, open[0]];
 }
 
@@ -126,26 +144,62 @@ function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
   return Boolean(a && b && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1]);
 }
 
+function riskPolygonsForHour(
+  collection: OutlookArtifactFeatureCollection | undefined,
+  forecastHour: number | undefined,
+): OutlookArtifactFeatureCollection | undefined {
+  if (!collection || forecastHour === undefined) return undefined;
+  const features = collection.features.filter((feature) => feature.properties.forecastHour === forecastHour);
+  if (features.length === 0) return undefined;
+  return { ...collection, features };
+}
+
 export default function GeneratedOutlookMap({ snapshot, status, artifacts, message }: GeneratedOutlookMapProps) {
   const selectedForecastHour = snapshot?.forecastHour;
   const selectedTile = useMemo(
     () => getArtifactHourTile(artifacts, selectedForecastHour),
     [artifacts, selectedForecastHour],
   );
+  const artifactRiskCollection = useMemo(
+    () => normalizeArtifactCollection(riskPolygonsForHour(artifacts?.riskPolygons, selectedForecastHour)),
+    [artifacts, selectedForecastHour],
+  );
+  const aggregateRiskCollection = useMemo(
+    () => normalizeArtifactCollection(riskPolygonsForHour(artifacts?.aggregateRiskPolygons, selectedForecastHour)),
+    [artifacts, selectedForecastHour],
+  );
+  const tileVectorRiskCollection = useMemo(
+    () => normalizeArtifactCollection(artifactRiskShapesToFeatureCollection(selectedTile)),
+    [selectedTile],
+  );
   const tileRiskCollection = useMemo(
     () => normalizeArtifactCollection(artifactRiskToFeatureCollection(selectedTile)),
     [selectedTile],
   );
   const selectedCollection = useMemo(
-    () => tileRiskCollection ?? { type: 'FeatureCollection' as const, features: [] },
-    [tileRiskCollection],
+    () => artifactRiskCollection && artifactRiskCollection.features.length > 0
+      ? artifactRiskCollection
+      : aggregateRiskCollection && aggregateRiskCollection.features.length > 0
+        ? aggregateRiskCollection
+        : tileVectorRiskCollection && tileVectorRiskCollection.features.length > 0
+          ? tileVectorRiskCollection
+          : tileRiskCollection ?? { type: 'FeatureCollection' as const, features: [] },
+    [artifactRiskCollection, aggregateRiskCollection, tileVectorRiskCollection, tileRiskCollection],
   );
-  const usingTileRisk = Boolean(selectedTile);
+  const usingTileRisk = selectedCollection === tileRiskCollection;
   const renderedCollection = selectedCollection;
+  const hasGeneratedLayer = renderedCollection.features.length > 0;
+  const riskBandOutlineCollection = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: renderedCollection.features,
+    }),
+    [renderedCollection],
+  );
+  const showRiskBandOutlines = hasGeneratedLayer && !usingTileRisk && riskBandOutlineCollection.features.length > 0;
   const renderedMax = maxCategory(renderedCollection);
   const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
-  const hasGeneratedLayer = renderedCollection.features.length > 0;
-  const hasGeneratedArtifact = Boolean(selectedTile);
+  const hasGeneratedArtifact = Boolean(selectedTile || artifactRiskCollection?.features.length || aggregateRiskCollection?.features.length);
   const mapCategory = hasGeneratedArtifact ? tileMax ?? renderedMax : undefined;
 
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
@@ -189,7 +243,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   const hasUpperAirOverlay = snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
-    <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
+    <div className="outlook-export-map-card border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
         <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[13px] leading-none tracking-normal">
           HRRR/XGBoost Risk Levels
@@ -201,7 +255,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
         </div>
       </header>
 
-      <div className="aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
+      <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
           projection="geoAlbers"
           width={900}
@@ -263,25 +317,76 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                       style={{
                         default: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
-                          stroke: usingTileRisk ? '#111111' : style.stroke,
-                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          stroke: usingTileRisk ? '#111111' : 'none',
+                          strokeWidth: usingTileRisk ? 0.08 : 0,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         hover: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
-                          stroke: usingTileRisk ? '#111111' : style.stroke,
-                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          stroke: usingTileRisk ? '#111111' : 'none',
+                          strokeWidth: usingTileRisk ? 0.08 : 0,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         pressed: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.5,
-                          stroke: usingTileRisk ? '#111111' : style.stroke,
-                          strokeWidth: usingTileRisk ? 0.08 : 2.2,
+                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          stroke: usingTileRisk ? '#111111' : 'none',
+                          strokeWidth: usingTileRisk ? 0.08 : 0,
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {showRiskBandOutlines && (
+            <Geographies geography={riskBandOutlineCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const rawCategory = riskBandOutlineCollection.features[index]?.properties.category ?? 'TSTM';
+                  const category = normalizeCategory(rawCategory);
+                  const style = LEVEL_STYLE[category];
+                  return (
+                    <Geography
+                      key={`generated-risk-outline-${geo.rsmKey ?? index}-${rawCategory}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: {
+                          fill: 'none',
+                          stroke: style.stroke,
+                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
+                          strokeOpacity: 0.92,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        hover: {
+                          fill: 'none',
+                          stroke: style.stroke,
+                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
+                          strokeOpacity: 0.92,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        pressed: {
+                          fill: 'none',
+                          stroke: style.stroke,
+                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
+                          strokeOpacity: 0.92,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },

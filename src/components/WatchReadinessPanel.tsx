@@ -2,6 +2,7 @@ import type { HourSnapshot, RiskCategory } from '../types/forecast';
 import { RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { ArtifactRiskCategory, OutlookArtifacts, OutlookTimelineHourSummary } from '../types/outlookArtifacts';
+import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroPanel from './retro/RetroPanel';
 
 interface WatchReadinessPanelProps {
@@ -112,12 +113,13 @@ export default function WatchReadinessPanel({ snapshot, artifacts, artifactStatu
     ? 'No generated significant severe signal for this hour.'
     : 'No hazard meets the 10% significant severe threshold.';
   const sourceNote = usingGeneratedArtifacts ? 'Generated HRRR/XGBoost hour summary' : 'Raw forecast snapshot';
+  const regionLabel = displayRegionLabel(snapshot?.region.label, 'Highlighted corridor');
 
   const rows: { label: string; level: Level; note: string }[] = [
     {
       label: 'Severe Thunderstorm Watch potential',
       level: generatedSvrLevel,
-      note: snapshot ? `${sourceNote}; ${normalizeCategory(displayCategory)?.toUpperCase() ?? 'TSTM'} risk in ${snapshot.region.label}` : '—',
+      note: snapshot ? `${sourceNote}; ${normalizeCategory(displayCategory)?.toUpperCase() ?? 'TSTM'} risk in ${regionLabel}` : '—',
     },
     {
       label: 'Tornado Watch potential',

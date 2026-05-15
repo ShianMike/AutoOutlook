@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -20,6 +21,19 @@ EXTENDED_CYCLE_HOURS = (0, 6, 12, 18)
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_SELECTED_CACHE_DIR = Path(__file__).resolve().parent / "cache" / "hrrr_selected"
 DEFAULT_CACHE_TTL_HOURS = 12.0
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return int(default)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(default)
+
+
+DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
 
 SELECTED_HRRR_TERMS = (
     ":CAPE:surface:",
@@ -288,7 +302,7 @@ def latest_available_hrrr_cycle_with_metadata(
 def fetch_selected_hrrr_hour(
     ref: HrrrHourRef,
     session: requests.Session | None = None,
-    max_workers: int = 4,
+    max_workers: int = DEFAULT_RANGE_WORKERS,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """Download only SELECTED_HRRR_TERMS records for one HRRR forecast hour."""
     result = fetch_selected_hrrr_hour_with_metadata(ref, session=session, max_workers=max_workers)
@@ -298,7 +312,7 @@ def fetch_selected_hrrr_hour(
 def fetch_selected_hrrr_hour_with_metadata(
     ref: HrrrHourRef,
     session: requests.Session | None = None,
-    max_workers: int = 4,
+    max_workers: int = DEFAULT_RANGE_WORKERS,
     cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR,
     cache_ttl_hours: float = DEFAULT_CACHE_TTL_HOURS,
     no_cache: bool = False,

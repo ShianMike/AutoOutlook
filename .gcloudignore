@@ -13,9 +13,14 @@ __pycache__
 .env.*
 backend/__pycache__
 backend/cache
+backend/hrrr_cache_selected
+backend/artifacts
+backend/models_backup
+backend/models_candidate
 backend/ml_data
 backend/archive_data
 *.parquet
 backend_aws.zip
 backend_colab.zip
 tsconfig*.tsbuildinfo
+.codex-*.log

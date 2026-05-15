@@ -3,6 +3,7 @@ import type {
   OutlookArtifactFeatureCollection,
   ArtifactRiskCategory,
   OutlookArtifacts,
+  OutlookProbabilityShapeFeatureCollection,
   OutlookProbabilityTile,
 } from '../types/outlookArtifacts';
 
@@ -18,7 +19,7 @@ export interface ArtifactProbabilityFeature {
     label: string;
     color: string;
   };
-  geometry: { type: 'Polygon'; coordinates: number[][][] };
+  geometry: { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] };
 }
 
 export interface ArtifactProbabilityFeatureCollection {
@@ -34,13 +35,13 @@ export interface ArtifactHazardPeakLocation {
   col: number;
 }
 
-const TORNADO_THRESHOLDS = [0.02, 0.05, 0.10, 0.15, 0.30];
+const TORNADO_THRESHOLDS = [0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60];
 const SEVERE_THRESHOLDS = [0.05, 0.15, 0.30, 0.45, 0.60];
-const TORNADO_LABELS = ['2%', '5%', '10%', '15%', '30%'];
+const TORNADO_LABELS = ['2%', '5%', '10%', '15%', '30%', '45%', '60%'];
 const SEVERE_LABELS = ['5%', '15%', '30%', '45%', '60%'];
 const THUNDER_THRESHOLDS = [0.10, 0.40, 0.70];
 const THUNDER_LABELS = ['10%', '40%', '70%'];
-const TORNADO_COLORS = ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1'];
+const TORNADO_COLORS = ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1', '#6e0099', '#4b006b'];
 const SEVERE_COLORS = ['#a87d4f', '#f6c842', '#cf2727', '#c43eb1', '#6e0099'];
 const THUNDER_COLORS = ['#c9a279', '#5cdde6', '#ef6055'];
 
@@ -50,6 +51,40 @@ export function getArtifactHourTile(
 ): OutlookProbabilityTile | undefined {
   if (forecastHour === undefined) return undefined;
   return artifacts?.probabilityTiles?.hours.find((hour) => hour.forecastHour === forecastHour)?.tile;
+}
+
+export function artifactRiskShapesToFeatureCollection(
+  tile: OutlookProbabilityTile | undefined,
+): OutlookArtifactFeatureCollection | undefined {
+  const collection = tile?.riskShapes;
+  if (!collection) return undefined;
+  return {
+    ...collection,
+    features: [...collection.features].sort((a, b) => categoryOrdinal(a.properties.category) - categoryOrdinal(b.properties.category)),
+  };
+}
+
+export function artifactProbabilityShapesToFeatureCollection(
+  tile: OutlookProbabilityTile | undefined,
+  hazard: GeneratedArtifactHazardKey,
+): ArtifactProbabilityFeatureCollection | undefined {
+  const collection: OutlookProbabilityShapeFeatureCollection | undefined = tile?.hazardProbabilityShapes;
+  if (!collection) return undefined;
+  const features = collection.features
+    .filter((feature) => normalizeHazardName(feature.properties.hazard) === hazard)
+    .map((feature): ArtifactProbabilityFeature => ({
+      type: 'Feature',
+      geometry: normalizeArtifactGeometry(feature.geometry),
+      properties: {
+        hazard,
+        probability: Number(feature.properties.probability),
+        bucket: Number(feature.properties.bucket),
+        label: feature.properties.label,
+        color: feature.properties.color,
+      },
+    }))
+    .sort((a, b) => a.properties.bucket - b.properties.bucket);
+  return { type: 'FeatureCollection', features };
 }
 
 export function getArtifactHazardGrid(
@@ -264,6 +299,58 @@ function hazardLabels(hazard: ArtifactHazardKey): string[] {
 
 function hazardColors(hazard: ArtifactHazardKey): string[] {
   return hazard === 'tornado' ? TORNADO_COLORS : SEVERE_COLORS;
+}
+
+function normalizeHazardName(hazard: string): GeneratedArtifactHazardKey {
+  return hazard === 'thunderstorm' ? 'thunder' : hazard as GeneratedArtifactHazardKey;
+}
+
+function normalizeArtifactGeometry(
+  geometry: OutlookProbabilityShapeFeatureCollection['features'][number]['geometry'],
+): ArtifactProbabilityFeature['geometry'] {
+  if (geometry.type === 'Polygon') {
+    return {
+      ...geometry,
+      coordinates: normalizePolygonRings(geometry.coordinates as number[][][]),
+    };
+  }
+  return {
+    ...geometry,
+    coordinates: (geometry.coordinates as number[][][][]).map((polygon) => normalizePolygonRings(polygon)),
+  };
+}
+
+function normalizePolygonRings(rings: number[][][]): number[][][] {
+  if (!Array.isArray(rings) || rings.length === 0) return rings;
+  return rings.map((ring, index) => (index === 0 ? normalizeExteriorRing(ring) : normalizeInteriorRing(ring)));
+}
+
+function normalizeExteriorRing(ring: number[][]): number[][] {
+  if (!Array.isArray(ring) || ring.length < 4) return ring;
+  const open = samePoint(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : [...ring];
+  if (signedRingArea(open) > 0) open.reverse();
+  return samePoint(open[0], open[open.length - 1]) ? open : [...open, open[0]];
+}
+
+function normalizeInteriorRing(ring: number[][]): number[][] {
+  if (!Array.isArray(ring) || ring.length < 4) return ring;
+  const open = samePoint(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : [...ring];
+  if (signedRingArea(open) < 0) open.reverse();
+  return samePoint(open[0], open[open.length - 1]) ? open : [...open, open[0]];
+}
+
+function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
+  return Boolean(a && b && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1]);
+}
+
+function signedRingArea(coords: number[][]): number {
+  let area = 0;
+  for (let i = 0; i < coords.length; i += 1) {
+    const [x0, y0] = coords[i];
+    const [x1, y1] = coords[(i + 1) % coords.length];
+    area += x0 * y1 - x1 * y0;
+  }
+  return area / 2;
 }
 
 function probabilityBucket(probability: number, thresholds: number[]): number {

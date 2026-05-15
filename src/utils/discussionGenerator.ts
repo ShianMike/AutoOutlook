@@ -5,6 +5,7 @@
 // reads differently across parameter-space.
 
 import type { HazardKey, HourSnapshot, Ingredients, RiskCategory, SignalStrength, StormMode } from '../types/forecast';
+import { displayRegionLabel } from './regionDisplay';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 const r = Math.round;
@@ -40,7 +41,7 @@ function periodLabel(p: Period): string {
 // ── 1. Summary (SPC header line) ─────────────────────────────────────
 function summaryLine(snap: HourSnapshot): string {
   const out = snap.outlook;
-  const region = snap.region.label;
+  const region = displayRegionLabel(snap.region.label, 'Highlighted corridor');
   const states = snap.region.states.length > 0 ? ` (${snap.region.states.join('/')})` : '';
 
   if (out.category === 'TSTM') {

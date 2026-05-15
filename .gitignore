@@ -18,9 +18,14 @@ __pycache__/
 backend/__pycache__/
 backend/*.pyc
 backend/models/
+backend/models_backup/
+backend/models_candidate/
 backend/ml_data/
 backend/archive_data/
 backend/artifacts/
 backend/cache/
+backend/hrrr_cache_selected/
 *.parquet
 .tmp/
+.codex-*.log
+.codex-last-image.txt

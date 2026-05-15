@@ -210,7 +210,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
   const headerTitle = title.replace(/\s+Outlook$/i, '');
 
   return (
-    <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
+    <div className="outlook-export-map-card border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
         <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[12px] leading-none tracking-normal">
           {headerTitle}
@@ -220,7 +220,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
           <span>PEAK {peakPct}</span>
         </div>
       </header>
-      <div className="aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
+      <div className="outlook-export-map-frame aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
         <ComposableMap
           // NB: we use plain `geoAlbers` (not `geoAlbersUsa`) because the
           // composite projection prepends a full-canvas clip rectangle to

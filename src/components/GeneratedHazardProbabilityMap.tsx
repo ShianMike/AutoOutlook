@@ -3,6 +3,7 @@ import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps
 import type { HourSnapshot, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import {
+  artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
   artifactThunderToFeatureCollection,
   getArtifactHazardPeak,
@@ -49,12 +50,19 @@ export default function GeneratedHazardProbabilityMap({
   const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
   const displayForecastHour = tile?.forecastHour ?? forecastHour;
   const cfg = HAZARD_CONFIGS[hazard];
-  const featureCollection = useMemo(
-    () => hazard === 'thunder'
-      ? artifactThunderToFeatureCollection(tile)
-      : artifactProbabilityToFeatureCollection(tile, hazard),
+  const vectorFeatureCollection = useMemo(
+    () => artifactProbabilityShapesToFeatureCollection(tile, hazard),
     [tile, hazard],
   );
+  const featureCollection = useMemo(
+    () => vectorFeatureCollection ?? (
+      hazard === 'thunder'
+        ? artifactThunderToFeatureCollection(tile)
+        : artifactProbabilityToFeatureCollection(tile, hazard)
+    ),
+    [tile, hazard, vectorFeatureCollection],
+  );
+  const usingVectorProbability = Boolean(vectorFeatureCollection);
   const peakProb = hazard === 'thunder'
     ? getArtifactThunderCoverage(tile) ?? 0
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
@@ -97,7 +105,7 @@ export default function GeneratedHazardProbabilityMap({
   const hasUpperAirOverlay = snapshot?.upperAirOverlay?.domain === 'CONUS' && snapshot.upperAirOverlay.level === '500mb';
 
   return (
-    <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
+    <div className="outlook-export-map-card border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
         <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[12px] leading-none tracking-normal">
           {headerTitle}
@@ -108,7 +116,7 @@ export default function GeneratedHazardProbabilityMap({
           </span>
         </div>
       </header>
-      <div className="aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
+      <div className="outlook-export-map-frame aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
         <ComposableMap
           projection="geoAlbers"
           width={500}
@@ -166,25 +174,25 @@ export default function GeneratedHazardProbabilityMap({
                     style={{
                       default: {
                         fill: geo.properties.color as string,
-                        fillOpacity: 0.58,
+                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
                         stroke: '#111111',
-                        strokeWidth: 0.08,
+                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
                         outline: 'none',
                         pointerEvents: 'none',
                       },
                       hover: {
                         fill: geo.properties.color as string,
-                        fillOpacity: 0.58,
+                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
                         stroke: '#111111',
-                        strokeWidth: 0.08,
+                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
                         outline: 'none',
                         pointerEvents: 'none',
                       },
                       pressed: {
                         fill: geo.properties.color as string,
-                        fillOpacity: 0.58,
+                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
                         stroke: '#111111',
-                        strokeWidth: 0.08,
+                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
                         outline: 'none',
                         pointerEvents: 'none',
                       },

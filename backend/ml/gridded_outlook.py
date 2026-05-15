@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import Any, Mapping
 
 import numpy as np
@@ -10,6 +11,21 @@ from .features import FEATURE_NAMES
 from .inference import predict_ml_hazard_matrix
 
 SPC_RISK_LABELS = ("NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
+_MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
+_CATEGORY_VECTORIZATION_METHOD = "marching_squares_cumulative_contours"
+_PROBABILITY_VECTORIZATION_METHOD = "marching_squares_probability_contours"
+_TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
+_SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
+_THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
+_DISPLAY_BAND_GAP_METERS = 15_000.0
+_DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
+_DISPLAY_BAND_CRS = "EPSG:5070"
+_PROBABILITY_COLORS = {
+    "tornado": ("#3b9b3b", "#a87d4f", "#d4ad7c", "#cf2727", "#c43eb1", "#6e0099", "#4b006b"),
+    "hail": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
+    "wind": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
+    "thunder": ("#c9a279", "#5cdde6", "#ef6055"),
+}
 
 NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "forecastHour": (0.0, 48.0),
@@ -440,24 +456,19 @@ def postprocess_category_grid(
                     if reason is not None:
                         downgraded[reason] += cell_count
 
-        for ordinal in range(len(SPC_RISK_LABELS) - 1, 2, -1):
-            high_mask = grid >= ordinal
-            if not np.any(high_mask):
-                continue
-            buffer_mask = ndimage.binary_dilation(high_mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
-            buffer_mask &= ~high_mask
-            buffer_mask &= organized
-            buffer_mask &= grid < ordinal - 1
-            grid[buffer_mask] = ordinal - 1
-
+        max_category_grid = np.full(grid.shape, len(SPC_RISK_LABELS) - 1, dtype=np.int16)
         if gulf_offshore_mask is not None:
             _force_offshore_none(grid, gulf_offshore_mask, downgraded, "gulfOfMexico")
+            max_category_grid[gulf_offshore_mask] = 0
         if florida_gulf_mask is not None:
             _force_offshore_none(grid, florida_gulf_mask, downgraded, "floridaGulf")
+            max_category_grid[florida_gulf_mask] = 0
         if atlantic_offshore_mask is not None:
             _force_offshore_none(grid, atlantic_offshore_mask, downgraded, "atlanticOcean")
+            max_category_grid[atlantic_offshore_mask] = 0
         if south_texas_gulf_mask is not None:
             _force_offshore_none(grid, south_texas_gulf_mask, downgraded, "southTexasGulfCoast")
+            max_category_grid[south_texas_gulf_mask] = 0
         if texas_mexico_border_mask is not None:
             _cap_category_at_most(
                 grid,
@@ -466,10 +477,31 @@ def postprocess_category_grid(
                 downgraded,
                 "texasMexicoBorder",
             )
+            max_category_grid[texas_mexico_border_mask] = np.minimum(
+                max_category_grid[texas_mexico_border_mask],
+                SPC_RISK_LABELS.index("MRGL"),
+            )
+
+        hierarchy_report = _enforce_category_hierarchy(
+            grid,
+            organized,
+            ndimage,
+            max_category_grid=max_category_grid,
+        )
+        downgraded["missingCategoryBuffer"] += int(hierarchy_report.get("totalAddedCells", 0))
+    else:
+        hierarchy_report = {
+            "applied": False,
+            "totalAddedCells": 0,
+            "addedCellsByCategory": {},
+            "passes": 0,
+        }
 
     report = {
         "morphologicalSmoothingApplied": ndimage is not None,
         "exactBandsGenerated": True,
+        "categoryHierarchyEnforced": bool(hierarchy_report.get("applied")),
+        "hierarchyBuffers": hierarchy_report,
         "removedComponents": removed_components,
         "downgradedCells": downgraded,
         "categoryCountsBeforePostprocess": category_counts(original),
@@ -487,41 +519,190 @@ def risk_polygons_from_grid(
     min_cells: int = 10,
 ) -> dict[str, Any]:
     lat_grid, lon_grid = _lat_lon_grid(lats, lons, category_grid.shape)
+    grid = np.asarray(category_grid, dtype=np.int16)
     features: list[dict[str, Any]] = []
     try:
         from scipy import ndimage
     except Exception:
         ndimage = None
 
+    masks_by_ordinal: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]] = {}
     for ordinal in range(1, len(SPC_RISK_LABELS)):
-        mask = np.asarray(category_grid == ordinal)
+        # SPC-style categorical outlooks are drawn cumulatively: TSTM is the
+        # full thunder area, MRGL is MRGL-or-higher, then higher risks paint on
+        # top. This avoids visible annular grid seams and preserves hierarchy.
+        mask = np.asarray(grid >= ordinal)
         if not np.any(mask):
             continue
-        if ndimage is None:
-            components = [(mask, int(mask.sum()))]
-        else:
-            labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=int))
-            components = [(labels == idx, int(np.sum(labels == idx))) for idx in range(1, count + 1)]
-        for component_idx, (component, cell_count) in enumerate(components):
-            if cell_count < min_cells:
+        settings = _category_generalization_settings(mask, ordinal, min_cells)
+        limit_mask = _cartographic_limit_mask(grid >= max(1, ordinal - 1), ndimage, int(settings["closeIterations"]) + 1)
+        mask = _generalize_mask(
+            mask,
+            ndimage,
+            min_cells=int(settings["minimumComponentCells"]),
+            close_iterations=int(settings["closeIterations"]),
+            prune_iterations=int(settings["tendrilPruneIterations"]),
+            max_hole_cells=int(settings["maximumHoleCells"]),
+            limit_mask=limit_mask,
+        )
+        if np.any(mask):
+            masks_by_ordinal[ordinal] = (mask, settings)
+    _enforce_cumulative_mask_hierarchy(masks_by_ordinal)
+
+    for ordinal in range(1, len(SPC_RISK_LABELS)):
+        item = masks_by_ordinal.get(ordinal)
+        if item is None:
+            continue
+        mask, settings = item
+        rings, component_count, cell_count = _mask_polygons(
+            lon_grid,
+            lat_grid,
+            mask,
+            min_cells=1 if ndimage is not None else int(settings["minimumComponentCells"]),
+            ndimage=ndimage,
+            smoothing_iterations=int(settings["smoothingIterations"]),
+            simplify_tolerance=float(settings["simplifyTolerance"]),
+        )
+        if not rings:
+            continue
+        exact_cell_count = int(np.sum(grid == ordinal))
+        features.append({
+            "type": "Feature",
+            "geometry": _rings_geometry(rings),
+            "properties": {
+                "category": SPC_RISK_LABELS[ordinal],
+                "ordinal": ordinal,
+                "forecastHour": forecast_hour,
+                "validTimeISO": valid_time_iso,
+                "cellCount": cell_count,
+                "sourceCellCount": exact_cell_count,
+                "cumulativeCellCount": cell_count,
+                "componentCount": component_count,
+                "vectorization": {
+                    "method": _CATEGORY_VECTORIZATION_METHOD,
+                    "cumulativeMask": True,
+                    "cartographicGeneralization": True,
+                    "smoothingIterations": int(settings["smoothingIterations"]),
+                    "simplifyTolerance": float(settings["simplifyTolerance"]),
+                    "closeIterations": int(settings["closeIterations"]),
+                    "tendrilPruneIterations": int(settings["tendrilPruneIterations"]),
+                    "maximumHoleCells": int(settings["maximumHoleCells"]),
+                    "minimumComponentCells": int(settings["minimumComponentCells"]),
+                },
+            },
+        })
+    features = _display_gap_features(features, order_property="ordinal")
+    return {"type": "FeatureCollection", "features": features}
+
+
+def hazard_probability_shapes_from_grids(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    probabilities: Mapping[str, np.ndarray],
+    category_grid: np.ndarray,
+    forecast_hour: int,
+    valid_time_iso: str,
+    min_cells: int = 8,
+) -> dict[str, Any]:
+    """Build smooth cumulative probability contour polygons for hazard maps."""
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, category_grid.shape)
+    grid = np.asarray(category_grid, dtype=np.int16)
+    try:
+        from scipy import ndimage
+    except Exception:
+        ndimage = None
+
+    features: list[dict[str, Any]] = []
+    hazard_inputs: dict[str, tuple[np.ndarray, tuple[float, ...], np.ndarray]] = {
+        "tornado": (
+            np.asarray(probabilities.get("tornado", np.zeros(grid.shape)), dtype=float),
+            _TORNADO_PROBABILITY_THRESHOLDS,
+            grid >= SPC_RISK_LABELS.index("MRGL"),
+        ),
+        "hail": (
+            np.asarray(probabilities.get("hail", np.zeros(grid.shape)), dtype=float),
+            _SEVERE_PROBABILITY_THRESHOLDS,
+            grid >= SPC_RISK_LABELS.index("MRGL"),
+        ),
+        "wind": (
+            np.asarray(probabilities.get("wind", np.zeros(grid.shape)), dtype=float),
+            _SEVERE_PROBABILITY_THRESHOLDS,
+            grid >= SPC_RISK_LABELS.index("MRGL"),
+        ),
+        "thunder": (
+            _thunder_probability_from_category_grid(grid),
+            _THUNDER_PROBABILITY_THRESHOLDS,
+            grid >= SPC_RISK_LABELS.index("TSTM"),
+        ),
+    }
+    for hazard, (probability_grid, thresholds, support_mask) in hazard_inputs.items():
+        masks = _threshold_masks_with_hierarchy(probability_grid, thresholds, support_mask, ndimage)
+        settings_by_bucket: list[dict[str, int | float | bool]] = []
+        generalized_masks: list[np.ndarray] = []
+        for bucket, mask in enumerate(masks):
+            settings = _probability_generalization_settings(mask, bucket, min_cells)
+            limit_mask = _cartographic_limit_mask(support_mask, ndimage, int(settings["closeIterations"]) + 1)
+            generalized = _generalize_mask(
+                mask,
+                ndimage,
+                min_cells=int(settings["minimumComponentCells"]),
+                close_iterations=int(settings["closeIterations"]),
+                prune_iterations=int(settings["tendrilPruneIterations"]),
+                max_hole_cells=int(settings["maximumHoleCells"]),
+                limit_mask=limit_mask,
+            )
+            generalized_masks.append(generalized)
+            settings_by_bucket.append(settings)
+        _enforce_probability_mask_hierarchy(generalized_masks)
+        colors = _PROBABILITY_COLORS[hazard]
+        for bucket, (threshold, mask) in enumerate(zip(thresholds, generalized_masks, strict=False)):
+            if not np.any(mask):
                 continue
-            rings = _component_polygons(lon_grid, lat_grid, component)
-            for ring_idx, coords in enumerate(rings):
-                if len(coords) < 4:
-                    continue
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "Polygon", "coordinates": [coords]},
-                    "properties": {
-                        "category": SPC_RISK_LABELS[ordinal],
-                        "ordinal": ordinal,
-                        "forecastHour": forecast_hour,
-                        "validTimeISO": valid_time_iso,
-                        "component": component_idx,
-                        "ring": ring_idx,
-                        "cellCount": cell_count,
+            settings = settings_by_bucket[bucket]
+            rings, component_count, cell_count = _mask_polygons(
+                lon_grid,
+                lat_grid,
+                mask,
+                min_cells=1 if ndimage is not None else int(settings["minimumComponentCells"]),
+                ndimage=ndimage,
+                smoothing_iterations=int(settings["smoothingIterations"]),
+                simplify_tolerance=float(settings["simplifyTolerance"]),
+            )
+            if not rings:
+                continue
+            source_cell_count = int(np.sum(probability_grid >= threshold))
+            features.append({
+                "type": "Feature",
+                "geometry": _rings_geometry(rings),
+                "properties": {
+                    "hazard": hazard,
+                    "hazardLabel": "thunderstorm" if hazard == "thunder" else hazard,
+                    "probability": float(threshold),
+                    "threshold": float(threshold),
+                    "thresholdPercent": int(round(threshold * 100)),
+                    "bucket": bucket,
+                    "label": f"{int(round(threshold * 100))}%",
+                    "color": colors[min(bucket, len(colors) - 1)],
+                    "forecastHour": forecast_hour,
+                    "validTimeISO": valid_time_iso,
+                    "cellCount": cell_count,
+                    "sourceCellCount": source_cell_count,
+                    "componentCount": component_count,
+                    "vectorization": {
+                        "method": _PROBABILITY_VECTORIZATION_METHOD,
+                        "cumulativeMask": True,
+                        "cartographicGeneralization": True,
+                        "hierarchyBuffersApplied": bool(cell_count > source_cell_count),
+                        "smoothingIterations": int(settings["smoothingIterations"]),
+                        "simplifyTolerance": float(settings["simplifyTolerance"]),
+                        "closeIterations": int(settings["closeIterations"]),
+                        "tendrilPruneIterations": int(settings["tendrilPruneIterations"]),
+                        "maximumHoleCells": int(settings["maximumHoleCells"]),
+                        "minimumComponentCells": int(settings["minimumComponentCells"]),
                     },
-                })
+                },
+            })
+    features = _display_gap_features(features, order_property="bucket", group_property="hazard")
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -636,6 +817,781 @@ def category_counts(category_grid: np.ndarray) -> dict[str, int]:
         if count:
             counts[label] = count
     return counts
+
+
+def _enforce_category_hierarchy(
+    grid: np.ndarray,
+    support_mask: np.ndarray,
+    ndimage: Any,
+    max_category_grid: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Add conservative intermediate rings so categories do not skip levels."""
+    if ndimage is None:
+        return {
+            "applied": False,
+            "totalAddedCells": 0,
+            "addedCellsByCategory": {},
+            "passes": 0,
+        }
+    max_grid = (
+        np.asarray(max_category_grid, dtype=np.int16)
+        if max_category_grid is not None
+        else np.full(grid.shape, len(SPC_RISK_LABELS) - 1, dtype=np.int16)
+    )
+    eligible = np.asarray(support_mask, dtype=bool) & (max_grid > 0)
+    structure = np.ones((3, 3), dtype=bool)
+    added_by_ordinal = {ordinal: 0 for ordinal in range(1, len(SPC_RISK_LABELS))}
+    passes = 0
+
+    # First create complete nested rings around every higher category:
+    # HIGH gets MDT/ENH/SLGT/MRGL support, MDT gets ENH/SLGT/MRGL, etc.
+    for ordinal in range(len(SPC_RISK_LABELS) - 1, SPC_RISK_LABELS.index("MRGL"), -1):
+        seed = np.asarray(grid >= ordinal, dtype=bool)
+        if not np.any(seed):
+            continue
+        expanded = seed.copy()
+        for target in range(ordinal - 1, SPC_RISK_LABELS.index("MRGL") - 1, -1):
+            expanded = ndimage.binary_dilation(expanded, structure=structure, iterations=1)
+            candidate = expanded & eligible & (grid < target) & (max_grid >= target)
+            if np.any(candidate):
+                added_by_ordinal[target] += int(np.sum(candidate))
+                grid[candidate] = target
+
+    # Add a general thunder ring around severe areas where the environmental
+    # support exists. This keeps MRGL from appearing as a free-floating island.
+    severe_seed = np.asarray(grid >= SPC_RISK_LABELS.index("MRGL"), dtype=bool)
+    if np.any(severe_seed):
+        candidate = (
+            ndimage.binary_dilation(severe_seed, structure=structure, iterations=1)
+            & eligible
+            & (grid < SPC_RISK_LABELS.index("TSTM"))
+            & (max_grid >= SPC_RISK_LABELS.index("TSTM"))
+        )
+        if np.any(candidate):
+            added_by_ordinal[SPC_RISK_LABELS.index("TSTM")] += int(np.sum(candidate))
+            grid[candidate] = SPC_RISK_LABELS.index("TSTM")
+
+    # Repair any remaining direct adjacency skips after regional clipping/caps.
+    for _ in range(4):
+        passes += 1
+        changed = False
+        for ordinal in range(len(SPC_RISK_LABELS) - 1, SPC_RISK_LABELS.index("SLGT") - 1, -1):
+            seed = np.asarray(grid >= ordinal, dtype=bool)
+            if not np.any(seed):
+                continue
+            target = ordinal - 1
+            candidate = (
+                ndimage.binary_dilation(seed, structure=structure, iterations=1)
+                & eligible
+                & (grid > 0)
+                & (grid < target)
+                & (max_grid >= target)
+            )
+            if np.any(candidate):
+                added_by_ordinal[target] += int(np.sum(candidate))
+                grid[candidate] = target
+                changed = True
+        severe_seed = np.asarray(grid >= SPC_RISK_LABELS.index("MRGL"), dtype=bool)
+        candidate = (
+            ndimage.binary_dilation(severe_seed, structure=structure, iterations=1)
+            & eligible
+            & (grid < SPC_RISK_LABELS.index("TSTM"))
+            & (max_grid >= SPC_RISK_LABELS.index("TSTM"))
+        )
+        if np.any(candidate):
+            added_by_ordinal[SPC_RISK_LABELS.index("TSTM")] += int(np.sum(candidate))
+            grid[candidate] = SPC_RISK_LABELS.index("TSTM")
+            changed = True
+        if not changed:
+            break
+
+    added_by_category = {
+        SPC_RISK_LABELS[ordinal]: count
+        for ordinal, count in added_by_ordinal.items()
+        if count
+    }
+    return {
+        "applied": True,
+        "totalAddedCells": int(sum(added_by_ordinal.values())),
+        "addedCellsByCategory": added_by_category,
+        "passes": passes,
+    }
+
+
+def _threshold_masks_with_hierarchy(
+    probability_grid: np.ndarray,
+    thresholds: tuple[float, ...],
+    support_mask: np.ndarray,
+    ndimage: Any,
+) -> list[np.ndarray]:
+    masks = [np.asarray(probability_grid >= threshold, dtype=bool) for threshold in thresholds]
+    if ndimage is None:
+        return masks
+    support = np.asarray(support_mask, dtype=bool)
+    structure = np.ones((3, 3), dtype=bool)
+    for high_idx in range(len(thresholds) - 1, 0, -1):
+        expanded = masks[high_idx].copy()
+        if not np.any(expanded):
+            continue
+        for target_idx in range(high_idx - 1, -1, -1):
+            expanded = ndimage.binary_dilation(expanded, structure=structure, iterations=1) & support
+            masks[target_idx] |= expanded
+    return masks
+
+
+def _thunder_probability_from_category_grid(category_grid: np.ndarray) -> np.ndarray:
+    grid = np.asarray(category_grid, dtype=np.int16)
+    return np.where(
+        grid >= SPC_RISK_LABELS.index("ENH"),
+        0.70,
+        np.where(
+            grid >= SPC_RISK_LABELS.index("MRGL"),
+            0.40,
+            np.where(grid >= SPC_RISK_LABELS.index("TSTM"), 0.10, 0.0),
+        ),
+    )
+
+
+def _category_generalization_settings(
+    mask: np.ndarray,
+    ordinal: int,
+    requested_min_cells: int,
+) -> dict[str, int | float | bool]:
+    active = int(np.sum(mask))
+    base_min = {
+        1: 360,
+        2: 300,
+        3: 220,
+        4: 140,
+        5: 95,
+        6: 75,
+    }.get(int(ordinal), 120)
+    close_iterations = {
+        1: 7,
+        2: 6,
+        3: 5,
+        4: 4,
+        5: 3,
+        6: 2,
+    }.get(int(ordinal), 4)
+    prune_iterations = {
+        1: 2,
+        2: 2,
+        3: 2,
+        4: 1,
+        5: 1,
+        6: 1,
+    }.get(int(ordinal), 1)
+    max_hole = {
+        1: 760,
+        2: 620,
+        3: 460,
+        4: 320,
+        5: 210,
+        6: 160,
+    }.get(int(ordinal), 300)
+    smoothing_iterations = {
+        1: 6,
+        2: 6,
+        3: 5,
+        4: 5,
+        5: 4,
+        6: 4,
+    }.get(int(ordinal), 5)
+    simplify_tolerance = {
+        1: 0.145,
+        2: 0.135,
+        3: 0.120,
+        4: 0.105,
+        5: 0.090,
+        6: 0.080,
+    }.get(int(ordinal), 0.105)
+    dynamic_floor = max(int(requested_min_cells), 8, int(round(active * 0.12)))
+    return {
+        "minimumComponentCells": max(int(requested_min_cells), min(base_min, dynamic_floor)),
+        "closeIterations": _bounded_close_iterations(mask, close_iterations),
+        "tendrilPruneIterations": _bounded_close_iterations(mask, prune_iterations),
+        "maximumHoleCells": min(max_hole, max(12, int(round(active * 0.18)))),
+        "smoothingIterations": smoothing_iterations,
+        "simplifyTolerance": simplify_tolerance,
+    }
+
+
+def _probability_generalization_settings(
+    mask: np.ndarray,
+    bucket: int,
+    requested_min_cells: int,
+) -> dict[str, int | float | bool]:
+    active = int(np.sum(mask))
+    base_min_by_bucket = (340, 280, 210, 155, 115, 85, 70)
+    close_by_bucket = (7, 6, 5, 4, 3, 2, 2)
+    prune_by_bucket = (2, 2, 2, 1, 1, 1, 1)
+    hole_by_bucket = (720, 580, 440, 320, 230, 170, 130)
+    smooth_by_bucket = (6, 6, 5, 5, 4, 4, 4)
+    tolerance_by_bucket = (0.145, 0.135, 0.120, 0.105, 0.090, 0.080, 0.075)
+    idx = min(max(0, int(bucket)), len(base_min_by_bucket) - 1)
+    dynamic_floor = max(int(requested_min_cells), 8, int(round(active * 0.12)))
+    return {
+        "minimumComponentCells": max(int(requested_min_cells), min(base_min_by_bucket[idx], dynamic_floor)),
+        "closeIterations": _bounded_close_iterations(mask, close_by_bucket[idx]),
+        "tendrilPruneIterations": _bounded_close_iterations(mask, prune_by_bucket[idx]),
+        "maximumHoleCells": min(hole_by_bucket[idx], max(12, int(round(active * 0.18)))),
+        "smoothingIterations": smooth_by_bucket[idx],
+        "simplifyTolerance": tolerance_by_bucket[idx],
+    }
+
+
+def _bounded_close_iterations(mask: np.ndarray, desired_iterations: int) -> int:
+    desired = max(0, int(desired_iterations))
+    if desired <= 0:
+        return 0
+    arr = np.asarray(mask, dtype=bool)
+    active = int(np.sum(arr))
+    if active <= 0:
+        return 0
+    rows, cols = np.where(arr)
+    min_span = min(int(rows.max() - rows.min() + 1), int(cols.max() - cols.min() + 1))
+    if min_span <= 3:
+        return 0
+    if min_span <= 6 or active < 50:
+        return min(desired, 1)
+    if min_span <= 12 or active < 160:
+        return min(desired, 2)
+    return desired
+
+
+def _cartographic_limit_mask(mask: np.ndarray, ndimage: Any, iterations: int) -> np.ndarray | None:
+    if ndimage is None:
+        return None
+    base = np.asarray(mask, dtype=bool)
+    if not np.any(base):
+        return base
+    return ndimage.binary_dilation(
+        base,
+        structure=np.ones((3, 3), dtype=bool),
+        iterations=max(1, int(iterations)),
+    )
+
+
+def _generalize_mask(
+    mask: np.ndarray,
+    ndimage: Any,
+    min_cells: int,
+    close_iterations: int,
+    prune_iterations: int,
+    max_hole_cells: int,
+    limit_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    if ndimage is None or not np.any(out):
+        return out
+    structure = np.ones((3, 3), dtype=bool)
+    close_iterations = max(0, int(close_iterations))
+    if close_iterations:
+        out = ndimage.binary_closing(out, structure=structure, iterations=close_iterations)
+    if limit_mask is not None:
+        out &= np.asarray(limit_mask, dtype=bool)
+    out = _fill_small_mask_holes(out, ndimage, max_hole_cells)
+    if limit_mask is not None:
+        out &= np.asarray(limit_mask, dtype=bool)
+    out = _remove_small_mask_components(out, ndimage, min_cells)
+    prune_iterations = max(0, int(prune_iterations))
+    if prune_iterations and np.any(out):
+        out = _prune_thin_mask(out, ndimage, prune_iterations)
+        if limit_mask is not None:
+            out &= np.asarray(limit_mask, dtype=bool)
+        out = _fill_small_mask_holes(out, ndimage, max_hole_cells)
+        out = _remove_small_mask_components(out, ndimage, min_cells)
+    if close_iterations > 1 and np.any(out):
+        out = ndimage.binary_closing(out, structure=structure, iterations=max(1, close_iterations // 2))
+        if limit_mask is not None:
+            out &= np.asarray(limit_mask, dtype=bool)
+        out = _fill_small_mask_holes(out, ndimage, max_hole_cells)
+        out = _remove_small_mask_components(out, ndimage, min_cells)
+    return out
+
+
+def _prune_thin_mask(mask: np.ndarray, ndimage: Any, iterations: int) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool)
+    if iterations <= 0 or not np.any(out):
+        return out
+    structure = np.ones((3, 3), dtype=bool)
+    original_cells = int(np.sum(out))
+    for count in range(int(iterations), 0, -1):
+        opened = ndimage.binary_opening(out, structure=structure, iterations=count)
+        opened_cells = int(np.sum(opened))
+        if opened_cells >= max(1, int(round(original_cells * 0.35))):
+            return opened
+    return out
+
+
+def _fill_small_mask_holes(mask: np.ndarray, ndimage: Any, max_hole_cells: int) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    if not np.any(out) or max_hole_cells <= 0:
+        return out
+    filled = ndimage.binary_fill_holes(out)
+    holes = filled & ~out
+    if not np.any(holes):
+        return out
+    labels, count = ndimage.label(holes, structure=np.ones((3, 3), dtype=int))
+    for component_id in range(1, count + 1):
+        component = labels == component_id
+        if int(np.sum(component)) <= int(max_hole_cells):
+            out[component] = True
+    return out
+
+
+def _remove_small_mask_components(mask: np.ndarray, ndimage: Any, min_cells: int) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool)
+    if not np.any(out):
+        return out
+    labels, count = ndimage.label(out, structure=np.ones((3, 3), dtype=int))
+    keep = np.zeros(out.shape, dtype=bool)
+    largest_component: np.ndarray | None = None
+    largest_count = 0
+    for component_id in range(1, count + 1):
+        component = labels == component_id
+        cell_count = int(np.sum(component))
+        if cell_count > largest_count:
+            largest_component = component
+            largest_count = cell_count
+        if cell_count >= int(min_cells):
+            keep |= component
+    if not np.any(keep) and largest_component is not None:
+        keep |= largest_component
+    return keep
+
+
+def _enforce_cumulative_mask_hierarchy(
+    masks_by_ordinal: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]],
+) -> None:
+    for ordinal in range(len(SPC_RISK_LABELS) - 1, 1, -1):
+        current = masks_by_ordinal.get(ordinal)
+        lower = masks_by_ordinal.get(ordinal - 1)
+        if current is None:
+            continue
+        if lower is None:
+            masks_by_ordinal[ordinal - 1] = (current[0].copy(), current[1])
+        else:
+            np.logical_or(lower[0], current[0], out=lower[0])
+
+
+def _enforce_probability_mask_hierarchy(masks: list[np.ndarray]) -> None:
+    for idx in range(len(masks) - 1, 0, -1):
+        masks[idx - 1] |= masks[idx]
+
+
+def _mask_polygons(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    mask: np.ndarray,
+    min_cells: int,
+    ndimage: Any,
+    smoothing_iterations: int,
+    simplify_tolerance: float = 0.0,
+) -> tuple[list[list[list[float]]], int, int]:
+    mask = np.asarray(mask, dtype=bool)
+    if ndimage is None:
+        components = [(mask, int(mask.sum()))]
+    else:
+        labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=int))
+        components = [(labels == idx, int(np.sum(labels == idx))) for idx in range(1, count + 1)]
+    rings: list[list[list[float]]] = []
+    component_count = 0
+    cell_count = 0
+    for component, component_cells in components:
+        if component_cells < int(min_cells):
+            continue
+        component_rings = _component_polygons(
+            lon_grid,
+            lat_grid,
+            component,
+            smoothing_iterations=smoothing_iterations,
+            simplify_tolerance=simplify_tolerance,
+        )
+        component_rings = [ring for ring in component_rings if len(ring) >= 4]
+        if not component_rings:
+            continue
+        rings.extend(component_rings)
+        component_count += 1
+        cell_count += int(component_cells)
+    rings.sort(key=lambda ring: abs(_signed_ring_area(ring[:-1] if ring[0] == ring[-1] else ring)), reverse=True)
+    return rings, component_count, cell_count
+
+
+def _rings_geometry(rings: list[list[list[float]]]) -> dict[str, Any]:
+    if len(rings) == 1:
+        return {"type": "Polygon", "coordinates": [rings[0]]}
+    return {"type": "MultiPolygon", "coordinates": [[ring] for ring in rings]}
+
+
+def _display_gap_features(
+    features: list[dict[str, Any]],
+    order_property: str,
+    group_property: str | None = None,
+) -> list[dict[str, Any]]:
+    if not features:
+        return features
+    try:
+        from pyproj import Transformer
+        from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, shape
+        from shapely.ops import transform as shapely_transform
+        from shapely.ops import unary_union
+    except Exception:
+        return features
+
+    to_projected = Transformer.from_crs("EPSG:4326", _DISPLAY_BAND_CRS, always_xy=True).transform
+    to_lonlat = Transformer.from_crs(_DISPLAY_BAND_CRS, "EPSG:4326", always_xy=True).transform
+    indexed = list(enumerate(features))
+    groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for idx, feature in indexed:
+        group = str(feature.get("properties", {}).get(group_property, "__all__")) if group_property else "__all__"
+        groups.setdefault(group, []).append((idx, feature))
+
+    output_by_index: dict[int, dict[str, Any]] = {}
+    consumed_indices: set[int] = set()
+    for group_features in groups.values():
+        ordered = sorted(
+            group_features,
+            key=lambda item: int(item[1].get("properties", {}).get(order_property, 0)),
+        )
+        group_indices = {idx for idx, _feature in ordered}
+        projected_by_index: dict[int, Any] = {}
+        settings_by_index: dict[int, dict[str, float]] = {}
+        for idx, feature in ordered:
+            props = feature.get("properties", {})
+            order_value = int(props.get(order_property, 0))
+            settings = (
+                _probability_display_geometry_settings(order_value)
+                if group_property == "hazard"
+                else _risk_display_geometry_settings(order_value)
+            )
+            try:
+                projected = shapely_transform(to_projected, shape(feature.get("geometry")))
+            except Exception:
+                continue
+            projected = _clean_projected_geometry(projected)
+            if projected.is_empty:
+                continue
+            projected = _smooth_display_projected_geometry(
+                projected,
+                smooth_m=settings["smoothMeters"],
+                simplify_m=settings["simplifyMeters"],
+            )
+            projected = _drop_small_projected_parts(projected, settings["minimumAreaKm2"] * 1_000_000.0)
+            if not projected.is_empty:
+                projected_by_index[idx] = projected
+                settings_by_index[idx] = settings
+
+        if not projected_by_index:
+            continue
+        consumed_indices.update(group_indices)
+
+        higher_display_union = None
+        for position in range(len(ordered) - 1, -1, -1):
+            idx, feature = ordered[position]
+            projected = projected_by_index.get(idx)
+            if projected is None or projected.is_empty:
+                continue
+            immediate_higher_display = (
+                output_by_index.get(ordered[position + 1][0], {}).get("_projectedDisplayGeometry")
+                if position + 1 < len(ordered)
+                else None
+            )
+            display_geom = projected
+            knockout = None
+            applied_gap_m = 0.0
+            applied_support_m = 0.0
+            if higher_display_union is not None and not higher_display_union.is_empty:
+                display_geom, knockout, applied_gap_m, applied_support_m = _subtract_next_higher_display_gap(
+                    display_geom,
+                    higher_display_union,
+                    immediate_higher_display,
+                    support_m=settings_by_index[idx]["supportMeters"],
+                )
+            settings = settings_by_index[idx]
+            display_geom = _clean_projected_geometry(display_geom)
+            display_geom = _drop_small_projected_parts(display_geom, settings["minimumAreaKm2"] * 1_000_000.0)
+            display_geom = _smooth_display_projected_geometry(
+                display_geom,
+                smooth_m=max(2_000.0, settings["smoothMeters"] * 0.35),
+                simplify_m=max(1_500.0, settings["simplifyMeters"] * 0.45),
+            )
+            if knockout is not None:
+                reclipped = _clean_projected_geometry(display_geom.difference(knockout))
+                if not reclipped.is_empty:
+                    display_geom = reclipped
+            display_geom = _clean_projected_geometry(display_geom)
+            if display_geom.is_empty:
+                continue
+            display_geom = _drop_small_projected_parts(display_geom, settings["minimumAreaKm2"] * 0.35 * 1_000_000.0)
+            if display_geom.is_empty:
+                continue
+            lonlat_geom = shapely_transform(to_lonlat, display_geom)
+            geometry = _geojson_geometry_from_shapely(lonlat_geom, Polygon, MultiPolygon, GeometryCollection)
+            if geometry is None:
+                continue
+            props = dict(feature.get("properties", {}))
+            props["componentCount"] = _projected_component_count(display_geom)
+            props["displayAreaKm2"] = round(float(display_geom.area) / 1_000_000.0, 1)
+            vectorization = dict(props.get("vectorization") or {})
+            vectorization.update({
+                "displayGeometry": "band_with_metric_gap",
+                "displayBandGapKm": round(applied_gap_m / 1000.0, 1),
+                "targetDisplayBandGapKm": round(_DISPLAY_BAND_GAP_METERS / 1000.0, 1),
+                "displayMinimumSupportKm": round(applied_support_m / 1000.0, 1),
+                "targetDisplayMinimumSupportKm": round(settings["supportMeters"] / 1000.0, 1),
+                "displayProjection": _DISPLAY_BAND_CRS,
+                "displaySmoothKm": round(settings["smoothMeters"] / 1000.0, 2),
+                "displaySimplifyKm": round(settings["simplifyMeters"] / 1000.0, 2),
+                "displayMinimumAreaKm2": round(settings["minimumAreaKm2"], 1),
+            })
+            props["vectorization"] = vectorization
+            output_by_index[idx] = {
+                **feature,
+                "geometry": geometry,
+                "properties": props,
+                "_projectedDisplayGeometry": display_geom,
+            }
+            higher_display_union = (
+                display_geom
+                if higher_display_union is None or higher_display_union.is_empty
+                else _clean_projected_geometry(unary_union([higher_display_union, display_geom]))
+            )
+
+    out: list[dict[str, Any]] = []
+    for idx, feature in indexed:
+        item = output_by_index.get(idx)
+        if item is not None:
+            item = dict(item)
+            item.pop("_projectedDisplayGeometry", None)
+            out.append(item)
+        elif idx not in consumed_indices:
+            out.append(feature)
+    return out
+
+
+def _subtract_next_higher_display_gap(
+    base_geometry: Any,
+    higher_display_union: Any,
+    immediate_higher_display: Any,
+    support_m: float,
+) -> tuple[Any, Any | None, float, float]:
+    from shapely.ops import unary_union
+
+    for factor in (1.0, 0.75, 0.50, 0.25, 0.10):
+        gap_m = _DISPLAY_BAND_GAP_METERS * factor
+        support_width_m = max(0.0, float(support_m)) * factor
+        support_anchor = immediate_higher_display if immediate_higher_display is not None and not immediate_higher_display.is_empty else higher_display_union
+        supported_base = _clean_projected_geometry(
+            unary_union([
+                base_geometry,
+                support_anchor.buffer(gap_m + support_width_m, quad_segs=10, join_style=1),
+            ]),
+        )
+        knockout = higher_display_union.buffer(gap_m, quad_segs=10, join_style=1)
+        candidate = _clean_projected_geometry(supported_base.difference(knockout))
+        if not candidate.is_empty and float(candidate.area) >= max(1.0, float(base_geometry.area) * 0.005):
+            return candidate, knockout, gap_m, support_width_m
+    return base_geometry, None, 0.0, 0.0
+
+
+def _risk_display_geometry_settings(ordinal: int) -> dict[str, float]:
+    return {
+        "smoothMeters": {
+            1: 12_000.0,
+            2: 11_000.0,
+            3: 9_000.0,
+            4: 7_500.0,
+            5: 6_000.0,
+            6: 5_000.0,
+        }.get(int(ordinal), 7_500.0),
+        "simplifyMeters": {
+            1: 9_000.0,
+            2: 8_000.0,
+            3: 7_000.0,
+            4: 5_500.0,
+            5: 4_500.0,
+            6: 4_000.0,
+        }.get(int(ordinal), 5_500.0),
+        "supportMeters": {
+            1: 45_000.0,
+            2: 40_000.0,
+            3: 35_000.0,
+            4: 30_000.0,
+            5: 25_000.0,
+            6: 20_000.0,
+        }.get(int(ordinal), _DISPLAY_BAND_MIN_SUPPORT_METERS),
+        "minimumAreaKm2": {
+            1: 1_500.0,
+            2: 1_100.0,
+            3: 700.0,
+            4: 420.0,
+            5: 260.0,
+            6: 180.0,
+        }.get(int(ordinal), 420.0),
+    }
+
+
+def _probability_display_geometry_settings(bucket: int) -> dict[str, float]:
+    idx = max(0, int(bucket))
+    smooth = (12_000.0, 11_000.0, 9_000.0, 7_500.0, 6_000.0, 5_000.0, 4_500.0)
+    simplify = (9_000.0, 8_000.0, 7_000.0, 5_500.0, 4_500.0, 4_000.0, 3_500.0)
+    support = (45_000.0, 40_000.0, 35_000.0, 30_000.0, 25_000.0, 22_000.0, 20_000.0)
+    area = (1_400.0, 1_000.0, 650.0, 420.0, 280.0, 200.0, 160.0)
+    capped = min(idx, len(smooth) - 1)
+    return {
+        "smoothMeters": smooth[capped],
+        "simplifyMeters": simplify[capped],
+        "supportMeters": support[capped],
+        "minimumAreaKm2": area[capped],
+    }
+
+
+def _smooth_display_projected_geometry(geometry: Any, smooth_m: float, simplify_m: float) -> Any:
+    if geometry.is_empty:
+        return geometry
+    out = _clean_projected_geometry(geometry)
+    if out.is_empty:
+        return out
+    smooth_m = max(0.0, float(smooth_m))
+    simplify_m = max(0.0, float(simplify_m))
+    if smooth_m > 0.0:
+        rounded = out.buffer(smooth_m, quad_segs=10, join_style=1).buffer(-smooth_m, quad_segs=10, join_style=1)
+        if not rounded.is_empty:
+            out = rounded
+        shave_m = smooth_m * 0.45
+        rounded = out.buffer(-shave_m, quad_segs=10, join_style=1).buffer(shave_m, quad_segs=10, join_style=1)
+        if not rounded.is_empty:
+            out = rounded
+    if simplify_m > 0.0 and not out.is_empty:
+        simplified = out.simplify(simplify_m, preserve_topology=True)
+        if not simplified.is_empty:
+            out = simplified
+    if smooth_m > 0.0 and not out.is_empty:
+        round_m = smooth_m * 0.60
+        rounded = out.buffer(-round_m, quad_segs=10, join_style=1).buffer(round_m, quad_segs=10, join_style=1)
+        if not rounded.is_empty:
+            out = rounded
+    return _clean_projected_geometry(out)
+
+
+def _clean_projected_geometry(geometry: Any) -> Any:
+    if geometry.is_empty:
+        return geometry
+    try:
+        from shapely.validation import make_valid
+
+        return make_valid(geometry)
+    except Exception:
+        try:
+            return geometry.buffer(0)
+        except Exception:
+            return geometry
+
+
+def _drop_small_projected_parts(geometry: Any, minimum_area_m2: float) -> Any:
+    if geometry.is_empty:
+        return geometry
+    from shapely.geometry import GeometryCollection, MultiPolygon
+    from shapely.ops import unary_union
+
+    polygons = _projected_polygons(geometry)
+    if not polygons:
+        return GeometryCollection()
+    kept = [poly for poly in polygons if float(poly.area) >= float(minimum_area_m2)]
+    if not kept:
+        kept = [max(polygons, key=lambda poly: float(poly.area))]
+    if len(kept) == 1:
+        return kept[0]
+    return unary_union(MultiPolygon(kept))
+
+
+def _projected_polygons(geometry: Any) -> list[Any]:
+    if geometry.is_empty:
+        return []
+    geom_type = getattr(geometry, "geom_type", "")
+    if geom_type == "Polygon":
+        return [geometry]
+    if geom_type == "MultiPolygon":
+        return list(geometry.geoms)
+    if geom_type == "GeometryCollection":
+        polygons: list[Any] = []
+        for item in geometry.geoms:
+            polygons.extend(_projected_polygons(item))
+        return polygons
+    return []
+
+
+def _projected_component_count(geometry: Any) -> int:
+    return len(_projected_polygons(geometry))
+
+
+def _geojson_geometry_from_shapely(
+    geometry: Any,
+    polygon_type: Any,
+    multipolygon_type: Any,
+    geometry_collection_type: Any,
+) -> dict[str, Any] | None:
+    if geometry.is_empty:
+        return None
+    geom_type = getattr(geometry, "geom_type", "")
+    if geom_type == "Polygon":
+        rings = _geojson_polygon_rings(geometry)
+        return {"type": "Polygon", "coordinates": rings} if rings else None
+    if geom_type == "MultiPolygon":
+        polygons = [_geojson_polygon_rings(poly) for poly in geometry.geoms]
+        polygons = [rings for rings in polygons if rings]
+        if not polygons:
+            return None
+        if len(polygons) == 1:
+            return {"type": "Polygon", "coordinates": polygons[0]}
+        return {"type": "MultiPolygon", "coordinates": polygons}
+    if geom_type == "GeometryCollection":
+        polys = [geom for geom in geometry.geoms if isinstance(geom, (polygon_type, multipolygon_type, geometry_collection_type))]
+        merged = []
+        for geom in polys:
+            mapped = _geojson_geometry_from_shapely(geom, polygon_type, multipolygon_type, geometry_collection_type)
+            if not mapped:
+                continue
+            if mapped["type"] == "Polygon":
+                merged.append(mapped["coordinates"])
+            else:
+                merged.extend(mapped["coordinates"])
+        if not merged:
+            return None
+        if len(merged) == 1:
+            return {"type": "Polygon", "coordinates": merged[0]}
+        return {"type": "MultiPolygon", "coordinates": merged}
+    return None
+
+
+def _geojson_polygon_rings(polygon: Any) -> list[list[list[float]]]:
+    exterior = _normalize_exterior_ring(_round_ring_coords(list(polygon.exterior.coords)))
+    if len(exterior) < 4:
+        return []
+    rings = [exterior]
+    for interior in polygon.interiors:
+        hole = _normalize_interior_ring(_round_ring_coords(list(interior.coords)))
+        if len(hole) >= 4:
+            rings.append(hole)
+    return rings
+
+
+def _round_ring_coords(coords: list[tuple[float, float]]) -> list[list[float]]:
+    return [[round(float(lon), 4), round(float(lat), 4)] for lon, lat in coords]
+
+
+def _normalize_interior_ring(coords: list[list[float]]) -> list[list[float]]:
+    if len(coords) < 4:
+        return coords
+    ring = coords[:-1] if coords[0] == coords[-1] else coords
+    if _signed_ring_area(ring) < 0:
+        ring = list(reversed(ring))
+    out = [list(coord) for coord in ring]
+    if out[0] != out[-1]:
+        out.append(out[0])
+    return out
 
 
 def normalize_feature(name: str, values: np.ndarray) -> np.ndarray:
@@ -994,32 +1950,55 @@ def _lat_lon_grid(lats: np.ndarray, lons: np.ndarray, shape: tuple[int, int]) ->
     return lat_grid, lon_grid
 
 
-def _component_polygons(lon_grid: np.ndarray, lat_grid: np.ndarray, component: np.ndarray) -> list[list[list[float]]]:
-    rings = _component_contour_polygons(lon_grid, lat_grid, component)
+def _component_polygons(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    component: np.ndarray,
+    smoothing_iterations: int = 1,
+    simplify_tolerance: float = 0.0,
+) -> list[list[list[float]]]:
+    rings = _component_contour_polygons(
+        lon_grid,
+        lat_grid,
+        component,
+        smoothing_iterations=smoothing_iterations,
+        simplify_tolerance=simplify_tolerance,
+    )
     if rings:
         return rings
-    return [_component_polygon(lon_grid[component], lat_grid[component])]
+    fallback_rings = _component_cell_union_polygons(lon_grid, lat_grid, component, simplify_tolerance)
+    if fallback_rings:
+        return fallback_rings
+    compact_ring = _compact_component_bbox_polygon(lon_grid[component], lat_grid[component])
+    return [compact_ring] if compact_ring else []
 
 
-def _component_contour_polygons(lon_grid: np.ndarray, lat_grid: np.ndarray, component: np.ndarray) -> list[list[list[float]]]:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return []
-
+def _component_contour_polygons(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    component: np.ndarray,
+    smoothing_iterations: int = 1,
+    simplify_tolerance: float = 0.0,
+) -> list[list[list[float]]]:
     mask = np.pad(np.asarray(component, dtype=float), 1, mode="constant", constant_values=0.0)
     if np.nanmax(mask) < 0.5:
         return []
-    fig, ax = plt.subplots(figsize=(1, 1), dpi=40)
-    try:
-        contours = ax.contour(mask, levels=[0.5])
-        segments = contours.allsegs[0] if contours.allsegs else []
-    except Exception:
-        segments = []
-    finally:
-        plt.close(fig)
+    with _MATPLOTLIB_CONTOUR_LOCK:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception:
+            return []
+
+        fig, ax = plt.subplots(figsize=(1, 1), dpi=40)
+        try:
+            contours = ax.contour(mask, levels=[0.5])
+            segments = contours.allsegs[0] if contours.allsegs else []
+        except Exception:
+            segments = []
+        finally:
+            plt.close(fig)
 
     rings: list[list[list[float]]] = []
     for segment in segments:
@@ -1030,12 +2009,14 @@ def _component_contour_polygons(lon_grid: np.ndarray, lat_grid: np.ndarray, comp
         lons = _interp_grid(lon_grid, rows, cols)
         lats = _interp_grid(lat_grid, rows, cols)
         coords = [[round(float(lon), 4), round(float(lat), 4)] for lon, lat in zip(lons, lats, strict=False)]
-        coords = _smooth_ring(coords, iterations=1)
+        coords = _simplify_ring(coords, tolerance=simplify_tolerance)
+        coords = _smooth_ring(coords, iterations=smoothing_iterations)
+        coords = _simplify_ring(coords, tolerance=simplify_tolerance * 0.90)
         coords = _normalize_exterior_ring(coords)
         if len(coords) >= 4 and _ring_extent_ok(coords):
             rings.append(coords)
     rings.sort(key=lambda ring: abs(_signed_ring_area(ring[:-1] if ring[0] == ring[-1] else ring)), reverse=True)
-    return rings[:4]
+    return rings[:8]
 
 
 def _interp_grid(grid: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
@@ -1060,6 +2041,117 @@ def _component_polygon(lons: np.ndarray, lats: np.ndarray) -> list[list[float]]:
     points = np.column_stack([np.asarray(lons, dtype=float), np.asarray(lats, dtype=float)])
     points = points[np.isfinite(points).all(axis=1)]
     return _bbox_polygon(points)
+
+
+def _compact_component_bbox_polygon(lons: np.ndarray, lats: np.ndarray) -> list[list[float]]:
+    points = np.column_stack([np.asarray(lons, dtype=float), np.asarray(lats, dtype=float)])
+    points = points[np.isfinite(points).all(axis=1)]
+    if points.size == 0:
+        return []
+    lon_span = float(np.nanmax(points[:, 0]) - np.nanmin(points[:, 0]))
+    lat_span = float(np.nanmax(points[:, 1]) - np.nanmin(points[:, 1]))
+    # BBox is only a safe last-resort for compact blobs. For broad/low-risk
+    # components it creates fake rectangular outlook sheets.
+    if lon_span > 5.0 or lat_span > 4.0:
+        return []
+    return _bbox_polygon(points)
+
+
+def _component_cell_union_polygons(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    component: np.ndarray,
+    simplify_tolerance: float = 0.0,
+) -> list[list[list[float]]]:
+    try:
+        from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box
+        from shapely.ops import unary_union
+    except Exception:
+        return []
+
+    rows, cols = np.where(np.asarray(component, dtype=bool))
+    if rows.size == 0:
+        return []
+    lon_step = _median_positive_spacing(np.diff(np.asarray(lon_grid, dtype=float), axis=1), fallback=0.10)
+    lat_step = _median_positive_spacing(np.diff(np.asarray(lat_grid, dtype=float), axis=0), fallback=0.10)
+    lon_pad = max(0.025, lon_step * 0.52)
+    lat_pad = max(0.025, lat_step * 0.52)
+    row_runs: list[Any] = []
+    for row in np.unique(rows):
+        run_cols = np.sort(cols[rows == row])
+        if run_cols.size == 0:
+            continue
+        start = int(run_cols[0])
+        prev = int(run_cols[0])
+        for value in run_cols[1:]:
+            col = int(value)
+            if col == prev + 1:
+                prev = col
+                continue
+            row_runs.append(_row_run_box(lon_grid, lat_grid, int(row), start, prev, lon_pad, lat_pad, box))
+            start = prev = col
+        row_runs.append(_row_run_box(lon_grid, lat_grid, int(row), start, prev, lon_pad, lat_pad, box))
+    row_runs = [geom for geom in row_runs if geom is not None and not geom.is_empty]
+    if not row_runs:
+        return []
+    try:
+        unioned = unary_union(row_runs)
+        if simplify_tolerance > 0.0:
+            simplified = unioned.simplify(max(0.0, float(simplify_tolerance) * 0.35), preserve_topology=True)
+            if not simplified.is_empty:
+                unioned = simplified
+    except Exception:
+        return []
+
+    polygons: list[Any] = []
+    if isinstance(unioned, Polygon):
+        polygons = [unioned]
+    elif isinstance(unioned, MultiPolygon):
+        polygons = list(unioned.geoms)
+    elif isinstance(unioned, GeometryCollection):
+        polygons = [geom for geom in unioned.geoms if isinstance(geom, Polygon)]
+    rings: list[list[list[float]]] = []
+    for polygon in polygons:
+        if polygon.is_empty or polygon.area <= 0:
+            continue
+        coords = [[round(float(x), 4), round(float(y), 4)] for x, y in polygon.exterior.coords]
+        coords = _normalize_exterior_ring(coords)
+        if len(coords) >= 4:
+            rings.append(coords)
+    rings.sort(key=lambda ring: abs(_signed_ring_area(ring[:-1] if ring[0] == ring[-1] else ring)), reverse=True)
+    return rings[:24]
+
+
+def _row_run_box(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    row: int,
+    start_col: int,
+    end_col: int,
+    lon_pad: float,
+    lat_pad: float,
+    box_factory: Any,
+) -> Any:
+    lons = np.asarray(lon_grid[row, start_col:end_col + 1], dtype=float)
+    lats = np.asarray(lat_grid[row, start_col:end_col + 1], dtype=float)
+    valid = np.isfinite(lons) & np.isfinite(lats)
+    if not np.any(valid):
+        return None
+    min_lon = float(np.nanmin(lons[valid]) - lon_pad)
+    max_lon = float(np.nanmax(lons[valid]) + lon_pad)
+    min_lat = float(np.nanmin(lats[valid]) - lat_pad)
+    max_lat = float(np.nanmax(lats[valid]) + lat_pad)
+    if min_lon >= max_lon or min_lat >= max_lat:
+        return None
+    return box_factory(min_lon, min_lat, max_lon, max_lat)
+
+
+def _median_positive_spacing(values: np.ndarray, fallback: float) -> float:
+    arr = np.abs(np.asarray(values, dtype=float))
+    arr = arr[np.isfinite(arr) & (arr > 0)]
+    if arr.size == 0:
+        return float(fallback)
+    return float(np.nanmedian(arr))
 
 
 def _bbox_polygon(points: np.ndarray) -> list[list[float]]:
@@ -1111,12 +2203,67 @@ def _smooth_ring(coords: list[list[float]], iterations: int = 1) -> list[list[fl
     return [[round(float(lon), 4), round(float(lat), 4)] for lon, lat in ring]
 
 
+def _simplify_ring(coords: list[list[float]], tolerance: float = 0.0) -> list[list[float]]:
+    if tolerance <= 0.0 or len(coords) < 8:
+        return coords
+    ring = coords[:-1] if coords[0] == coords[-1] else coords
+    simplified = _rdp_closed_ring(ring, float(tolerance))
+    if len(simplified) < 4:
+        return coords
+    return [[round(float(lon), 4), round(float(lat), 4)] for lon, lat in simplified]
+
+
+def _rdp_closed_ring(points: list[list[float]], tolerance: float) -> list[list[float]]:
+    if len(points) < 4:
+        return points
+    anchor = min(range(len(points)), key=lambda idx: (points[idx][0], points[idx][1]))
+    open_points = points[anchor:] + points[:anchor] + [points[anchor]]
+    simplified = _rdp_line(open_points, tolerance)
+    if simplified and simplified[0] == simplified[-1]:
+        simplified = simplified[:-1]
+    return simplified
+
+
+def _rdp_line(points: list[list[float]], tolerance: float) -> list[list[float]]:
+    if len(points) <= 2:
+        return points
+    first = points[0]
+    last = points[-1]
+    max_distance = -1.0
+    max_index = 0
+    for idx in range(1, len(points) - 1):
+        distance = _point_line_distance(points[idx], first, last)
+        if distance > max_distance:
+            max_distance = distance
+            max_index = idx
+    if max_distance > tolerance:
+        left = _rdp_line(points[: max_index + 1], tolerance)
+        right = _rdp_line(points[max_index:], tolerance)
+        return left[:-1] + right
+    return [first, last]
+
+
+def _point_line_distance(point: list[float], start: list[float], end: list[float]) -> float:
+    x, y = point
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+    denom = dx * dx + dy * dy
+    if denom <= 1e-12:
+        return float(np.hypot(x - x1, y - y1))
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / denom))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return float(np.hypot(x - proj_x, y - proj_y))
+
+
 def _ring_extent_ok(coords: list[list[float]]) -> bool:
     if len(coords) < 4:
         return False
     lons = [coord[0] for coord in coords]
     lats = [coord[1] for coord in coords]
-    return (max(lons) - min(lons)) <= 35.0 and (max(lats) - min(lats)) <= 20.0
+    return (max(lons) - min(lons)) <= 50.0 and (max(lats) - min(lats)) <= 30.0
 
 
 def _signed_ring_area(coords: list[list[float]]) -> float:

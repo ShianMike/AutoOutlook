@@ -41,6 +41,7 @@ from backend.ml.gridded_outlook import (
     category_grid_from_probabilities,
     feature_stats,
     gridded_features_from_fields,
+    hazard_probability_shapes_from_grids,
     merge_feature_collections,
     postprocess_category_grid,
     predict_hazard_grids,
@@ -49,6 +50,17 @@ from backend.ml.gridded_outlook import (
 )
 from backend.ml.inference import model_status
 from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return int(default)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(default)
+
 
 DEFAULT_ARTIFACT_ROOT = Path(os.environ.get(
     "AUTOOUTLOOK_ARTIFACT_ROOT",
@@ -72,6 +84,9 @@ FORECAST_HOURS = PRODUCTION_FORECAST_HOURS
 CYCLE_POLICIES = ("complete-requested", "complete-48", "latest-startable")
 DEFAULT_CYCLE_POLICY = "complete-requested"
 DEFAULT_INCREMENTAL_CYCLE_POLICY = "latest-startable"
+DEFAULT_HOUR_WORKERS = _env_int("AUTOOUTLOOK_HOUR_WORKERS", 4)
+DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
+DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 4)
 
 FetchHourFn = Callable[[HrrrHourRef, requests.Session], tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour]
 PredictorFn = Callable[[GriddedFeatures], dict[str, np.ndarray] | None]
@@ -87,13 +102,27 @@ class FetchedHour:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class IncrementalHourResult:
+    forecast_hour: int
+    hour_metadata: dict[str, Any]
+    category_counts: dict[str, int]
+    fetch_ms: int
+    build_ms: int
+    write_ms: int
+    total_ms: int
+    cache_hit: bool
+    grid_shape: list[int] | None
+    selected_byte_count: int | None
+
+
 def run_pipeline(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
     now: datetime | None = None,
-    max_workers: int = 3,
+    max_workers: int | None = None,
     tile_stride: int | None = None,
-    grid_stride: int = 3,
+    grid_stride: int | None = None,
     min_successful_hours: int = 8,
     cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR,
     cache_ttl_hours: float = DEFAULT_CACHE_TTL_HOURS,
@@ -119,8 +148,9 @@ def run_pipeline(
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=False)
     required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
     effective_min_successful = min(max(1, int(min_successful_hours)), len(hours))
-    tile_stride = max(1, int(tile_stride if tile_stride is not None else grid_stride))
-    grid_stride = max(1, int(grid_stride))
+    range_workers = _resolve_worker_count(max_workers, DEFAULT_RANGE_WORKERS)
+    grid_stride = _resolve_grid_stride(grid_stride)
+    tile_stride = _resolve_tile_stride(tile_stride, grid_stride)
     failure_context: dict[str, Any] = {
         "requestedForecastHours": hours,
         "requiredForecastHourForCycle": required_forecast_hour,
@@ -161,7 +191,7 @@ def run_pipeline(
             hours,
             session,
             fetch_hour_fn,
-            max_workers=max_workers,
+            max_workers=range_workers,
             cache_dir=cache_dir,
             cache_ttl_hours=cache_ttl_hours,
             no_cache=no_cache,
@@ -348,9 +378,11 @@ def run_incremental_pipeline(
     output_dir: Path = DEFAULT_INCREMENTAL_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
     now: datetime | None = None,
-    max_workers: int = 1,
+    max_workers: int | None = None,
+    hour_workers: int | None = None,
+    range_workers: int | None = None,
     tile_stride: int | None = None,
-    grid_stride: int = 3,
+    grid_stride: int | None = None,
     cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR,
     cache_ttl_hours: float = DEFAULT_CACHE_TTL_HOURS,
     no_cache: bool = False,
@@ -374,8 +406,10 @@ def run_incremental_pipeline(
     hours = sorted(requested_force_hours)
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=True)
     required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
-    tile_stride = max(1, int(tile_stride if tile_stride is not None else grid_stride))
-    grid_stride = max(1, int(grid_stride))
+    hour_workers = _resolve_worker_count(hour_workers, DEFAULT_HOUR_WORKERS)
+    range_workers = _resolve_worker_count(range_workers if range_workers is not None else max_workers, DEFAULT_RANGE_WORKERS)
+    grid_stride = _resolve_grid_stride(grid_stride)
+    tile_stride = _resolve_tile_stride(tile_stride, grid_stride)
 
     session = requests.Session()
     session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0 incremental"
@@ -432,8 +466,9 @@ def run_incremental_pipeline(
             })
 
         def write_index(status: str) -> dict[str, Any]:
-            ready = sorted(ready_hours)
+            ready = sorted({int(hour) for hour in ready_hours})
             failed = sorted({int(item["forecastHour"]) for item in failed_hours})
+            failed_items = sorted(failed_hours, key=lambda item: int(item.get("forecastHour", -999)))
             pending = [hour for hour in hours if hour not in ready and hour not in failed]
             payload = {
                 "cycle": cycle.label,
@@ -446,12 +481,14 @@ def run_incremental_pipeline(
                 **_cycle_detection_artifact_fields(cycle_detection_metadata),
                 "readyForecastHours": ready,
                 "failedForecastHours": failed,
-                "failedHours": failed_hours,
+                "failedHours": failed_items,
                 "pendingForecastHours": pending,
                 "latestReadyForecastHour": ready[-1] if ready else None,
                 "status": status,
                 "gridStride": grid_stride,
                 "tileStride": tile_stride,
+                "hourWorkers": hour_workers,
+                "rangeWorkers": range_workers,
                 "featureSchemaHash": feature_schema_hash(),
                 "featureNames": list(FEATURE_NAMES),
                 "selectedHrrrTerms": list(SELECTED_HRRR_TERMS),
@@ -462,7 +499,7 @@ def run_incremental_pipeline(
                 "artifacts": {
                     "index": "index.json",
                     "metadata": "metadata.json",
-                    "hours": "hours/fXX/{risk_polygons.geojson,probability_tile.json,upper_air_overlay.json,metadata.json}",
+                    "hours": "hours/fXX/{risk_polygons.geojson,hazard_probability_shapes.geojson,probability_tile.json,upper_air_overlay.json,metadata.json}",
                 },
                 "latencyMs": int((time.perf_counter() - started) * 1000),
             }
@@ -471,116 +508,129 @@ def run_incremental_pipeline(
             return payload
 
         index = write_index("running")
+        process_hours: list[int] = []
         for forecast_hour in hours:
-            hour_started = time.perf_counter()
-            try:
-                should_force_hour = force and forecast_hour in requested_force_hours
-                if not should_force_hour and forecast_hour in ready_hours and _incremental_hour_ready(output_dir, forecast_hour):
-                    print(f"[incremental skip] F{forecast_hour:02d} already ready", flush=True)
-                    if stop_after_hour is not None and forecast_hour >= stop_after_hour:
-                        index = write_index("partial")
-                        break
-                    continue
-                failed_hours = [
-                    item for item in failed_hours
-                    if int(item.get("forecastHour", -999)) != int(forecast_hour)
-                ]
-                ref = hour_ref(cycle, forecast_hour)
-                fetched = _fetch_one_hour(
-                    ref,
-                    session,
-                    fetch_hour_fn,
-                    max_workers=max_workers,
-                    cache_dir=cache_dir,
-                    cache_ttl_hours=cache_ttl_hours,
-                    no_cache=no_cache,
-                    grid_stride=grid_stride,
-                )
-                built = _build_hour_artifact(cycle, forecast_hour, fetched, predictor, model, tile_stride)
-                hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
-                hour_dir.mkdir(parents=True, exist_ok=True)
-                hour_metadata = {
-                    "forecastHour": forecast_hour,
-                    "validTimeISO": built["validTimeISO"],
-                    "status": "ready",
-                    "generatedAtISO": _now_iso(),
-                    "latencyMs": int((time.perf_counter() - hour_started) * 1000),
-                    "categoryCounts": category_counts(built["categoryGrid"]),
-                    "categoryCountsBeforeCaps": category_counts(built["categoryGridBeforeCaps"]),
-                    "categoryCountsAfterCaps": category_counts(built["categoryGridAfterCaps"]),
-                    "categoryCountsAfterSmoothing": category_counts(built["categoryGrid"]),
-                    "probabilityStats": built["probabilityReport"],
-                    "postProcessing": built["postProcessingReport"],
-                    "fetch": fetched.metadata,
-                    "artifacts": {
-                        "riskPolygons": "risk_polygons.geojson",
-                        "probabilityTile": "probability_tile.json",
-                        "upperAirOverlay": "upper_air_overlay.json",
-                        "metadata": "metadata.json",
-                    },
-                    "upperAirOverlay": built["upperAirOverlay"]["metadata"],
-                }
-                _write_json(hour_dir / "risk_polygons.geojson", built["polygons"])
-                _write_json(hour_dir / "probability_tile.json", built["tile"])
-                _write_json(hour_dir / "upper_air_overlay.json", built["upperAirOverlay"])
-                _write_json(hour_dir / "metadata.json", hour_metadata)
-                if forecast_hour not in ready_hours:
-                    ready_hours.append(forecast_hour)
-                print(
-                    f"[incremental ok] F{forecast_hour:02d} "
-                    f"cat={category_counts(built['categoryGrid'])} "
-                    f"latency={hour_metadata['latencyMs']}ms",
-                    flush=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if resolved_cycle_policy == "latest-startable" and isinstance(exc, FileNotFoundError):
-                    hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
-                    hour_dir.mkdir(parents=True, exist_ok=True)
-                    pending_metadata = {
-                        "forecastHour": forecast_hour,
-                        "status": "pending",
-                        "stage": "incremental",
-                        "reason": "hrrr_hour_not_ready",
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "generatedAtISO": _now_iso(),
-                    }
-                    _write_json(hour_dir / "metadata.json", pending_metadata)
+            if stop_after_hour is not None and forecast_hour > stop_after_hour:
+                continue
+            should_force_hour = force and forecast_hour in requested_force_hours
+            if not should_force_hour and forecast_hour in ready_hours and _incremental_hour_ready(output_dir, forecast_hour):
+                print(f"[incremental skip] F{forecast_hour:02d} already ready", flush=True)
+                continue
+            failed_hours = [
+                item for item in failed_hours
+                if int(item.get("forecastHour", -999)) != int(forecast_hour)
+            ]
+            process_hours.append(forecast_hour)
+
+        pending_from: int | None = None
+        abort_exc: Exception | None = None
+        if process_hours:
+            worker_count = min(hour_workers, len(process_hours))
+            print(
+                f"[incremental workers] hours={worker_count} ranges={range_workers} "
+                f"gridStride={grid_stride} tileStride={tile_stride}",
+                flush=True,
+            )
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_hour = {}
+                for forecast_hour in process_hours:
+                    future = executor.submit(
+                        _process_incremental_hour,
+                        output_dir,
+                        cycle,
+                        forecast_hour,
+                        fetch_hour_fn,
+                        predictor,
+                        model,
+                        range_workers,
+                        cache_dir,
+                        cache_ttl_hours,
+                        no_cache,
+                        grid_stride,
+                        tile_stride,
+                    )
+                    future_to_hour[future] = forecast_hour
+                    if hour_delay_seconds > 0:
+                        time.sleep(hour_delay_seconds)
+
+                for future in as_completed(future_to_hour):
+                    forecast_hour = future_to_hour[future]
+                    if abort_exc is not None:
+                        continue
+                    if pending_from is not None and forecast_hour >= pending_from:
+                        continue
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        if resolved_cycle_policy == "latest-startable" and isinstance(exc, FileNotFoundError):
+                            pending_from = forecast_hour if pending_from is None else min(pending_from, forecast_hour)
+                            print(
+                                f"[incremental pending] F{forecast_hour:02d} HRRR hour not ready; "
+                                "leaving this and later requested hours pending",
+                                flush=True,
+                            )
+                            for pending_future, pending_hour in future_to_hour.items():
+                                if pending_hour >= pending_from and not pending_future.done():
+                                    pending_future.cancel()
+                            index = write_index("partial")
+                            continue
+                        failure = {
+                            "forecastHour": forecast_hour,
+                            "stage": "incremental",
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "generatedAtISO": _now_iso(),
+                        }
+                        failed_hours.append(failure)
+                        _write_failed_incremental_hour(output_dir, forecast_hour, failure)
+                        print(f"[incremental fail] F{forecast_hour:02d} {failure['error']}", flush=True)
+                        index = write_index("running")
+                        if not continue_on_hour_failure:
+                            abort_exc = exc
+                            for pending_future in future_to_hour:
+                                if not pending_future.done():
+                                    pending_future.cancel()
+                        continue
+
+                    ready_hours.append(result.forecast_hour)
                     print(
-                        f"[incremental pending] F{forecast_hour:02d} HRRR hour not ready; "
-                        "leaving this and later requested hours pending",
+                        f"[incremental ok] F{result.forecast_hour:02d} "
+                        f"fetch={result.fetch_ms}ms "
+                        f"build={result.build_ms}ms "
+                        f"write={result.write_ms}ms "
+                        f"total={result.total_ms}ms "
+                        f"cache={str(result.cache_hit).lower()} "
+                        f"shape={result.grid_shape} "
+                        f"bytes={result.selected_byte_count} "
+                        f"cat={result.category_counts}",
                         flush=True,
                     )
-                    index = write_index("partial")
-                    break
-                failure = {
-                    "forecastHour": forecast_hour,
-                    "stage": "incremental",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "generatedAtISO": _now_iso(),
-                }
-                failed_hours.append(failure)
-                hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
-                hour_dir.mkdir(parents=True, exist_ok=True)
-                _write_json(hour_dir / "metadata.json", {**failure, "status": "failed"})
-                print(f"[incremental fail] F{forecast_hour:02d} {failure['error']}", flush=True)
-                if not continue_on_hour_failure:
-                    write_index("failed")
-                    raise
-            status = "running"
-            if stop_after_hour is not None and forecast_hour >= stop_after_hour:
-                status = "partial"
-                index = write_index(status)
-                break
-            index = write_index(status)
-            if hour_delay_seconds > 0:
-                time.sleep(hour_delay_seconds)
+                    index = write_index("running")
+
+        if abort_exc is not None:
+            write_index("failed")
+            raise abort_exc
+        if pending_from is not None:
+            ready_hours[:] = sorted({hour for hour in ready_hours if hour < pending_from})
+            failed_hours[:] = [
+                item
+                for item in failed_hours
+                if int(item.get("forecastHour", -999)) < pending_from
+            ]
+            for hour in hours:
+                if hour >= pending_from:
+                    _clear_incremental_hour_artifact(output_dir, hour)
+            _write_pending_incremental_hour(output_dir, pending_from, FileNotFoundError(hour_ref(cycle, pending_from).idx_url))
+            index = write_index("partial")
         else:
-            index = write_index("complete" if not failed_hours else "partial")
+            status = "partial" if stop_after_hour is not None or failed_hours else "complete"
+            index = write_index(status)
         _publish_complete_incremental_snapshot(output_dir, index, hours)
         return index
     except Exception:
         if output_dir.exists():
             failed = sorted({int(item["forecastHour"]) for item in failed_hours})
+            failed_items = sorted(failed_hours, key=lambda item: int(item.get("forecastHour", -999)))
+            ready = sorted({int(hour) for hour in ready_hours})
             _write_json(output_dir / "index.json", {
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
@@ -590,12 +640,16 @@ def run_incremental_pipeline(
                     "requiredForecastHourForCycle": required_forecast_hour,
                     "requiredForecastHoursChecked": sorted({0, required_forecast_hour}),
                 }),
-                "readyForecastHours": sorted(ready_hours),
+                "readyForecastHours": ready,
                 "failedForecastHours": failed,
-                "failedHours": failed_hours,
-                "pendingForecastHours": [hour for hour in hours if hour not in ready_hours and hour not in failed],
+                "failedHours": failed_items,
+                "pendingForecastHours": [hour for hour in hours if hour not in ready and hour not in failed],
                 "status": "failed",
                 "previousLatestPreserved": DEFAULT_OUTPUT_DIR.exists(),
+                "gridStride": grid_stride if "grid_stride" in locals() else None,
+                "tileStride": tile_stride if "tile_stride" in locals() else None,
+                "hourWorkers": hour_workers if "hour_workers" in locals() else None,
+                "rangeWorkers": range_workers if "range_workers" in locals() else None,
                 "latencyMs": int((time.perf_counter() - started) * 1000),
             })
         raise
@@ -679,6 +733,129 @@ def _fetch_one_hour(
     return _normalize_fetched_hour(ref, result)
 
 
+def _process_incremental_hour(
+    output_dir: Path,
+    cycle: HrrrCycle,
+    forecast_hour: int,
+    fetch_hour_fn: FetchHourFn | None,
+    predictor: PredictorFn,
+    model: Mapping[str, Any],
+    range_workers: int,
+    cache_dir: Path | str | None,
+    cache_ttl_hours: float,
+    no_cache: bool,
+    grid_stride: int,
+    tile_stride: int,
+) -> IncrementalHourResult:
+    hour_started = time.perf_counter()
+    ref = hour_ref(cycle, forecast_hour)
+    session = requests.Session()
+    session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0 incremental-hour"
+    try:
+        fetch_started = time.perf_counter()
+        fetched = _fetch_one_hour(
+            ref,
+            session,
+            fetch_hour_fn,
+            max_workers=range_workers,
+            cache_dir=cache_dir,
+            cache_ttl_hours=cache_ttl_hours,
+            no_cache=no_cache,
+            grid_stride=grid_stride,
+        )
+        fetch_ms = int((time.perf_counter() - fetch_started) * 1000)
+
+        build_started = time.perf_counter()
+        built = _build_hour_artifact(cycle, forecast_hour, fetched, predictor, model, tile_stride)
+        build_ms = int((time.perf_counter() - build_started) * 1000)
+
+        write_started = time.perf_counter()
+        hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
+        hour_dir.mkdir(parents=True, exist_ok=True)
+        counts = category_counts(built["categoryGrid"])
+        timing = {
+            "fetchMs": fetch_ms,
+            "buildMs": build_ms,
+            "writeMs": 0,
+            "totalMs": 0,
+        }
+        hour_metadata = {
+            "forecastHour": forecast_hour,
+            "validTimeISO": built["validTimeISO"],
+            "status": "ready",
+            "generatedAtISO": _now_iso(),
+            "latencyMs": 0,
+            "timing": timing,
+            "categoryCounts": counts,
+            "categoryCountsBeforeCaps": category_counts(built["categoryGridBeforeCaps"]),
+            "categoryCountsAfterCaps": category_counts(built["categoryGridAfterCaps"]),
+            "categoryCountsAfterSmoothing": counts,
+            "probabilityStats": built["probabilityReport"],
+            "postProcessing": built["postProcessingReport"],
+            "fetch": fetched.metadata,
+            "artifacts": {
+                "riskPolygons": "risk_polygons.geojson",
+                "probabilityTile": "probability_tile.json",
+                "hazardProbabilityShapes": "hazard_probability_shapes.geojson",
+                "upperAirOverlay": "upper_air_overlay.json",
+                "metadata": "metadata.json",
+            },
+            "upperAirOverlay": built["upperAirOverlay"]["metadata"],
+        }
+        _write_json(hour_dir / "risk_polygons.geojson", built["polygons"])
+        _write_json(hour_dir / "hazard_probability_shapes.geojson", built["hazardProbabilityShapes"])
+        _write_json(hour_dir / "probability_tile.json", built["tile"])
+        _write_json(hour_dir / "upper_air_overlay.json", built["upperAirOverlay"])
+        write_ms = int((time.perf_counter() - write_started) * 1000)
+        total_ms = int((time.perf_counter() - hour_started) * 1000)
+        timing.update({"writeMs": write_ms, "totalMs": total_ms})
+        hour_metadata["latencyMs"] = total_ms
+        _write_json(hour_dir / "metadata.json", hour_metadata)
+
+        grid_shape = fetched.metadata.get("gridShape")
+        return IncrementalHourResult(
+            forecast_hour=forecast_hour,
+            hour_metadata=hour_metadata,
+            category_counts=counts,
+            fetch_ms=fetch_ms,
+            build_ms=build_ms,
+            write_ms=write_ms,
+            total_ms=total_ms,
+            cache_hit=bool(fetched.metadata.get("cacheHit")),
+            grid_shape=list(grid_shape) if isinstance(grid_shape, list) else None,
+            selected_byte_count=_optional_int(fetched.metadata.get("selectedByteCount")),
+        )
+    finally:
+        session.close()
+
+
+def _write_pending_incremental_hour(output_dir: Path, forecast_hour: int, exc: Exception) -> None:
+    hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    pending_metadata = {
+        "forecastHour": forecast_hour,
+        "status": "pending",
+        "stage": "incremental",
+        "reason": "hrrr_hour_not_ready",
+        "error": f"{type(exc).__name__}: {exc}",
+        "generatedAtISO": _now_iso(),
+    }
+    _write_json(hour_dir / "metadata.json", pending_metadata)
+
+
+def _write_failed_incremental_hour(output_dir: Path, forecast_hour: int, failure: Mapping[str, Any]) -> None:
+    hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(hour_dir / "metadata.json", {**dict(failure), "status": "failed"})
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_fetched_hour(
     ref: HrrrHourRef,
     result: tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour,
@@ -740,6 +917,14 @@ def _build_hour_artifact(
     }
     valid_time_iso = _valid_iso(cycle, forecast_hour)
     polygons = risk_polygons_from_grid(fetched.lats, fetched.lons, post_result.category_grid, forecast_hour, valid_time_iso)
+    hazard_shapes = hazard_probability_shapes_from_grids(
+        fetched.lats,
+        fetched.lons,
+        final_probability_result.probabilities,
+        post_result.category_grid,
+        forecast_hour,
+        valid_time_iso,
+    )
     tile = probability_tile(
         fetched.lats,
         fetched.lons,
@@ -749,6 +934,8 @@ def _build_hour_artifact(
         valid_time_iso,
         stride=tile_stride,
     )
+    tile["riskShapes"] = polygons
+    tile["hazardProbabilityShapes"] = hazard_shapes
     upper_air_overlay = _upper_air_overlay_from_fetched(cycle, forecast_hour, fetched, valid_time_iso)
     return {
         "features": features,
@@ -761,6 +948,7 @@ def _build_hour_artifact(
         "postProcessingReport": post_result.report,
         "validTimeISO": valid_time_iso,
         "polygons": polygons,
+        "hazardProbabilityShapes": hazard_shapes,
         "tile": tile,
         "upperAirOverlay": upper_air_overlay,
     }
@@ -1034,6 +1222,12 @@ def _clear_incremental_hour_artifacts(output_dir: Path) -> None:
     hours_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _clear_incremental_hour_artifact(output_dir: Path, forecast_hour: int) -> None:
+    hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
+    if hour_dir.exists():
+        shutil.rmtree(hour_dir, ignore_errors=True)
+
+
 def _incremental_hour_ready(output_dir: Path, forecast_hour: int) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
     return all(
@@ -1129,6 +1323,28 @@ def resolve_cycle_policy(cycle_policy: str | None = None, incremental: bool = Fa
     if policy not in CYCLE_POLICIES:
         raise ValueError(f"Cycle policy must be one of {', '.join(CYCLE_POLICIES)}: {policy}")
     return policy
+
+
+def _resolve_worker_count(value: int | None, default: int) -> int:
+    if value is None:
+        return max(1, int(default))
+    return max(1, int(value))
+
+
+def _resolve_grid_stride(value: int | None) -> int:
+    return max(1, int(value if value is not None else DEFAULT_GRID_STRIDE))
+
+
+def _resolve_tile_stride(value: int | None, grid_stride: int) -> int:
+    if value is not None:
+        return max(1, int(value))
+    raw = os.environ.get("AUTOOUTLOOK_TILE_STRIDE")
+    if raw is not None and raw.strip() != "":
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return max(1, int(grid_stride))
 
 
 def _detect_hrrr_cycle(
@@ -1296,9 +1512,11 @@ def parse_args() -> argparse.Namespace:
             "incremental mode defaults to latest-startable."
         ),
     )
-    parser.add_argument("--max-workers", type=int, default=3)
-    parser.add_argument("--grid-stride", type=int, default=3, help="Downsample decoded HRRR grids after decode.")
-    parser.add_argument("--tile-stride", type=int, default=None, help="Optional probability-tile stride; defaults to grid stride.")
+    parser.add_argument("--max-workers", type=int, default=None, help="Deprecated alias for --range-workers.")
+    parser.add_argument("--hour-workers", type=int, default=DEFAULT_HOUR_WORKERS, help="Parallel forecast-hour workers for incremental mode.")
+    parser.add_argument("--range-workers", type=int, default=DEFAULT_RANGE_WORKERS, help="Parallel HRRR byte-range downloads inside each hour.")
+    parser.add_argument("--grid-stride", type=int, default=DEFAULT_GRID_STRIDE, help="Downsample decoded HRRR grids after decode.")
+    parser.add_argument("--tile-stride", type=int, default=None, help="Optional probability-tile stride; defaults to AUTOOUTLOOK_TILE_STRIDE or grid stride.")
     parser.add_argument("--min-successful-hours", type=int, default=8)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_SELECTED_CACHE_DIR)
     parser.add_argument("--cache-ttl-hours", type=float, default=DEFAULT_CACHE_TTL_HOURS)
@@ -1344,7 +1562,9 @@ def main() -> None:
             metadata = run_incremental_pipeline(
                 output_dir=output_dir,
                 forecast_hours=forecast_hours,
-                max_workers=max(1, args.max_workers),
+                max_workers=args.max_workers,
+                hour_workers=args.hour_workers,
+                range_workers=args.range_workers,
                 tile_stride=args.tile_stride,
                 grid_stride=args.grid_stride,
                 cache_dir=args.cache_dir,
@@ -1361,7 +1581,7 @@ def main() -> None:
             metadata = run_pipeline(
                 output_dir=output_dir,
                 forecast_hours=forecast_hours,
-                max_workers=args.max_workers,
+                max_workers=args.range_workers if args.max_workers is None else args.max_workers,
                 tile_stride=args.tile_stride,
                 grid_stride=args.grid_stride,
                 min_successful_hours=args.min_successful_hours,
@@ -1378,6 +1598,10 @@ def main() -> None:
             "cycle": metadata["cycle"],
             "generatedAtISO": metadata["generatedAtISO"],
             "latencyMs": metadata["latencyMs"],
+            "hourWorkers": metadata.get("hourWorkers"),
+            "rangeWorkers": metadata.get("rangeWorkers"),
+            "gridStride": metadata.get("gridStride"),
+            "tileStride": metadata.get("tileStride"),
         }, indent=2))
         if not args.loop:
             return

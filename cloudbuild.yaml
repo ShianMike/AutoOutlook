@@ -30,20 +30,20 @@ steps:
       - managed
       - --allow-unauthenticated
       - --memory
-      - 4Gi
+      - 2Gi
       - --cpu
       - "2"
       - --timeout
-      - "300"
+      - "120"
       - --concurrency
-      - "8"
+      - "20"
       - --min-instances
-      - "1"
+      - "0"
       - --max-instances
-      - "3"
+      - "1"
       - --cpu-boost
       - --set-env-vars
-      - AUTOOUTLOOK_CORS_ORIGINS=*,WEB_CONCURRENCY=1,WEB_THREADS=8,GUNICORN_TIMEOUT=300
+      - AUTOOUTLOOK_CORS_ORIGINS=*,AUTOOUTLOOK_FORECAST_SOURCE=artifact,AUTOOUTLOOK_ENABLE_LIVE_BUILD=false,WEB_CONCURRENCY=1,WEB_THREADS=20,GUNICORN_TIMEOUT=120
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID
