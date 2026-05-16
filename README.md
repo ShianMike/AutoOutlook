@@ -134,6 +134,32 @@ gcloud run services update autooutlook `
 
 The `--timeout 120` setting is the maximum time an individual HTTP request can run before Cloud Run returns a timeout. That is enough for the public service because request handlers only serve existing JSON, GeoJSON, PNG, and frontend assets. Long HRRR/XGBoost generation belongs in the separate scheduled Cloud Run Job or a manual generation job that writes finalized artifacts for the public service to read.
 
+Production deployment checklist:
+
+```powershell
+gcloud builds submit --config cloudbuild.yaml --project project-f47ca9d9-31bc-4a21-963
+```
+
+The build creates and pushes an image tagged with the Cloud Build ID. If the final Cloud Build deploy step fails with `iam.serviceaccounts.actAs` on `191625527569-compute@developer.gserviceaccount.com`, the image can still be deployed directly by an authenticated account with Cloud Run deploy access:
+
+```powershell
+gcloud run services update autooutlook `
+  --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
+  --region us-central1 `
+  --project project-f47ca9d9-31bc-4a21-963
+```
+
+When a release changes backend artifact-generation code or shared code used by the scheduled pipeline, update the hourly Cloud Run Job to the same image tag so the artifact generator and public service stay on the same revision:
+
+```powershell
+gcloud run jobs update autooutlook-artifact-refresh `
+  --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
+  --region us-central1 `
+  --project project-f47ca9d9-31bc-4a21-963
+```
+
+Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-30m` with schedule `0 * * * *` in `Etc/UTC`.
+
 ## Project layout
 
 ```
