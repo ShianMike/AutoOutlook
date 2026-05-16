@@ -1,4 +1,6 @@
 import type { HourSnapshot, Ingredients } from '../types/forecast';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
+import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
 interface EnvironmentalIngredientsGridProps {
@@ -64,10 +66,12 @@ const GROUPS: { title: string; metrics: MetricSpec[] }[] = [
 ];
 
 export default function EnvironmentalIngredientsGrid({ snapshot }: EnvironmentalIngredientsGridProps) {
+  const focus = focusLocationFromSnapshot(snapshot);
   return (
     <RetroPanel
       title="Environmental Ingredients"
       eyebrow="05 / HRRR fields + derived proxies"
+      badge={<FocusLocationBadge focus={focus} />}
     >
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {GROUPS.map((g) => (

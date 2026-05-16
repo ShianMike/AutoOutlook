@@ -2,7 +2,9 @@ import type { ForecastBundle } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { buildRiskTimeline } from '../utils/riskTimeline';
+import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
 interface RiskTimelineProps {
@@ -15,10 +17,15 @@ interface RiskTimelineProps {
 export default function RiskTimeline({ bundle, selectedForecastHour, artifacts, artifactStatus }: RiskTimelineProps) {
   const artifactHours = artifactStatus === 'ready' ? artifacts?.timelineSummary?.hours ?? [] : [];
   const segs = bundle ? buildRiskTimeline(bundle, artifactHours) : [];
+  const selectedSnapshot = selectedForecastHour !== undefined
+    ? bundle?.hours.find((snap) => snap.forecastHour === selectedForecastHour)
+    : undefined;
+  const activeFocus = focusLocationFromSnapshot(selectedSnapshot);
   return (
     <RetroPanel
       title="Risk Timeline"
       eyebrow="08 / Period-by-period severe outlook"
+      badge={<FocusLocationBadge focus={activeFocus} />}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {segs.map((seg) => {

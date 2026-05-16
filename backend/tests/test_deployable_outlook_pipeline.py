@@ -1306,6 +1306,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         def fake_predict(features):
             probs = np.zeros(features.shape, dtype=float)
             probs[1:4, 1:4] = 0.20
+            probs[2, 2] = 0.35
             return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
 
         def fake_spc(_session, output_dir):
@@ -1383,6 +1384,20 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)
         lons = np.linspace(-100.0, -96.0, 5)
+        fields = small_fields()
+        fields["cape"][2, 2] = 2450.0
+        fields["cape_ml"][2, 2] = 1980.0
+        fields["cape_mu"][2, 2] = 2880.0
+        fields["cin_ml"][2, 2] = -88.0
+        fields["td2m"][2, 2] = 296.15
+        fields["t2m"][2, 2] = 304.15
+        fields["pwat"][2, 2] = 41.91
+        fields["u10"][2, 2] = 4.0
+        fields["v10"][2, 2] = 2.0
+        fields["u500"][2, 2] = 24.0
+        fields["v500"][2, 2] = 18.0
+        fields["srh01"][2, 2] = 142.0
+        fields["srh03"][2, 2] = 246.0
 
         def fake_detect(_session, _now):
             return cycle
@@ -1390,11 +1405,12 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         def fake_fetch(ref, _session):
             if ref.forecast_hour == 1:
                 raise RuntimeError("missing hour")
-            return lats, lons, small_fields()
+            return lats, lons, fields
 
         def fake_predict(features):
             probs = np.zeros(features.shape, dtype=float)
             probs[1:4, 1:4] = 0.20
+            probs[2, 2] = 0.35
             return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
 
         with tempfile.TemporaryDirectory() as tmp, patch(
@@ -1427,6 +1443,26 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(hour_metadata["artifacts"]["riskPolygons"], "risk_polygons.geojson")
             self.assertEqual(hour_metadata["artifacts"]["probabilityTile"], "probability_tile.json")
             self.assertEqual(hour_metadata["artifacts"]["upperAirOverlay"], "upper_air_overlay.json")
+            self.assertIn("region", hour_metadata)
+            self.assertIn("ingredients", hour_metadata)
+            self.assertIn("ingredientSample", hour_metadata)
+            row = hour_metadata["ingredientSample"]["gridRow"]
+            col = hour_metadata["ingredientSample"]["gridCol"]
+            self.assertEqual((row, col), (2, 2))
+            self.assertEqual(hour_metadata["region"]["focusMethod"], "highest_category_peak_probability")
+            ingredients = hour_metadata["ingredients"]
+            self.assertAlmostEqual(ingredients["mlcape"], float(fields["cape_ml"][row, col]))
+            self.assertAlmostEqual(ingredients["mucape"], float(fields["cape_mu"][row, col]))
+            self.assertAlmostEqual(ingredients["sbcape"], float(fields["cape"][row, col]))
+            self.assertAlmostEqual(ingredients["cin"], float(fields["cin_ml"][row, col]))
+            self.assertAlmostEqual(ingredients["sfcDewpointF"], (float(fields["td2m"][row, col]) - 273.15) * 9 / 5 + 32)
+            self.assertAlmostEqual(ingredients["pwatIn"], float(fields["pwat"][row, col]) / 25.4)
+            self.assertAlmostEqual(ingredients["srh01"], float(fields["srh01"][row, col]))
+            self.assertAlmostEqual(ingredients["srh03"], float(fields["srh03"][row, col]))
+            self.assertAlmostEqual(
+                ingredients["shear06Kt"],
+                float(np.hypot(fields["u500"][row, col] - fields["u10"][row, col], fields["v500"][row, col] - fields["v10"][row, col]) * 1.9438445),
+            )
             self.assertEqual(
                 json.loads((output_dir / "hours" / "f01" / "metadata.json").read_text(encoding="utf-8"))["status"],
                 "failed",
@@ -1926,6 +1962,36 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 "forecastHour": 0,
                 "validTimeISO": "2026-05-05T00:00:00Z",
                 "categoryCounts": {"NONE": 10, "TSTM": 100, "MRGL": 120},
+                "region": {
+                    "label": "Exact coordinate sample",
+                    "centerLat": 31.25,
+                    "centerLon": -88.75,
+                    "bbox": [-90.0, 30.0, -87.5, 32.5],
+                    "states": [],
+                },
+                "ingredients": {
+                    "mlcape": 2222.0,
+                    "mucape": 2666.0,
+                    "sbcape": 2444.0,
+                    "cin": -77.0,
+                    "sfcDewpointF": 70.0,
+                    "pwatIn": 1.62,
+                    "lclM": 980.0,
+                    "moistureDepthM": 2430.0,
+                    "srh01": 134.0,
+                    "srh03": 228.0,
+                    "shear06Kt": 47.0,
+                    "stormRelWindKt": 23.5,
+                    "frontSignal": "moderate",
+                    "initiationConf": 0.72,
+                    "stormMode": "mixed",
+                    "capStrength": "weak",
+                    "stp": 1.4,
+                    "scp": 3.2,
+                    "ehi": 1.8,
+                    "ship": 1.1,
+                    "tornadoComposite": 2.0,
+                },
                 "probabilityStats": {
                     "categoryConsistencyProbabilityMax": {
                         "tornado": 0.02,
@@ -1987,6 +2053,11 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(payload["providerId"], "backend")
             self.assertEqual(payload["hours"][0]["forecastHour"], 0)
             self.assertEqual(payload["hours"][0]["mlHazards"]["hail"], 0.12)
+            self.assertEqual(payload["hours"][0]["region"]["label"], "Exact coordinate sample")
+            self.assertEqual(payload["hours"][0]["region"]["centerLat"], 31.25)
+            self.assertEqual(payload["hours"][0]["region"]["centerLon"], -88.75)
+            self.assertEqual(payload["hours"][0]["ingredients"]["mlcape"], 2222.0)
+            self.assertEqual(payload["hours"][0]["ingredients"]["shear06Kt"], 47.0)
             self.assertEqual(payload["hours"][0]["upperAirOverlay"]["domain"], "CONUS")
             self.assertTrue(payload["hours"][0]["upperAirOverlay"]["hasHeightContours"])
             self.assertTrue(payload["hours"][0]["upperAirOverlay"]["hasWindVectors"])

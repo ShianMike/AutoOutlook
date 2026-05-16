@@ -9,6 +9,7 @@ import type {
 } from '../types/forecast';
 import { RISK_META } from '../types/forecast';
 import type { OutlookTimelineHourSummary } from '../types/outlookArtifacts';
+import { focusLocationFromRegion } from './focusLocation';
 
 export type TimeOfDay = 'morning' | 'afternoon' | 'evening' | 'overnight';
 export type TimelinePeriod =
@@ -33,6 +34,11 @@ export interface TimelineSegment {
   significantSevere: boolean; // any hour in this period has SIG severe
   peakCape: number;
   peakShear: number;
+  representativeHour: number;
+  focusLabel: string;
+  focusCoord: string;
+  focusStates: string;
+  usesCoordinateLabel: boolean;
   note: string;
 }
 
@@ -177,12 +183,18 @@ export function buildRiskTimeline(
         significantSevere: false,
         peakCape: 0,
         peakShear: 0,
+        representativeHour: window.minHour,
+        focusLabel: 'Location pending',
+        focusCoord: 'coords pending',
+        focusStates: '',
+        usesCoordinateLabel: false,
         note: 'No forecast points in this period.',
       };
       return empty;
     }
 
     const peak = representativePeak(snaps, artifacts);
+    const focus = focusLocationFromRegion(peak.region);
     const coverages = snaps.map((snap) => coverageForTimeline(snap, artifacts));
     const dominant = dominantSevereHazard(snaps, artifacts);
     const artifactSnaps = snaps.map((snap) => artifacts.get(snap.forecastHour)).filter(Boolean);
@@ -203,6 +215,11 @@ export function buildRiskTimeline(
       significantSevere,
       peakCape: Math.max(...snaps.map((s) => Math.max(s.ingredients.mlcape, s.ingredients.mucape))),
       peakShear: Math.max(...snaps.map((s) => s.ingredients.shear06Kt)),
+      representativeHour: peak.forecastHour,
+      focusLabel: focus.label,
+      focusCoord: focus.coord,
+      focusStates: focus.states,
+      usesCoordinateLabel: focus.usesCoordinateLabel,
       note: '',
     };
     seg.note = noteFor(seg);

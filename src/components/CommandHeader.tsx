@@ -2,8 +2,8 @@ import type { ForecastBundle, ForecastSource } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
-import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroBadge from './retro/RetroBadge';
 
 interface CommandHeaderProps {
@@ -28,12 +28,6 @@ function truncateLabel(label: string, max = 22): string {
   const dash = label.indexOf(' — ');
   if (dash > 0 && dash <= max) return label.slice(0, dash);
   return label.slice(0, max - 1) + '…';
-}
-
-function fmtCoordShort(lat: number, lon: number): string {
-  const ns = lat >= 0 ? 'N' : 'S';
-  const ew = lon >= 0 ? 'E' : 'W';
-  return `${Math.abs(lat).toFixed(1)}°${ns} ${Math.abs(lon).toFixed(1)}°${ew}`;
 }
 
 function sourceTone(src: ForecastSource | undefined) {
@@ -65,7 +59,7 @@ export default function CommandHeader({
   const displayCategory = outlookSummary?.category;
   const displayHazard = outlookSummary?.hazard;
   const usingGeneratedArtifacts = outlookSummary?.usingGeneratedArtifacts ?? artifactStatus === 'ready';
-  const displayRegion = displayRegionLabel(snapshot?.region.label, 'Highlighted corridor');
+  const focus = focusLocationFromSnapshot(snapshot);
 
   return (
     <header className="bg-ink text-paper border-b-[3px] border-paper/10 relative retro-scanline">
@@ -98,8 +92,8 @@ export default function CommandHeader({
           <Stat label="HAZARD" value={displayHazard ? HAZARD_META[displayHazard].label : '—'} />
           <Stat
             label="FOCUS"
-            value={snapshot ? truncateLabel(displayRegion) : '—'}
-            sub={snapshot ? fmtCoordShort(snapshot.region.centerLat, snapshot.region.centerLon) : undefined}
+            value={snapshot ? truncateLabel(focus.label) : '—'}
+            sub={snapshot && !focus.usesCoordinateLabel ? focus.coord : undefined}
           />
           <Stat label="CONF" value={snapshot ? `${Math.round(snapshot.outlook.confidence * 100)}%` : '—'} />
           <Stat
@@ -176,11 +170,12 @@ function TickerSpan({
     ? headline ?? snapshot.outlook.headline
     : 'GENERATING FORECAST HEADLINE';
   const sigTag = !usingGeneratedArtifacts && snapshot?.outlook.significantSevere ? '► ⚠ SIGNIFICANT SEVERE POSSIBLE' : null;
+  const focus = focusLocationFromSnapshot(snapshot);
   const items = bundle
     ? [
         `► OUTLOOK ${risk?.label ?? 'OUTLOOK PENDING'}`,
         `► PRIMARY ${hazard?.label ?? 'HAZARD PENDING'}`,
-        `► FOCUS ${snapshot ? truncateLabel(displayRegionLabel(snapshot.region.label, 'Highlighted corridor'), 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
+        `► FOCUS ${snapshot ? truncateLabel(focus.label, 30) : 'REGION PENDING'} (AUTO-DETECTED)`,
         ...(sigTag ? [sigTag] : []),
         `► ${displayHeadline}`,
         `► ${bundle.hours.length} FORECAST HOURS LOADED`,

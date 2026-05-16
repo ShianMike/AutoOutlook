@@ -9,6 +9,7 @@ Run with:  python -m backend.server   (from the project root)
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -423,8 +424,8 @@ def _artifact_forecast_bundle():
         hour_dir = _incremental_hour_path(forecast_hour)
         polygons = _read_json_path(hour_dir / "risk_polygons.geojson")
         upper_air = _artifact_upper_air_overlay(hour_dir, forecast_hour, valid_time_iso, index)
-        region = _region_from_feature_collection(polygons, category)
-        ingredients = _artifact_ingredients(category, main_hazard, probability_max, forecast_hour)
+        region = _artifact_region(metadata, polygons, category)
+        ingredients = _artifact_metadata_ingredients(metadata, category, main_hazard, probability_max, forecast_hour)
         hours.append({
             "forecastHour": forecast_hour,
             "validTimeISO": valid_time_iso,
@@ -573,6 +574,58 @@ def _artifact_ingredients(category: str, main_hazard: str, probabilities: dict[s
         "ship": max(0.0, probabilities.get("hail", 0.0) * 8 + severity * 0.12),
         "tornadoComposite": max(0.0, probabilities.get("tornado", 0.0) * 10 + forecast_hour * 0.002),
     }
+
+
+def _artifact_region(metadata: dict, polygons, category: str) -> dict:
+    region = metadata.get("region") if isinstance(metadata, dict) else None
+    if isinstance(region, dict) and _valid_region(region):
+        return {
+            "label": str(region.get("label") or "Highlighted corridor"),
+            "centerLat": float(region.get("centerLat")),
+            "centerLon": float(region.get("centerLon")),
+            "bbox": region.get("bbox") if isinstance(region.get("bbox"), list) and len(region.get("bbox")) == 4 else [
+                float(region.get("centerLon")) - 5,
+                float(region.get("centerLat")) - 3,
+                float(region.get("centerLon")) + 5,
+                float(region.get("centerLat")) + 3,
+            ],
+            "states": region.get("states") if isinstance(region.get("states"), list) else [],
+        }
+    return _region_from_feature_collection(polygons, category)
+
+
+def _artifact_metadata_ingredients(
+    metadata: dict,
+    category: str,
+    main_hazard: str,
+    probabilities: dict[str, float],
+    forecast_hour: int,
+) -> dict:
+    ingredients = metadata.get("ingredients") if isinstance(metadata, dict) else None
+    if isinstance(ingredients, dict) and _valid_artifact_ingredients(ingredients):
+        return ingredients
+    return _artifact_ingredients(category, main_hazard, probabilities, forecast_hour)
+
+
+def _valid_region(region: dict) -> bool:
+    try:
+        center_lat = float(region.get("centerLat"))
+        center_lon = float(region.get("centerLon"))
+    except (TypeError, ValueError):
+        return False
+    return -90.0 <= center_lat <= 90.0 and -180.0 <= center_lon <= 180.0
+
+
+def _valid_artifact_ingredients(ingredients: dict) -> bool:
+    required = ("mlcape", "mucape", "sbcape", "cin", "sfcDewpointF", "pwatIn", "srh01", "srh03", "shear06Kt")
+    for key in required:
+        try:
+            value = float(ingredients.get(key))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value):
+            return False
+    return True
 
 
 def _region_from_feature_collection(payload, category: str) -> dict:

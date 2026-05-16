@@ -10,6 +10,7 @@ import {
   getArtifactHazardPeakLocation,
   getArtifactHourTile,
   getArtifactThunderCoverage,
+  measureArtifactBandRadius,
   type ArtifactHazardKey,
   type GeneratedArtifactHazardKey,
 } from '../utils/artifactProbabilities';
@@ -81,12 +82,29 @@ export default function GeneratedHazardProbabilityMap({
     if (!peakLocation || peakLocation.probability < cfg.sigThreshold) {
       return { type: 'FeatureCollection' as const, features: [] };
     }
+    // Measure the ACTUAL 5% (brown band) radius from the artifact's
+    // probability grid — the largest in-band circle around the peak cell.
+    // This is the authoritative containment bound the SIG must fit inside,
+    // and it's typically tighter than the formula-based estimate the SIG
+    // builder would compute on its own (because the real probability
+    // region can be smaller / asymmetric vs the idealized ellipse).
+    const measuredBandRadius = (hazard !== 'thunder')
+      ? measureArtifactBandRadius(tile, hazard as ArtifactHazardKey, peakLocation.lat, peakLocation.lon, 0.05)
+      : undefined;
+    // Feed the active hour's ingredients + region into the SIG generator so
+    // the blob morphs with the actual environmental profile (CAPE / shear /
+    // capStrength / stormMode / frontSignal / STP / SCP) instead of relying
+    // solely on a synthetic motion clock. Same morphHarmonics +
+    // ingredientAspect + ingredientTilt logic the rule-based bands use.
     const blob = buildArtifactSigBlob(
       hazard,
       peakLocation.lat,
       peakLocation.lon,
       displayForecastHour ?? 0,
       peakLocation.probability,
+      snapshot?.ingredients,
+      snapshot?.region,
+      measuredBandRadius,
     );
     if (!blob || blob.coords.length < 4) {
       return { type: 'FeatureCollection' as const, features: [] };
@@ -100,7 +118,7 @@ export default function GeneratedHazardProbabilityMap({
         geometry: { type: 'Polygon' as const, coordinates: [ring] },
       }],
     };
-  }, [artifacts, displayForecastHour, hazard, cfg.sigThreshold]);
+  }, [artifacts, tile, displayForecastHour, hazard, cfg.sigThreshold, snapshot?.ingredients, snapshot?.region]);
   const peakProb = hazard === 'thunder'
     ? getArtifactThunderCoverage(tile) ?? 0
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;

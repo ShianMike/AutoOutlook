@@ -9,9 +9,9 @@ import {
   getArtifactHourTile,
   type ArtifactHazardKey,
 } from '../utils/artifactProbabilities';
-import { displayRegionLabel } from '../utils/regionDisplay';
+import { focusLocationFromSnapshot, formatFocusCoord } from '../utils/focusLocation';
+import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
-import RetroBadge from './retro/RetroBadge';
 
 interface HazardProbabilityBoardProps {
   snapshot: HourSnapshot | null;
@@ -22,8 +22,13 @@ interface HazardProbabilityBoardProps {
 const HAZARD_ORDER: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
 
 export default function HazardProbabilityBoard({ snapshot, artifacts, artifactStatus }: HazardProbabilityBoardProps) {
+  const focus = focusLocationFromSnapshot(snapshot);
   return (
-    <RetroPanel title="Hazard Probability Board" eyebrow="04 / Per-hazard automated estimate">
+    <RetroPanel
+      title="Hazard Probability Board"
+      eyebrow="04 / Per-hazard automated estimate"
+      badge={<FocusLocationBadge focus={focus} />}
+    >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {HAZARD_ORDER.map((key) => (
           <HazardCard
@@ -135,13 +140,13 @@ function HazardCard({
 
 function describePeakLocation(snapshot: HourSnapshot | null, lat: number, lon: number): string {
   const city = nearestCity(snapshot, lat, lon);
-  const coord = formatCoord(lat, lon);
-  return city ? `${city} · ${coord}` : `Peak grid · ${coord}`;
+  const coord = formatFocusCoord(lat, lon);
+  return city && city !== coord ? `${city} · ${coord}` : coord;
 }
 
 function describeFallbackLocation(snapshot: HourSnapshot | null): string {
-  if (!snapshot) return 'Location unavailable';
-  return `${displayRegionLabel(snapshot.region.label, 'Highlighted corridor')} · ${formatCoord(snapshot.region.centerLat, snapshot.region.centerLon)}`;
+  const focus = focusLocationFromSnapshot(snapshot);
+  return focus.usesCoordinateLabel ? focus.label : `${focus.label} · ${focus.coord}`;
 }
 
 function nearestCity(snapshot: HourSnapshot | null, lat: number, lon: number): string | null {
@@ -161,12 +166,6 @@ function distance(latA: number, lonA: number, latB: number, lonB: number): numbe
   const dx = (lonA - lonB) * Math.cos(latMid) * kmPerLat;
   const dy = (latA - latB) * kmPerLat;
   return Math.hypot(dx, dy);
-}
-
-function formatCoord(lat: number, lon: number): string {
-  const ns = lat >= 0 ? 'N' : 'S';
-  const ew = lon >= 0 ? 'E' : 'W';
-  return `${Math.abs(lat).toFixed(1)}°${ns} ${Math.abs(lon).toFixed(1)}°${ew}`;
 }
 
 function ProgressBar({

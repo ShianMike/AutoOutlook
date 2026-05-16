@@ -124,6 +124,52 @@ export function getArtifactHazardPeakLocation(
   return best;
 }
 
+/**
+ * Measure the radius of the largest circle around the peak cell that's
+ * entirely INSIDE the given probability threshold's region in the
+ * artifact probability grid.
+ *
+ * Used by the artifact-driven SIG path to clamp the SIG polygon so it
+ * never extends beyond the 5% (brown band) boundary of the actual model
+ * output. The formula-based clamp in `hazardProbabilityBands.ts` assumes
+ * an idealized elliptical band geometry, but the artifact's real
+ * probability region can be much smaller or asymmetric — this function
+ * gives the actual measured extent.
+ *
+ * Returns the minimum distance (in lat/lon degrees) from the peak cell
+ * to any cell where probability < threshold. Returns Infinity if the
+ * grid is unavailable or no sub-threshold cell is found (effectively no
+ * containment needed). Returns 0 if the peak cell itself is below threshold.
+ *
+ * Note: this is intentionally CONSERVATIVE — it uses the WORST direction
+ * (closest sub-threshold cell in any compass direction), so the SIG is
+ * guaranteed to fit inside the band even if the band is asymmetric.
+ */
+export function measureArtifactBandRadius(
+  tile: OutlookProbabilityTile | undefined,
+  hazard: ArtifactHazardKey,
+  peakLat: number,
+  peakLon: number,
+  threshold: number,
+): number {
+  if (!tile) return Infinity;
+  const grid = tile.probabilities[hazard];
+  if (!grid) return Infinity;
+  let minDistToOutside = Infinity;
+  for (let r = 0; r < grid.length; r += 1) {
+    for (let c = 0; c < grid[r].length; c += 1) {
+      const prob = Number(grid[r][c]);
+      if (!Number.isFinite(prob) || prob >= threshold) continue;
+      const lat = Number(tile.lats[r]?.[c]);
+      const lon = Number(tile.lons[r]?.[c]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const d = Math.hypot(lat - peakLat, lon - peakLon);
+      if (d < minDistToOutside) minDistToOutside = d;
+    }
+  }
+  return minDistToOutside;
+}
+
 export function getArtifactHazardLevel(hazard: ArtifactHazardKey, probability: number): RiskCategory {
   const thresholds = hazardThresholds(hazard);
   if (probability >= thresholds[4]) return 'HIGH';

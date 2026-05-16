@@ -2,7 +2,7 @@ import type { HourSnapshot, RiskCategory } from '../types/forecast';
 import { RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { ArtifactRiskCategory, OutlookArtifacts, OutlookTimelineHourSummary } from '../types/outlookArtifacts';
-import { displayRegionLabel } from '../utils/regionDisplay';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import RetroPanel from './retro/RetroPanel';
 
 interface WatchReadinessPanelProps {
@@ -113,7 +113,7 @@ export default function WatchReadinessPanel({ snapshot, artifacts, artifactStatu
     ? 'No generated significant severe signal for this hour.'
     : 'No hazard meets the 10% significant severe threshold.';
   const sourceNote = usingGeneratedArtifacts ? 'Generated HRRR/XGBoost hour summary' : 'Raw forecast snapshot';
-  const regionLabel = displayRegionLabel(snapshot?.region.label, 'Highlighted corridor');
+  const regionLabel = focusLocationFromSnapshot(snapshot).label;
 
   const rows: { label: string; level: Level; note: string }[] = [
     {

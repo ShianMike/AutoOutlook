@@ -37,8 +37,8 @@ export default function RetroPanel({
         .join(' ')}
     >
       {(title || eyebrow || badge) && (
-        <header className="flex items-end justify-between gap-3 border-b-[3px] border-ink bg-ink px-4 py-2 text-paper">
-          <div className="flex flex-col">
+        <header className="flex flex-wrap items-end justify-between gap-3 border-b-[3px] border-ink bg-ink px-4 py-2 text-paper">
+          <div className="min-w-0 flex flex-col">
             {eyebrow && (
               <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-paper/60">
                 {eyebrow}
@@ -50,7 +50,7 @@ export default function RetroPanel({
               </h2>
             )}
           </div>
-          {badge && <div className="shrink-0">{badge}</div>}
+          {badge && <div className="max-w-full shrink-0">{badge}</div>}
         </header>
       )}
       <div className="flex-1 p-4">{children}</div>

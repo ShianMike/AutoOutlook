@@ -2,8 +2,8 @@ import type { HourSnapshot } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
-import { displayRegionLabel } from '../utils/regionDisplay';
 import RetroBadge from './retro/RetroBadge';
 
 interface PrimaryOutlookBannerProps {
@@ -29,7 +29,7 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
   const confPct = Math.round(outlook.confidence * 100);
   const isDarkChip = meta.tw.includes('text-paper');
   const headline = outlookSummary.headline;
-  const regionLabel = displayRegionLabel(snapshot.region.label, 'Highlighted corridor');
+  const regionLabel = focusLocationFromSnapshot(snapshot).label;
 
   return (
     <section

@@ -8,7 +8,7 @@ import {
   getArtifactMaxCategory,
   getArtifactRiskPolygonMaxCategory,
 } from './artifactProbabilities';
-import { displayRegionLabel } from './regionDisplay';
+import { focusLocationFromSnapshot } from './focusLocation';
 
 type ArtifactStatusLike = 'loading' | 'ready' | 'missing' | 'error' | 'pending' | 'failed' | string | undefined;
 
@@ -68,7 +68,7 @@ function buildArtifactHeadline(
   timelineHour: OutlookTimelineHourSummary | undefined,
 ): string {
   const timeLabel = formatForecastTime(snapshot.forecastHour, snapshot.validTimeISO);
-  const region = displayRegionLabel(snapshot.region.label);
+  const region = focusLocationFromSnapshot(snapshot).label;
   const hazards = rankedHazards(artifacts, snapshot.forecastHour, timelineHour);
 
   if (!artifactCategory || artifactCategory === 'NONE') {

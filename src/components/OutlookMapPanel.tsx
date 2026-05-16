@@ -10,7 +10,7 @@ import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './Generat
 import ForecastDisclaimer from './ForecastDisclaimer';
 import type { OutlookArtifactState } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
-import { displayRegionLabel } from '../utils/regionDisplay';
+import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { recordCanvasesToGif } from '../utils/gifRecorder';
 
 interface OutlookMapPanelProps {
@@ -660,7 +660,7 @@ export default function OutlookMapPanel({
           <span className="shrink-0">Forecast valid: {validTime}</span>
           <span className="shrink-0">Generated: {fmtUTC(artifactMetadata?.generatedAtISO)}</span>
           <span className="min-w-[220px] flex-1 text-center leading-snug text-paper/80">
-            {snapshot ? displayRegionLabel(snapshot.region.label, 'Highlighted corridor') : 'AWAITING REGION DETECTION…'}
+            {snapshot ? focusLocationFromSnapshot(snapshot).label : 'AWAITING REGION DETECTION…'}
           </span>
           <span className="text-paper/80">{cape}</span>
           <span className="text-paper/80">{shear}</span>

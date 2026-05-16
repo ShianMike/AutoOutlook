@@ -84,21 +84,21 @@ export default function DashboardSidebar() {
   return (
     <aside className="bg-paper text-ink border-b-[4px] border-ink lg:sticky lg:top-0 lg:h-screen lg:w-[300px] lg:shrink-0 lg:border-b-0 lg:border-r-[5px] retro-scanline">
       <div className="flex h-full flex-col">
-        <div className="border-b-[3px] border-ink p-5">
-          <div className="mb-4 inline-flex border-[3px] border-ink bg-paper px-2 py-1 font-mono text-[10px] font-bold tracking-[0.35em] text-ink shadow-retro-sm">
+        <div className="border-b-[3px] border-ink p-5 lg:p-3 xl:p-5 lg:max-[900px]:p-3">
+          <div className="mb-4 inline-flex border-[3px] border-ink bg-paper px-2 py-1 font-mono text-[10px] font-bold tracking-[0.35em] text-ink shadow-retro-sm lg:max-[900px]:mb-2 lg:max-[900px]:px-1.5 lg:max-[900px]:py-0.5 lg:max-[900px]:text-[8px]">
             AO/01
           </div>
-          <h1 className="font-display text-4xl font-extrabold uppercase leading-[0.88] tracking-tight">
+          <h1 className="font-display text-4xl font-extrabold uppercase leading-[0.88] tracking-tight lg:max-[900px]:text-3xl lg:max-[760px]:text-2xl">
             Auto<br />
             <span className="text-signal-amber">Outlook</span>
           </h1>
-          <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.24em] text-ink/60">
+          <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.24em] text-ink/60 lg:max-[900px]:mt-2 lg:max-[900px]:text-[8px] lg:max-[760px]:hidden">
             Dashboard Navigation
           </p>
         </div>
 
-        <nav className="flex-1 overflow-y-auto p-3" aria-label="Dashboard sections">
-          <div className="flex flex-col gap-2">
+        <nav className="flex-1 overflow-hidden p-3 lg:max-[900px]:p-2 lg:max-[760px]:p-1.5" aria-label="Dashboard sections">
+          <div className="flex h-full flex-col justify-center gap-2 lg:max-[900px]:gap-1.5 lg:max-[760px]:gap-1">
             {NAV_ITEMS.map((item) => {
               const isActive = activeId === item.id;
               return (
@@ -110,9 +110,9 @@ export default function DashboardSidebar() {
                     hashLockUntilRef.current = Date.now() + 900;
                     setActiveId(item.id);
                   }}
-                  className={`group relative flex items-center gap-3 border-[3px] border-ink px-3 py-3 font-display text-sm font-extrabold uppercase tracking-wider transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-retro ${isActive ? 'bg-signal-amber translate-x-[3px] translate-y-[3px] shadow-[1px_1px_0_0_#111111]' : 'bg-paper shadow-retro-sm'}`}
+                  className={`group relative flex min-h-0 items-center gap-3 border-[3px] border-ink px-3 py-3 font-display text-sm font-extrabold uppercase tracking-wider transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-retro lg:max-[900px]:gap-2 lg:max-[900px]:px-2 lg:max-[900px]:py-2 lg:max-[900px]:text-[12px] lg:max-[760px]:border-[2px] lg:max-[760px]:px-2 lg:max-[760px]:py-1 lg:max-[760px]:text-[10px] ${isActive ? 'bg-signal-amber translate-x-[3px] translate-y-[3px] shadow-[1px_1px_0_0_#111111]' : 'bg-paper shadow-retro-sm'}`}
                 >
-                <span className={`grid h-8 w-8 shrink-0 place-items-center border-[2px] border-ink bg-paper font-mono text-[10px] text-ink group-hover:bg-paper ${isActive ? 'shadow-none translate-x-[1px] translate-y-[1px]' : 'shadow-retro-sm'}`}>
+                <span className={`grid h-8 w-8 shrink-0 place-items-center border-[2px] border-ink bg-paper font-mono text-[10px] text-ink group-hover:bg-paper lg:max-[900px]:h-7 lg:max-[900px]:w-7 lg:max-[900px]:text-[9px] lg:max-[760px]:h-5 lg:max-[760px]:w-5 lg:max-[760px]:text-[8px] ${isActive ? 'shadow-none translate-x-[1px] translate-y-[1px]' : 'shadow-retro-sm'}`}>
                   {item.code}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
@@ -126,9 +126,9 @@ export default function DashboardSidebar() {
           </div>
         </nav>
 
-        <div className="border-t-[3px] border-ink p-3">
+        <div className="border-t-[3px] border-ink p-3 lg:max-[900px]:p-2 lg:max-[760px]:p-1.5">
           <div
-            className="mb-3 border-[3px] border-ink bg-paper p-2.5 shadow-retro-sm"
+            className="mb-3 border-[3px] border-ink bg-paper p-2.5 shadow-retro-sm lg:max-[900px]:mb-2 lg:max-[900px]:p-2 lg:max-[760px]:hidden"
             aria-label="Experimental forecast disclaimer"
           >
             <div className="mb-2 flex items-center justify-between border-b-[2px] border-ink pb-1.5">
@@ -143,10 +143,10 @@ export default function DashboardSidebar() {
           </div>
           <a
             href="#docs-overview"
-            className="group flex items-center gap-3 border-[3px] border-ink bg-signal-cyan px-3 py-2.5 font-display text-sm font-extrabold uppercase tracking-wider text-ink shadow-retro-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-retro"
+            className="group flex items-center gap-3 border-[3px] border-ink bg-signal-cyan px-3 py-2.5 font-display text-sm font-extrabold uppercase tracking-wider text-ink shadow-retro-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-retro lg:max-[900px]:gap-2 lg:max-[900px]:px-2 lg:max-[900px]:py-2 lg:max-[900px]:text-[12px] lg:max-[760px]:border-[2px] lg:max-[760px]:py-1 lg:max-[760px]:text-[10px]"
             aria-label="Open documentation"
           >
-            <span className="grid h-7 w-7 shrink-0 place-items-center border-[2px] border-ink bg-paper font-mono text-[10px] text-ink shadow-[1px_1px_0_0_#111111]">
+            <span className="grid h-7 w-7 shrink-0 place-items-center border-[2px] border-ink bg-paper font-mono text-[10px] text-ink shadow-[1px_1px_0_0_#111111] lg:max-[900px]:h-6 lg:max-[900px]:w-6 lg:max-[900px]:text-[9px] lg:max-[760px]:h-5 lg:max-[760px]:w-5 lg:max-[760px]:text-[8px]">
               DOC
             </span>
             <span className="min-w-0 flex-1 truncate">Documentation</span>

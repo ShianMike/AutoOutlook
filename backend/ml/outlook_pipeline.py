@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping
 import numpy as np
 import requests
 
+from backend import metpy_diagnostics as diag
 from backend.hrrr_selected import (
     DEFAULT_CACHE_TTL_HOURS,
     DEFAULT_SELECTED_CACHE_DIR,
@@ -29,7 +31,7 @@ from backend.hrrr_selected import (
     hour_ref,
     latest_available_hrrr_cycle_with_metadata,
 )
-from backend.bundle_builder import _hgt500_lines_from_field, _wind500_vectors_from_fields
+from backend.bundle_builder import _hgt500_lines_from_field, _ingredients_at_point, _wind500_vectors_from_fields
 from backend.ml.features import FEATURE_NAMES, feature_schema_hash
 from backend.ml.gridded_outlook import (
     SPC_RISK_LABELS,
@@ -792,6 +794,9 @@ def _process_incremental_hour(
             "categoryCountsAfterSmoothing": counts,
             "probabilityStats": built["probabilityReport"],
             "postProcessing": built["postProcessingReport"],
+            "region": built["region"],
+            "ingredients": built["ingredients"],
+            "ingredientSample": built["ingredientSample"],
             "fetch": fetched.metadata,
             "artifacts": {
                 "riskPolygons": "risk_polygons.geojson",
@@ -937,6 +942,14 @@ def _build_hour_artifact(
     tile["riskShapes"] = polygons
     tile["hazardProbabilityShapes"] = hazard_shapes
     upper_air_overlay = _upper_air_overlay_from_fetched(cycle, forecast_hour, fetched, valid_time_iso)
+    region = _region_from_max_risk_grid(
+        fetched.lats,
+        fetched.lons,
+        post_result.category_grid,
+        cap_result.probabilities,
+        polygons,
+    )
+    ingredients, ingredient_sample = _point_sampled_ingredients(features, fetched.lats, fetched.lons, region)
     return {
         "features": features,
         "rawProbabilities": raw_probabilities,
@@ -948,10 +961,308 @@ def _build_hour_artifact(
         "postProcessingReport": post_result.report,
         "validTimeISO": valid_time_iso,
         "polygons": polygons,
+        "region": region,
+        "ingredients": ingredients,
+        "ingredientSample": ingredient_sample,
         "hazardProbabilityShapes": hazard_shapes,
         "tile": tile,
         "upperAirOverlay": upper_air_overlay,
     }
+
+
+def _forecast_category_from_grid(grid: np.ndarray) -> str:
+    counts = category_counts(grid)
+    minimum_cells = {
+        "NONE": 0,
+        "TSTM": 1,
+        "MRGL": 100,
+        "SLGT": 500,
+        "ENH": 1200,
+        "MDT": 2500,
+        "HIGH": 4500,
+    }
+    best = "NONE"
+    for label in SPC_RISK_LABELS:
+        if int(counts.get(label, 0) or 0) >= minimum_cells.get(label, 0):
+            best = label
+    return "TSTM" if best == "NONE" else best
+
+
+def _frontend_category(category: str) -> str:
+    return "MOD" if category == "MDT" else "TSTM" if category == "NONE" else category
+
+
+def _region_from_max_risk_grid(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    category_grid: np.ndarray,
+    probabilities: Mapping[str, np.ndarray],
+    fallback_polygons: Mapping[str, Any],
+) -> dict[str, Any]:
+    category_arr = np.asarray(category_grid, dtype=np.int16)
+    lat_grid, lon_grid = _lat_lon_grids(lats, lons)
+    if category_arr.ndim != 2 or lat_grid.shape != category_arr.shape or lon_grid.shape != category_arr.shape:
+        return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+
+    probability_peak = _probability_peak_grid(probabilities, category_arr.shape)
+    if probability_peak is None:
+        probability_peak = np.zeros(category_arr.shape, dtype=float)
+
+    peak_category = int(np.nanmax(category_arr)) if category_arr.size else 0
+    if peak_category > 0:
+        target_mask = category_arr == peak_category
+        method = "highest_category_peak_probability"
+    else:
+        finite_prob = probability_peak[np.isfinite(probability_peak)]
+        if finite_prob.size == 0 or float(np.nanmax(finite_prob)) <= 0:
+            return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+        peak_value = float(np.nanmax(finite_prob))
+        target_mask = probability_peak >= max(peak_value * 0.75, peak_value - 0.01)
+        method = "highest_probability"
+
+    seed = _max_probability_index(probability_peak, target_mask)
+    if seed is None:
+        return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+
+    component = _connected_component(target_mask, seed)
+    component_lats = lat_grid[component]
+    component_lons = lon_grid[component]
+    if component_lats.size == 0 or component_lons.size == 0:
+        return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+
+    center_lat = float(lat_grid[seed])
+    center_lon = float(lon_grid[seed])
+    bbox = _bbox_for_grid_component(component_lats, component_lons, lat_grid, lon_grid)
+    return {
+        "label": "Highlighted corridor",
+        "centerLat": center_lat,
+        "centerLon": center_lon,
+        "bbox": bbox,
+        "states": [],
+        "focusCategory": SPC_RISK_LABELS[peak_category] if 0 <= peak_category < len(SPC_RISK_LABELS) else "NONE",
+        "focusMethod": method,
+        "focusProbability": float(probability_peak[seed]) if np.isfinite(probability_peak[seed]) else 0.0,
+    }
+
+
+def _probability_peak_grid(probabilities: Mapping[str, np.ndarray], shape: tuple[int, int]) -> np.ndarray | None:
+    grids = []
+    for hazard in ("tornado", "hail", "wind"):
+        value = probabilities.get(hazard)
+        if value is None:
+            continue
+        arr = np.asarray(value, dtype=float)
+        if arr.shape == shape:
+            grids.append(np.where(np.isfinite(arr), arr, 0.0))
+    if not grids:
+        return None
+    return np.maximum.reduce(grids)
+
+
+def _max_probability_index(probability_peak: np.ndarray, mask: np.ndarray) -> tuple[int, int] | None:
+    valid = np.asarray(mask, dtype=bool) & np.isfinite(probability_peak)
+    if not np.any(valid):
+        return None
+    scores = np.where(valid, probability_peak, -np.inf)
+    return tuple(int(x) for x in np.unravel_index(int(np.nanargmax(scores)), scores.shape))
+
+
+def _connected_component(mask: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
+    target = np.asarray(mask, dtype=bool)
+    component = np.zeros(target.shape, dtype=bool)
+    if not target[seed]:
+        return component
+    queue: deque[tuple[int, int]] = deque([seed])
+    component[seed] = True
+    rows, cols = target.shape
+    while queue:
+        row, col = queue.popleft()
+        for d_row in (-1, 0, 1):
+            for d_col in (-1, 0, 1):
+                if d_row == 0 and d_col == 0:
+                    continue
+                next_row = row + d_row
+                next_col = col + d_col
+                if next_row < 0 or next_col < 0 or next_row >= rows or next_col >= cols:
+                    continue
+                if target[next_row, next_col] and not component[next_row, next_col]:
+                    component[next_row, next_col] = True
+                    queue.append((next_row, next_col))
+    return component
+
+
+def _bbox_for_grid_component(
+    component_lats: np.ndarray,
+    component_lons: np.ndarray,
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+) -> list[float]:
+    lon_step = _median_grid_step(lon_grid, axis=1, default=0.5)
+    lat_step = _median_grid_step(lat_grid, axis=0, default=0.35)
+    min_lon, max_lon = max(-130.0, float(np.nanmin(component_lons))), min(-60.0, float(np.nanmax(component_lons)))
+    min_lat, max_lat = max(20.0, float(np.nanmin(component_lats))), min(55.0, float(np.nanmax(component_lats)))
+    pad_lon = max(0.6, lon_step * 2.0, (max_lon - min_lon) * 0.2)
+    pad_lat = max(0.4, lat_step * 2.0, (max_lat - min_lat) * 0.2)
+    return [
+        max(-130.0, min_lon - pad_lon),
+        max(20.0, min_lat - pad_lat),
+        min(-60.0, max_lon + pad_lon),
+        min(55.0, max_lat + pad_lat),
+    ]
+
+
+def _median_grid_step(grid: np.ndarray, axis: int, default: float) -> float:
+    if grid.ndim != 2 or grid.shape[axis] < 2:
+        return default
+    diffs = np.diff(grid, axis=axis)
+    finite = np.abs(diffs[np.isfinite(diffs)])
+    if finite.size == 0:
+        return default
+    step = float(np.nanmedian(finite))
+    return step if step > 0 else default
+
+
+def _region_from_risk_polygons(payload: Mapping[str, Any], category: str) -> dict[str, Any]:
+    points: list[tuple[float, float]] = []
+    if isinstance(payload, Mapping):
+        features = payload.get("features")
+        if isinstance(features, list):
+            target = _frontend_category(category)
+            category_features = [
+                feature for feature in features
+                if isinstance(feature, Mapping)
+                and _frontend_category(str((feature.get("properties") or {}).get("category", ""))) == target
+            ]
+            selected = category_features or [feature for feature in features if isinstance(feature, Mapping)]
+            for feature in selected:
+                geometry = feature.get("geometry") or {}
+                if isinstance(geometry, Mapping):
+                    points.extend(_geojson_positions(geometry.get("coordinates")))
+    if not points:
+        return {
+            "label": "Highlighted corridor",
+            "centerLat": 37.0,
+            "centerLon": -97.0,
+            "bbox": [-105.0, 30.0, -89.0, 43.0],
+            "states": [],
+        }
+
+    lons = [point[0] for point in points]
+    lats = [point[1] for point in points]
+    min_lon, max_lon = max(-130.0, min(lons)), min(-60.0, max(lons))
+    min_lat, max_lat = max(20.0, min(lats)), min(55.0, max(lats))
+    pad_lon = max(1.5, (max_lon - min_lon) * 0.15)
+    pad_lat = max(1.0, (max_lat - min_lat) * 0.15)
+    bbox = [
+        max(-130.0, min_lon - pad_lon),
+        max(20.0, min_lat - pad_lat),
+        min(-60.0, max_lon + pad_lon),
+        min(55.0, max_lat + pad_lat),
+    ]
+    return {
+        "label": "Highlighted corridor",
+        "centerLat": (bbox[1] + bbox[3]) / 2,
+        "centerLon": (bbox[0] + bbox[2]) / 2,
+        "bbox": bbox,
+        "states": [],
+    }
+
+
+def _geojson_positions(value: Any) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    if not isinstance(value, list):
+        return points
+    if len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
+        lon, lat = float(value[0]), float(value[1])
+        if -180 <= lon <= 180 and -90 <= lat <= 90:
+            return [(lon, lat)]
+        return points
+    for item in value:
+        points.extend(_geojson_positions(item))
+    return points
+
+
+def _point_sampled_ingredients(
+    features: GriddedFeatures,
+    lats: np.ndarray,
+    lons: np.ndarray,
+    region: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    center_lat = float(region.get("centerLat", 37.0) or 37.0)
+    center_lon = float(region.get("centerLon", -97.0) or -97.0)
+    i_lat, i_lon = _nearest_grid_index(lats, lons, center_lat, center_lon)
+    raw = features.raw
+    sbcape = _array_point(raw.get("sbcape"), i_lat, i_lon)
+    mlcape = _array_point(raw.get("mlcape"), i_lat, i_lon, sbcape * 0.85)
+    mucape = _array_point(raw.get("mucape"), i_lat, i_lon, max(sbcape, mlcape))
+    cin = _array_point(raw.get("cin"), i_lat, i_lon)
+    td_f = _array_point(raw.get("sfcDewpointF"), i_lat, i_lon, 50.0)
+    td2m = (td_f - 32.0) * 5.0 / 9.0 + 273.15
+    lcl_m = _array_point(raw.get("lclM"), i_lat, i_lon, 1500.0)
+    t2m = td2m + max(lcl_m, 0.0) / 125.0
+    pwat = _array_point(raw.get("pwatIn"), i_lat, i_lon, 0.8) * 25.4
+    shear_kt = _array_point(raw.get("shear06Kt"), i_lat, i_lon)
+    srh01 = _array_point(raw.get("srh01"), i_lat, i_lon)
+    srh03 = _array_point(raw.get("srh03"), i_lat, i_lon, srh01 * 1.4)
+    sr_wind = _array_point(raw.get("stormRelWindKt"), i_lat, i_lon, shear_kt * 0.5)
+    composites = diag.composites(
+        cape=np.array([sbcape]),
+        mlcape=np.array([mlcape]),
+        mucape=np.array([mucape]),
+        shear_kt=np.array([shear_kt]),
+        srh01=np.array([srh01]),
+        srh03=np.array([srh03]),
+        cin=np.array([cin]),
+        td2m_K=np.array([td2m]),
+    )
+    ingredients = _ingredients_at_point(
+        sbcape,
+        mlcape,
+        mucape,
+        cin,
+        td2m,
+        t2m,
+        pwat,
+        shear_kt,
+        srh01,
+        srh03,
+        sr_wind,
+        {key: float(value[0]) for key, value in composites.items()},
+    )
+    lat_grid, lon_grid = _lat_lon_grids(lats, lons)
+    sample = {
+        "method": "nearest_grid_point",
+        "requestedLat": center_lat,
+        "requestedLon": center_lon,
+        "gridLat": _array_point(lat_grid, i_lat, i_lon, center_lat),
+        "gridLon": _array_point(lon_grid, i_lat, i_lon, center_lon),
+        "gridRow": int(i_lat),
+        "gridCol": int(i_lon),
+    }
+    return ingredients, sample
+
+
+def _nearest_grid_index(lats: np.ndarray, lons: np.ndarray, lat: float, lon: float) -> tuple[int, int]:
+    lat_arr, lon_arr = _lat_lon_grids(lats, lons)
+    distance = (lat_arr - lat) ** 2 + ((lon_arr - lon) * np.cos(np.radians(lat))) ** 2
+    return tuple(int(x) for x in np.unravel_index(int(np.nanargmin(distance)), distance.shape))
+
+
+def _lat_lon_grids(lats: np.ndarray, lons: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    lat_arr = np.asarray(lats, dtype=float)
+    lon_arr = np.asarray(lons, dtype=float)
+    if lat_arr.ndim == 1 and lon_arr.ndim == 1:
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
+        return lat_grid, lon_grid
+    return lat_arr, lon_arr
+
+
+def _array_point(arr: Any, i_lat: int, i_lon: int, default: float = 0.0) -> float:
+    value_arr = np.asarray(arr, dtype=float)
+    if value_arr.ndim != 2 or i_lat < 0 or i_lon < 0 or i_lat >= value_arr.shape[0] or i_lon >= value_arr.shape[1]:
+        return default
+    value = float(value_arr[i_lat, i_lon])
+    return value if np.isfinite(value) else default
 
 
 def _upper_air_overlay_from_fetched(

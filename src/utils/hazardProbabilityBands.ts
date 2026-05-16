@@ -317,6 +317,34 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+// ── Shared ingredient-driven morphing helpers ──────────────────────────
+// These are the same expressions previously inlined in buildHazardBands /
+// morphHarmonics. Extracted so the artifact-driven SIG path can apply
+// identical environmental sensitivity instead of relying solely on a
+// synthetic motion clock.
+
+function ingredientAspect(baseAspect: number, ing: Ingredients | undefined): number {
+  if (!ing) return baseAspect;
+  return baseAspect * Math.min(
+    1.35,
+    0.92
+    + Math.min(ing.shear06Kt / 120, 0.24)
+    + (ing.stormMode === 'linear' ? 0.12 : ing.stormMode === 'discrete' ? -0.08 : 0),
+  );
+}
+
+function ingredientTilt(
+  baseTilt: number,
+  ing: Ingredients | undefined,
+  forecastHour: number,
+  motion: { phase: number; rate: number; wobble: number },
+): number {
+  if (!ing) return baseTilt;
+  return baseTilt
+    + (ing.stormMode === 'linear' ? 4 : ing.stormMode === 'discrete' ? -3 : 0)
+    + Math.sin(forecastHour * 0.018 * motion.rate + motion.phase) * 0.35;
+}
+
 function stableWaveSeed(region: Region, hazard: OutlookHazardKey): number {
   const basis = `${hazard}:${region.label}:${region.centerLat.toFixed(2)}:${region.centerLon.toFixed(2)}`;
   let hash = 2166136261;
@@ -677,16 +705,8 @@ export function buildHazardBands(
   const dynamicHarmonics = ingredients
     ? morphHarmonics(cfg.harmonics, hazard, ingredients, forecastHour, motion)
     : cfg.harmonics;
-  const dynamicAspect = ingredients
-    ? cfg.aspect * Math.min(1.35,
-      0.92 +
-      Math.min(ingredients.shear06Kt / 120, 0.24) +
-      (ingredients.stormMode === 'linear' ? 0.12 : ingredients.stormMode === 'discrete' ? -0.08 : 0)
-    )
-    : cfg.aspect;
-  const dynamicTilt = ingredients
-    ? cfg.tilt + (ingredients.stormMode === 'linear' ? 4 : ingredients.stormMode === 'discrete' ? -3 : 0) + Math.sin(forecastHour * 0.018 * motion.rate + motion.phase) * 0.35
-    : cfg.tilt;
+  const dynamicAspect = ingredientAspect(cfg.aspect, ingredients);
+  const dynamicTilt = ingredientTilt(cfg.tilt, ingredients, forecastHour, motion);
 
   // Build bands as STACKED FILLED DISKS in order from largest radius (lowest
   // threshold) to smallest (highest threshold). When rendered in array order,
@@ -780,18 +800,49 @@ export function buildHazardBands(
   // it has its own location and doesn't sit perfectly on top of the ENH+
   // band centroid - mirroring how SPC outlooks draw the SIG hatch as a
   // distinct shape inside the higher-probability area, not centered on it.
+  //
+  // Morph is driven by `sigIngredientMorph` — the SAME research-grounded
+  // coefficient set used by the artifact-driven SIG path
+  // (`buildArtifactSigBlob`), so both code paths reflect the same
+  // meteorological response to the underlying ingredients (STP/SCP-driven
+  // displacement, mode-flip tilt and aspect, CAPE/cap-driven size,
+  // front-driven offset reach).
   if (sigActive && cfg.sigThreshold !== undefined) {
     const primaryLobe = lobes[0];
-    const sigR = cfg.baseLatRadius * primaryLobe.radiusScale *
-      Math.pow(1 - cfg.sigThreshold / Math.max(peakProb, cfg.sigThreshold), 0.75) * 0.35;
+    const morph = sigIngredientMorph(hazard, ingredients);
+    // Pre-clamp SIG radius (peak-prob intensity × lobe scale × ingredient
+    // size factor) and offset magnitude. These are the values that would
+    // be used WITHOUT the MRGL containment.
+    const preClampSigR = cfg.baseLatRadius * primaryLobe.radiusScale *
+      Math.pow(1 - cfg.sigThreshold / Math.max(peakProb, cfg.sigThreshold), 0.75) * 0.35 *
+      morph.sizeFactor;
+    const sigOffset = SIG_LOBE_OFFSETS[hazard];
+    const preClampOffsetMag = Math.hypot(sigOffset.along, sigOffset.cross) * morph.offsetReachMul;
+    // Containment scale — keeps SIG inside the MRGL boundary. The SIG
+    // can extend through any inner bands (MRGL → SLGT → ENH → ...) but
+    // never beyond the MRGL outline (SPC convention).
+    const containScale = clampSigToMRGL(hazard, peakProb, preClampSigR, preClampOffsetMag, primaryLobe.radiusScale);
+    const sigR = preClampSigR * containScale;
     if (sigR > 0.08) {
-      const sigOffset = SIG_LOBE_OFFSETS[hazard];
-      const sigTilt = dynamicTilt + primaryLobe.tiltOffset;
+      // Tilt: bypass `dynamicTilt` (which has the helper's modest mode
+      // kick) and use cfg.tilt + lobe.tiltOffset as the SIG baseline,
+      // then add the SIG-specific mode-flip kick and shear / composite-
+      // index lean. This keeps the SIG tilt in sync with the artifact
+      // SIG path and avoids double-counting the helper's small mode
+      // contribution.
+      const sigTilt = cfg.tilt + primaryLobe.tiltOffset
+        + morph.modeTiltKick + morph.shearTilt - morph.hazardIndexTilt;
+      // Offset: scaled by the SIG-specific reach multiplier × containment
+      // scale so strong front + high STP/SCP environments push the SIG
+      // farther from the peak lobe (within MRGL bounds), weak forcing
+      // keeps it close.
+      const liveAlong = sigOffset.along * morph.offsetReachMul * containScale;
+      const liveCross = sigOffset.cross * morph.offsetReachMul * containScale;
       const offsetCenter = offsetPoint(
         primaryLobe.centerLat,
         primaryLobe.centerLon,
-        sigOffset.along,
-        sigOffset.cross,
+        liveAlong,
+        liveCross,
         sigTilt,
       );
       const [centerLon, centerLat] = clipOrganizedSevereCenter(offsetCenter.lon, offsetCenter.lat);
@@ -800,15 +851,27 @@ export function buildHazardBands(
         amp: h.amp * (1 + primaryLobe.absorbStrength * (0.08 + idx * 0.03)),
         phase: h.phase + primaryLobe.harmonicPhase + forecastHour * 0.004 * motion.rate * (idx + 1) + motion.phase * 0.19,
       }));
+      // Asymmetric bulge in the SIG offset direction — leans the rule-
+      // based SIG toward the meteorologically favored side, mirroring
+      // the artifact SIG path. Empty bulge array is the previous
+      // behavior (no asymmetry).
+      const bulgeAxisLength = Math.hypot(liveAlong, liveCross);
+      const bulges: ShapeBulge[] = bulgeAxisLength > 0.05
+        ? [{
+            angle: Math.atan2(liveCross, liveAlong) + Math.PI,
+            amp: morph.bulgeAmp,
+            width: morph.bulgeWidth,
+          }]
+        : [];
       const { coords } = coastalSafeBlobPoints(
         centerLat,
         centerLon,
         sigR,
-        sigR * dynamicAspect * primaryLobe.aspectScale,
+        sigR * dynamicAspect * primaryLobe.aspectScale * morph.aspectKick,
         sigTilt,
         n,
         harmonics,
-        [],
+        bulges,
         organizedShrinkByLobe.get(0) ?? 1,
       );
       bands.push({
@@ -821,6 +884,188 @@ export function buildHazardBands(
     }
   }
   return bands;
+}
+
+/**
+ * Research-grounded ingredient morph coefficients for the SIG (significant
+ * severe) polygon. Both the artifact-driven SIG path
+ * (`buildArtifactSigBlob`) and the rule-based SIG core inside
+ * `buildHazardBands` consume the SAME set of coefficients so the two
+ * code paths produce identical meteorological response to the underlying
+ * ingredients.
+ *
+ * Citations (all inline-justified at the assignment site below):
+ *   • STP/SCP thresholds: Thompson, Edwards, Mead (2003, 2004)
+ *   • Bunkers right-mover deviation: Bunkers et al. (2000)
+ *   • QLCS shear orientation: Weisman & Rotunno (1988)
+ *   • Cap suppression form: SPC STP (200 + MLCIN)/150 term
+ *   • CAPE thresholds: SPC mesoanalysis operational ranges
+ */
+interface SigMorphCoeffs {
+  // Raw normalized ingredients (kept on the coeffs object for any
+  // path-specific tweaks that need access to them).
+  shear: number;
+  instability: number;
+  cap: number;
+  frontPush: number;
+  hazardIndex: number;
+  isLinear: boolean;
+  isDiscrete: boolean;
+  isMixed: boolean;
+  // Derived geometric coefficients applied uniformly across SIG paths.
+  aspectKick: number;       // multiplier for SIG aspect on top of helper output
+  modeTiltKick: number;     // degrees added to cfg.tilt for storm mode
+  shearTilt: number;        // degrees added for shear-driven lean
+  hazardIndexTilt: number;  // degrees subtracted for composite-index lean
+  sizeFactor: number;       // multiplier for SIG radius
+  offsetReachMul: number;   // multiplier for SIG offset displacement
+  bulgeAmp: number;         // SIG-asymmetry bulge amplitude
+  bulgeWidth: number;       // SIG-asymmetry bulge angular width
+}
+
+/**
+ * Universal 5% (brown band) containment boundary for the SIG polygon.
+ * The SIG can extend through any inner band (5% brown → 15% yellow →
+ * 30% red → 45% magenta → 60% purple) but never beyond the brown
+ * 5% boundary. For tornado, this is intentionally TIGHTER than
+ * `cfg.thresholds[0]` (which is the 2% green MRGL band) because SIG
+ * tornado hatches in SPC outlooks never extend into the 2% green halo
+ * — they live inside the 5% SLGT brown band and higher.
+ *
+ * Mapping per hazard:
+ *   • hail   thresholds [0.05, 0.15, 0.30, 0.45, 0.60] — 5% = thresholds[0] (brown)
+ *   • wind   thresholds [0.05, 0.15, 0.30, 0.45, 0.60] — 5% = thresholds[0] (brown)
+ *   • tornado thresholds [0.02, 0.05, 0.10, 0.15, ...] — 5% = thresholds[1] (brown)
+ *
+ * Hardcoding the 0.05 boundary universally ensures the SIG never spills
+ * out of the brown band regardless of how many bands precede it.
+ */
+const SIG_CONTAINMENT_THRESHOLD = 0.05;
+
+/**
+ * Clamp the SIG's effective radius and offset so its total geographic
+ * extent (offset distance + radius) stays INSIDE the 5% (brown band)
+ * boundary across all severe hazards (hail, wind, tornado).
+ *
+ * SPC convention: the SIG hatched area is always rendered INSIDE the
+ * categorical risk area. Per user spec, the universal SIG boundary is
+ * the 5% / brown band — the SIG can extend through any inner bands
+ * (15%, 30%, etc.) but never beyond the brown outline.
+ *
+ * Without this clamp, extreme ingredient scenarios (very strong front +
+ * high STP/SCP + extreme CAPE + weak cap) could otherwise inflate the
+ * SIG beyond the brown boundary because:
+ *   • Band radii are peak-probability-driven (smaller bands at lower peak)
+ *   • SIG radius/offset are ingredient-driven (uncorrelated with peak)
+ *
+ * The 0.88 safety margin keeps the SIG comfortably inside the band edge
+ * rather than touching it, mirroring how SPC SIG hatches sit visibly
+ * inside the brown outline.
+ *
+ * Returns the scale factor (≤ 1) to multiply BOTH the SIG radius and the
+ * offset by. The scale is 1 when no clamp is needed, < 1 when the SIG
+ * would otherwise extend beyond the brown boundary.
+ */
+function clampSigToMRGL(
+  hazard: OutlookHazardKey,
+  peakProb: number,
+  preClampSigR: number,
+  preClampOffsetMag: number,
+  lobeRadiusScale = 1,
+): number {
+  const cfg = HAZARD_CONFIGS[hazard];
+  if (peakProb <= SIG_CONTAINMENT_THRESHOLD) return 0;
+  // R_outer is the geographic radius of the 5% (brown) band given the
+  // current peak probability — i.e. how far the brown outline extends
+  // from the band anchor. The SIG must fit entirely inside this radius.
+  const R_outer = cfg.baseLatRadius * lobeRadiusScale *
+    Math.pow(Math.max(1 - SIG_CONTAINMENT_THRESHOLD / peakProb, 0.01), 0.82) * 0.88;
+  const totalExtent = preClampSigR + preClampOffsetMag;
+  if (totalExtent <= R_outer || totalExtent <= 1e-6) return 1;
+  return R_outer / totalExtent;
+}
+
+function sigIngredientMorph(
+  hazard: OutlookHazardKey,
+  ingredients: Ingredients | undefined,
+): SigMorphCoeffs {
+  // Shear (0–6 km) — 35 kt rough lower bound for organized supercell
+  // environments (Thompson et al. 2003); 50 kt is "strong / outbreak-
+  // level" deep-layer shear. Saturate at 50 kt, clamp at 75 kt.
+  const shear = clamp((ingredients?.shear06Kt ?? 35) / 50, 0.20, 1.50);
+
+  // Instability (MUCAPE / MLCAPE) — 2500 J/kg = SPC "strong severe"
+  // threshold; >3000 = "extreme". Beyond 2500 mostly drives intensity
+  // (handled separately by intensityScale), not SIG geometry.
+  const instability = clamp(
+    Math.max(ingredients?.mucape ?? 1200, ingredients?.mlcape ?? 1200) / 2500,
+    0.15,
+    1.60,
+  );
+
+  // Cap suppression — mirrors SPC's STP (200+MLCIN)/150 inhibition term.
+  // Strong cap takes 0.45 size hit so the SIG visibly contracts.
+  const cap =
+    ingredients?.capStrength === 'strong' ? 0.45 :
+    ingredients?.capStrength === 'moderate' ? 0.22 :
+    ingredients?.capStrength === 'weak' ? 0.08 : 0.02;
+
+  // Frontal forcing — sharp fronts elongate SIG along the boundary and
+  // push it ~3x farther from the peak than a weak front.
+  const frontPush =
+    ingredients?.frontSignal === 'strong' ? 1.20 :
+    ingredients?.frontSignal === 'moderate' ? 0.78 :
+    ingredients?.frontSignal === 'weak' ? 0.36 : 0.15;
+
+  // STP (Thompson 2003/04): ≥1 is sig-tor threshold, ≥3 outbreak.
+  // Saturate at STP=3 → 1.0, allow STP=4.5 → 1.5 for extreme cases.
+  const stp = clamp((ingredients?.stp ?? 0) / 3, 0, 1.5);
+  // SCP (Thompson 2003): ≥1 favorable supercell env, ≥6 outbreak.
+  // Saturate at SCP=6 → 1.0.
+  const scp = clamp((ingredients?.scp ?? 0) / 6, 0, 1.5);
+  const hazardIndex = hazard === 'tornado' ? stp : scp;
+
+  const isLinear = ingredients?.stormMode === 'linear';
+  const isDiscrete = ingredients?.stormMode === 'discrete';
+  const isMixed = ingredients?.stormMode === 'mixed';
+
+  // Aspect kick (calibrated to observed SIG hatch aspect ratios):
+  //   discrete supercell ~1.5–2:1, QLCS/bow ~3–5:1.
+  //   shear^1.4 gives non-linear response near outbreak shear.
+  const aspectKick = 1
+    + Math.pow(shear, 1.4) * 0.50
+    + (isLinear ? 0.40 : isDiscrete ? -0.12 : isMixed ? 0.15 : 0)
+    + hazardIndex * 0.20
+    + frontPush * 0.10;
+
+  // Mode tilt kick (Bunkers right-mover deviation 15–25° → -12° for
+  // discrete; QLCS perpendicular to shear → +8° for linear).
+  const modeTiltKick = isLinear ? 8 : isDiscrete ? -12 : isMixed ? 2 : 0;
+  const shearTilt = shear * 6;
+  const hazardIndexTilt = hazardIndex * 6;
+
+  // Size factor — instability inflates, cap suppresses (cap coefficient
+  // dominant per SPC inhibition handling). Strong cap shrinks SIG to
+  // ~0.40× of neutral.
+  const sizeFactor = clamp(0.55 + instability * 0.45 - cap * 1.20, 0.40, 1.70);
+
+  // Offset reach — front + composite drive displacement from peak.
+  // Weak forcing → ~0.43 reach, strong forcing + outbreak composite →
+  // ~2.0 reach (≈3x dynamic range, matches SPC SIG hatch placement).
+  const offsetReachMul = 0.30 + 0.85 * frontPush + 0.45 * hazardIndex;
+
+  // Asymmetric bulge magnitude — high STP/SCP environments produce
+  // more pronounced SIG lean toward the favored side. Linear mode
+  // widens the bulge to express the elongated character of QLCS.
+  const bulgeAmp = 0.15 + 0.22 * hazardIndex;
+  const bulgeWidth = 0.32 + (isLinear ? 0.15 : isDiscrete ? -0.04 : 0);
+
+  return {
+    shear, instability, cap, frontPush, hazardIndex,
+    isLinear, isDiscrete, isMixed,
+    aspectKick, modeTiltKick, shearTilt, hazardIndexTilt,
+    sizeFactor, offsetReachMul, bulgeAmp, bulgeWidth,
+  };
 }
 
 function morphHarmonics(
@@ -859,10 +1104,11 @@ function morphHarmonics(
  * location, then offset along the per-hazard SIG_LOBE_OFFSETS so the SIG
  * has its own location instead of overlapping the ENH+ probability cells.
  *
- * The shape MORPHS through the forecast cycle (size scales with peak
- * intensity; aspect, tilt, harmonics and offset wobble with a per-hazard
- * motion clock) so the SIG polygon doesn't render as a static stamp that
- * just translates with the peak cell.
+ * The shape MORPHS from the peak-cell environmental ingredients (CAPE,
+ * shear, capStrength, stormMode, frontSignal, STP/SCP) using the SAME
+ * morphHarmonics + ingredientAspect + ingredientTilt logic that the
+ * rule-based band path uses. When ingredients are absent, falls back to
+ * a small forecast-hour-only motion clock so the polygon still drifts.
  *
  * Used by the artifact-driven hazard map (which has only a probability grid
  * and no lobe machinery) to render a single, smooth SIG polygon that
@@ -874,19 +1120,41 @@ export function buildArtifactSigBlob(
   peakLon: number,
   forecastHour = 0,
   peakProbability?: number,
+  ingredients?: Ingredients,
+  region?: Region,
+  /**
+   * Measured radius (in degrees lat/lon) of the actual artifact 5% band
+   * around the peak cell, from `measureArtifactBandRadius`. When provided,
+   * overrides the formula-based R_outer in the MRGL containment clamp so
+   * the SIG is guaranteed to fit inside the REAL probability region drawn
+   * on the map, not just the idealized elliptical shape the formula
+   * predicts.
+   */
+  measuredBandRadius?: number,
 ): { coords: [number, number][] } | null {
   const cfg = HAZARD_CONFIGS[hazard];
   if (cfg.sigThreshold === undefined) return null;
 
   // Per-hazard motion seed — different hazards' SIG cores morph out of
   // phase with each other so the four panels read as distinct objects
-  // through the loop instead of pulsing in lock-step.
+  // through the loop instead of pulsing in lock-step. When a region is
+  // supplied we stack the same stable per-region wave seed used by the
+  // rule path so motion phases are consistent across the two paths.
   const hazardSeed =
     hazard === 'tornado' ? 1.70 :
     hazard === 'hail' ? 0.85 :
     hazard === 'wind' ? 2.45 : 0;
-  const motionPhase = forecastHour * 0.044 + hazardSeed;
-  const motionRate = 0.16 + Math.sin(forecastHour * 0.014 + hazardSeed) * 0.06;
+  // The motion.phase is a region-stable seed only — no synthetic per-hour
+  // clock pulse is applied to size, aspect, reach, or bulge. Every visible
+  // morph between forecast hours derives from the hour's actual ingredient
+  // values (CAPE, shear, capStrength, stormMode, frontSignal, STP/SCP)
+  // changing between hours, so the SIG morph is truly ingredient-driven.
+  // Temporal evolution within a fixed environment comes only from
+  // morphHarmonics' built-in shear/capStrength/instability phase term
+  // (the same temporal model the rule-based bands use).
+  const motion: { phase: number; rate: number; wobble: number } = region
+    ? motionProfile(region, hazard)
+    : { phase: hazardSeed, rate: 0.16, wobble: 1.0 };
 
   // Intensity scale — when peak ≈ sigThreshold, SIG core is small (~0.78×);
   // when peak is well above (e.g. 60% hail vs 30% threshold), it expands
@@ -900,45 +1168,98 @@ export function buildArtifactSigBlob(
     ? 0.78 + Math.min(peakAboveSig / intensitySpan, 1) * 0.65
     : 1.0;
 
-  // Tilt + aspect drift — rotation and stretch evolve through the forecast
-  // cycle so the polygon visibly reshapes between hours, not just translates.
-  const tiltDrift = Math.sin(motionPhase) * 9 + Math.cos(motionPhase * 0.62) * 5;
-  const aspectDrift = 1 + Math.sin(motionPhase * 0.78 + hazardSeed * 0.4) * 0.20;
+  // ── Ingredient-driven morph (shared with rule-based SIG core) ───────
+  // All ingredient response is consolidated in `sigIngredientMorph` so
+  // both SIG paths (artifact-driven here, rule-based in buildHazardBands)
+  // produce identical meteorological response. See the helper definition
+  // above for the full citation list (Thompson 2003/04, Bunkers 2000,
+  // Weisman & Rotunno 1988, SPC operational thresholds).
+  const morph = sigIngredientMorph(hazard, ingredients);
 
-  // Offset wobble — the SIG centroid swings around the peak rather than
-  // locking to a single offset vector, giving a natural "drifting core" feel.
+  // Aspect — shared helper output × SIG-specific ingredient kick.
+  const baseAspect = ingredientAspect(cfg.aspect, ingredients);
+  const aspect = baseAspect * morph.aspectKick;
+
+  // Tilt — cfg.tilt baseline + SIG-specific mode flip + shear/composite
+  // lean. Bypasses ingredientTilt so the SIG-specific (bigger) mode kick
+  // isn't double-counted with the helper's small kick.
+  const tilt = cfg.tilt + morph.modeTiltKick + morph.shearTilt - morph.hazardIndexTilt;
+
+  // Pre-clamp SIG radius and offset magnitude, then derive a containment
+  // scale that keeps the SIG inside the MRGL band boundary. The SIG can
+  // extend through any inner bands (MRGL → SLGT → ENH → ...) but never
+  // beyond the MRGL outline (SPC convention).
+  //
+  // Two containment paths:
+  //  1. If `measuredBandRadius` is provided (caller has actual artifact
+  //     grid data), use it directly — this is the largest in-band circle
+  //     around the peak cell from the real probability data, with a 0.88
+  //     safety margin. Guarantees the SIG fits inside the actual rendered
+  //     5% band even when the band is much smaller / asymmetric than
+  //     the formula would predict.
+  //  2. Otherwise fall back to the formula-based estimate
+  //     (`clampSigToMRGL`).
   const sigOffset = SIG_LOBE_OFFSETS[hazard];
-  const liveAlong = sigOffset.along * (0.74 + 0.36 * Math.sin(motionPhase + 0.40));
-  const liveCross = sigOffset.cross * (0.74 + 0.36 * Math.cos(motionPhase + 0.95));
-  const tilt = cfg.tilt + tiltDrift;
+  const preClampSigR = cfg.baseLatRadius * 0.35 * intensityScale * morph.sizeFactor;
+  const preClampOffsetMag = Math.hypot(sigOffset.along, sigOffset.cross) * morph.offsetReachMul;
+  const formulaScale = peakProbability !== undefined
+    ? clampSigToMRGL(hazard, peakProbability, preClampSigR, preClampOffsetMag)
+    : 1;
+  const measuredScale = (measuredBandRadius !== undefined && Number.isFinite(measuredBandRadius))
+    ? (() => {
+        const R_measured = measuredBandRadius * 0.88;
+        const totalExtent = preClampSigR + preClampOffsetMag;
+        if (totalExtent <= R_measured || totalExtent <= 1e-6) return 1;
+        return R_measured / totalExtent;
+      })()
+    : 1;
+  // Use the TIGHTER of the two scales — if the measured radius is smaller
+  // than the formula predicts, we trust the measurement (it's the real
+  // band geometry). If the measurement is missing or larger, the formula
+  // applies as a defensive bound.
+  const containScale = Math.min(formulaScale, measuredScale);
+
+  // Offset reach — front + composite push SIG along its bias axis,
+  // scaled down by containScale if needed to stay inside MRGL.
+  const liveAlong = sigOffset.along * morph.offsetReachMul * containScale;
+  const liveCross = sigOffset.cross * morph.offsetReachMul * containScale;
   const offsetCenter = offsetPoint(peakLat, peakLon, liveAlong, liveCross, tilt);
   const [centerLon, centerLat] = clipOrganizedSevereCenter(offsetCenter.lon, offsetCenter.lat);
 
-  // Size pulse — small breathing variation through the forecast cycle so
-  // the SIG core doesn't stay frozen at one radius while everything else
-  // around it moves. Mirrors the rule-based primaryLobe.radiusScale jitter.
-  const sizePulse = 0.93 + 0.10 * Math.sin(motionPhase * 1.08 + hazardSeed);
-  const sigR = cfg.baseLatRadius * 0.35 * intensityScale * sizePulse;
+  // Size — peak-probability intensity × ingredient size factor × MRGL
+  // containment. Same proportional scale applied to offset above.
+  const sigR = preClampSigR * containScale;
   if (sigR <= 0.08) return null;
 
-  // Harmonic amplitudes AND phases morph with the forecast clock so the
-  // outline contour itself changes shape (not just translates with the peak).
-  const harmonics = cfg.harmonics.map((h, idx) => ({
-    k: h.k,
-    amp: Math.max(0.04, h.amp * (0.74 + 0.36 * Math.sin(motionPhase * (1.05 + idx * 0.21) + idx * 1.4))),
-    phase: h.phase + motionPhase * (1 + idx * 0.23) + forecastHour * 0.018 * motionRate * (idx + 1),
-  }));
+  // Harmonics — pure ingredient morph via morphHarmonics, with a
+  // moderate amplitude multiplier so the outline reads as a distinct
+  // shape on a single small SIG polygon. No synthetic per-hour sin
+  // pulse — temporal evolution comes from morphHarmonics' built-in
+  // shear/capStrength/instability response and from ingredient values
+  // changing between forecast hours.
+  const harmonics = ingredients
+    ? morphHarmonics(cfg.harmonics, hazard, ingredients, forecastHour, motion).map((h) => ({
+        k: h.k,
+        amp: Math.max(0.04, h.amp * 1.50),
+        phase: h.phase,
+      }))
+    : cfg.harmonics.map((h) => ({
+        k: h.k,
+        amp: h.amp * 1.20,
+        phase: h.phase + motion.phase * 0.29,
+      }));
 
-  // Asymmetric bulge in the direction of the live SIG offset axis — leans
-  // the SIG toward the meteorologically favored side (warm-sector for
-  // tornado, dry-line for hail, downshear for wind) instead of being a
-  // perfectly symmetric ellipse.
+  // Asymmetric bulge in the direction of the live SIG offset axis —
+  // leans the SIG toward the meteorologically favored side. Amplitude
+  // grows with the hazard composite index (morph.bulgeAmp), width
+  // widens for linear-mode storms (morph.bulgeWidth). Same coefficients
+  // the rule-based SIG core consumes.
   const bulgeAxisLength = Math.hypot(liveAlong, liveCross);
   const bulges: ShapeBulge[] = bulgeAxisLength > 0.05
     ? [{
         angle: Math.atan2(liveCross, liveAlong) + Math.PI,
-        amp: 0.16 + Math.sin(motionPhase * 0.72 + hazardSeed) * 0.08,
-        width: 0.42,
+        amp: morph.bulgeAmp,
+        width: morph.bulgeWidth,
       }]
     : [];
 
@@ -946,7 +1267,7 @@ export function buildArtifactSigBlob(
     centerLat,
     centerLon,
     sigR,
-    sigR * cfg.aspect * aspectDrift,
+    sigR * aspect,
     tilt,
     80,
     harmonics,
