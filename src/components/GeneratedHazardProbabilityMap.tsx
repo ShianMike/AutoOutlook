@@ -7,12 +7,13 @@ import {
   artifactProbabilityToFeatureCollection,
   artifactThunderToFeatureCollection,
   getArtifactHazardPeak,
+  getArtifactHazardPeakLocation,
   getArtifactHourTile,
   getArtifactThunderCoverage,
   type ArtifactHazardKey,
   type GeneratedArtifactHazardKey,
 } from '../utils/artifactProbabilities';
-import { HAZARD_CONFIGS } from '../utils/hazardProbabilityBands';
+import { HAZARD_CONFIGS, buildArtifactSigBlob } from '../utils/hazardProbabilityBands';
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
@@ -63,6 +64,43 @@ export default function GeneratedHazardProbabilityMap({
     [tile, hazard, vectorFeatureCollection],
   );
   const usingVectorProbability = Boolean(vectorFeatureCollection);
+  // SIG (significant severe) overlay: a SINGLE smooth blob anchored at the
+  // peak hazard cell and OFFSET along a per-hazard axis, so the SIG core has
+  // its own location instead of perfectly overlaying every ENH+ cell.
+  // Mirrors the rule-based HazardOutlookMap's offset SIG core so the two
+  // map paths render the same visual signature.
+  const sigFeatureCollection = useMemo(() => {
+    if (cfg.sigThreshold === undefined) {
+      return { type: 'FeatureCollection' as const, features: [] };
+    }
+    const peakLocation = getArtifactHazardPeakLocation(
+      artifacts,
+      displayForecastHour,
+      hazard as ArtifactHazardKey,
+    );
+    if (!peakLocation || peakLocation.probability < cfg.sigThreshold) {
+      return { type: 'FeatureCollection' as const, features: [] };
+    }
+    const blob = buildArtifactSigBlob(
+      hazard,
+      peakLocation.lat,
+      peakLocation.lon,
+      displayForecastHour ?? 0,
+      peakLocation.probability,
+    );
+    if (!blob || blob.coords.length < 4) {
+      return { type: 'FeatureCollection' as const, features: [] };
+    }
+    const ring = [...blob.coords, blob.coords[0]] as [number, number][];
+    return {
+      type: 'FeatureCollection' as const,
+      features: [{
+        type: 'Feature' as const,
+        properties: { kind: 'sig' as const },
+        geometry: { type: 'Polygon' as const, coordinates: [ring] },
+      }],
+    };
+  }, [artifacts, displayForecastHour, hazard, cfg.sigThreshold]);
   const peakProb = hazard === 'thunder'
     ? getArtifactThunderCoverage(tile) ?? 0
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
@@ -203,6 +241,36 @@ export default function GeneratedHazardProbabilityMap({
             </Geographies>
           )}
 
+          {sigFeatureCollection.features.length > 0 && (
+            <Geographies geography={sigFeatureCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const sigStyle = {
+                    fill: '#1a1a1a',
+                    fillOpacity: 0.58,
+                    stroke: '#cc1f1f',
+                    strokeWidth: 1.1,
+                    strokeDasharray: '3 2',
+                    outline: 'none',
+                    pointerEvents: 'none' as const,
+                  };
+                  return (
+                    <Geography
+                      key={`artifact-sig-${hazard}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: sigStyle,
+                        hover: sigStyle,
+                        pressed: sigStyle,
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
           <Geographies geography={STATES_URL}>
             {({ geographies }) =>
               geographies.map((geo) => (
@@ -325,6 +393,16 @@ export default function GeneratedHazardProbabilityMap({
                 <span className="text-ink">{item.label}</span>
               </div>
             ))}
+            {cfg.sigThreshold !== undefined && (
+              <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                <span
+                  className="inline-block w-3 h-2 border-[1.5px] shrink-0"
+                  style={{ background: '#1a1a1a', borderColor: '#cc1f1f' }}
+                  aria-hidden
+                />
+                <span className="text-ink">SIG</span>
+              </div>
+            )}
           </div>
         </div>
 

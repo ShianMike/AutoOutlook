@@ -145,6 +145,23 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   },
 };
 
+// Per-hazard SIG offset relative to the primary lobe's tilted axis (in
+// degrees lat/lon along/cross). Gives the SIG core its own location so it
+// doesn't sit perfectly on top of the ENH+ band centroid:
+//   - tornado: shifted upshear/back-right toward the warm-sector triple-point
+//     where STP/0-1km SRH peak
+//   - hail:    shifted upshear/back-left along the dry-line / mid-level lapse
+//     rate axis where 2"+ stones are most likely
+//   - wind:    shifted downshear along the QLCS / cold-pool axis where
+//     significant gusts cluster ahead of the primary band.
+const SIG_LOBE_OFFSETS: Record<OutlookHazardKey, { along: number; cross: number }> = {
+  tornado: { along: 0.55, cross: -0.45 },
+  hail:    { along: -0.65, cross: 0.55 },
+  wind:    { along: 0.95, cross: 0.40 },
+  flood:   { along: 0, cross: 0 },
+  thunder: { along: 0, cross: 0 },
+};
+
 // Chaikin curve subdivision: smooth raw contours into organic SPC-like shapes.
 function chaikinSmooth(pts: [number, number][], iterations = 2): [number, number][] {
   let ring = pts;
@@ -759,12 +776,25 @@ export function buildHazardBands(
 
   // Add a small SIG core when peak exceeds the significance threshold.
   // Rendered last, on top, as a darker fill (no SVG pattern - more reliable).
+  // The SIG centroid is OFFSET from the primary lobe via SIG_LOBE_OFFSETS so
+  // it has its own location and doesn't sit perfectly on top of the ENH+
+  // band centroid - mirroring how SPC outlooks draw the SIG hatch as a
+  // distinct shape inside the higher-probability area, not centered on it.
   if (sigActive && cfg.sigThreshold !== undefined) {
     const primaryLobe = lobes[0];
     const sigR = cfg.baseLatRadius * primaryLobe.radiusScale *
       Math.pow(1 - cfg.sigThreshold / Math.max(peakProb, cfg.sigThreshold), 0.75) * 0.35;
     if (sigR > 0.08) {
-      const [centerLon, centerLat] = clipOrganizedSevereCenter(primaryLobe.centerLon, primaryLobe.centerLat);
+      const sigOffset = SIG_LOBE_OFFSETS[hazard];
+      const sigTilt = dynamicTilt + primaryLobe.tiltOffset;
+      const offsetCenter = offsetPoint(
+        primaryLobe.centerLat,
+        primaryLobe.centerLon,
+        sigOffset.along,
+        sigOffset.cross,
+        sigTilt,
+      );
+      const [centerLon, centerLat] = clipOrganizedSevereCenter(offsetCenter.lon, offsetCenter.lat);
       const harmonics = dynamicHarmonics.map((h, idx) => ({
         ...h,
         amp: h.amp * (1 + primaryLobe.absorbStrength * (0.08 + idx * 0.03)),
@@ -775,7 +805,7 @@ export function buildHazardBands(
         centerLon,
         sigR,
         sigR * dynamicAspect * primaryLobe.aspectScale,
-        dynamicTilt + primaryLobe.tiltOffset,
+        sigTilt,
         n,
         harmonics,
         [],
@@ -822,6 +852,107 @@ function morphHarmonics(
       phase: h.phase + hour + shear * 0.14 * (idx + 1) - cap + Math.sin(forecastHour * 0.012 * motion.wobble + idx + motion.phase * 0.43) * 0.06,
     };
   });
+}
+
+/**
+ * Build a synthetic SIG blob anchored at the supplied peak-probability
+ * location, then offset along the per-hazard SIG_LOBE_OFFSETS so the SIG
+ * has its own location instead of overlapping the ENH+ probability cells.
+ *
+ * The shape MORPHS through the forecast cycle (size scales with peak
+ * intensity; aspect, tilt, harmonics and offset wobble with a per-hazard
+ * motion clock) so the SIG polygon doesn't render as a static stamp that
+ * just translates with the peak cell.
+ *
+ * Used by the artifact-driven hazard map (which has only a probability grid
+ * and no lobe machinery) to render a single, smooth SIG polygon that
+ * visually matches the rule-based map's SIG core.
+ */
+export function buildArtifactSigBlob(
+  hazard: OutlookHazardKey,
+  peakLat: number,
+  peakLon: number,
+  forecastHour = 0,
+  peakProbability?: number,
+): { coords: [number, number][] } | null {
+  const cfg = HAZARD_CONFIGS[hazard];
+  if (cfg.sigThreshold === undefined) return null;
+
+  // Per-hazard motion seed — different hazards' SIG cores morph out of
+  // phase with each other so the four panels read as distinct objects
+  // through the loop instead of pulsing in lock-step.
+  const hazardSeed =
+    hazard === 'tornado' ? 1.70 :
+    hazard === 'hail' ? 0.85 :
+    hazard === 'wind' ? 2.45 : 0;
+  const motionPhase = forecastHour * 0.044 + hazardSeed;
+  const motionRate = 0.16 + Math.sin(forecastHour * 0.014 + hazardSeed) * 0.06;
+
+  // Intensity scale — when peak ≈ sigThreshold, SIG core is small (~0.78×);
+  // when peak is well above (e.g. 60% hail vs 30% threshold), it expands
+  // toward ~1.45×. Falls back to neutral 1.0× if probability isn't supplied.
+  const sigThreshold = cfg.sigThreshold;
+  const peakAboveSig = peakProbability !== undefined
+    ? Math.max(0, peakProbability - sigThreshold)
+    : 0;
+  const intensitySpan = Math.max(0.18, 1 - sigThreshold);
+  const intensityScale = peakProbability !== undefined
+    ? 0.78 + Math.min(peakAboveSig / intensitySpan, 1) * 0.65
+    : 1.0;
+
+  // Tilt + aspect drift — rotation and stretch evolve through the forecast
+  // cycle so the polygon visibly reshapes between hours, not just translates.
+  const tiltDrift = Math.sin(motionPhase) * 9 + Math.cos(motionPhase * 0.62) * 5;
+  const aspectDrift = 1 + Math.sin(motionPhase * 0.78 + hazardSeed * 0.4) * 0.20;
+
+  // Offset wobble — the SIG centroid swings around the peak rather than
+  // locking to a single offset vector, giving a natural "drifting core" feel.
+  const sigOffset = SIG_LOBE_OFFSETS[hazard];
+  const liveAlong = sigOffset.along * (0.74 + 0.36 * Math.sin(motionPhase + 0.40));
+  const liveCross = sigOffset.cross * (0.74 + 0.36 * Math.cos(motionPhase + 0.95));
+  const tilt = cfg.tilt + tiltDrift;
+  const offsetCenter = offsetPoint(peakLat, peakLon, liveAlong, liveCross, tilt);
+  const [centerLon, centerLat] = clipOrganizedSevereCenter(offsetCenter.lon, offsetCenter.lat);
+
+  // Size pulse — small breathing variation through the forecast cycle so
+  // the SIG core doesn't stay frozen at one radius while everything else
+  // around it moves. Mirrors the rule-based primaryLobe.radiusScale jitter.
+  const sizePulse = 0.93 + 0.10 * Math.sin(motionPhase * 1.08 + hazardSeed);
+  const sigR = cfg.baseLatRadius * 0.35 * intensityScale * sizePulse;
+  if (sigR <= 0.08) return null;
+
+  // Harmonic amplitudes AND phases morph with the forecast clock so the
+  // outline contour itself changes shape (not just translates with the peak).
+  const harmonics = cfg.harmonics.map((h, idx) => ({
+    k: h.k,
+    amp: Math.max(0.04, h.amp * (0.74 + 0.36 * Math.sin(motionPhase * (1.05 + idx * 0.21) + idx * 1.4))),
+    phase: h.phase + motionPhase * (1 + idx * 0.23) + forecastHour * 0.018 * motionRate * (idx + 1),
+  }));
+
+  // Asymmetric bulge in the direction of the live SIG offset axis — leans
+  // the SIG toward the meteorologically favored side (warm-sector for
+  // tornado, dry-line for hail, downshear for wind) instead of being a
+  // perfectly symmetric ellipse.
+  const bulgeAxisLength = Math.hypot(liveAlong, liveCross);
+  const bulges: ShapeBulge[] = bulgeAxisLength > 0.05
+    ? [{
+        angle: Math.atan2(liveCross, liveAlong) + Math.PI,
+        amp: 0.16 + Math.sin(motionPhase * 0.72 + hazardSeed) * 0.08,
+        width: 0.42,
+      }]
+    : [];
+
+  const { coords } = coastalSafeBlobPoints(
+    centerLat,
+    centerLon,
+    sigR,
+    sigR * cfg.aspect * aspectDrift,
+    tilt,
+    80,
+    harmonics,
+    bulges,
+  );
+  return { coords };
 }
 
 /**

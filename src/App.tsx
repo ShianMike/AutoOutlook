@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
 import { useOutlookArtifacts } from './hooks/useOutlookArtifacts';
@@ -14,6 +16,16 @@ import ForecastDiscussion from './components/ForecastDiscussion';
 import RiskTimeline from './components/RiskTimeline';
 import WatchReadinessPanel from './components/WatchReadinessPanel';
 import SystemStatusPanel from './components/SystemStatusPanel';
+import DocsSidebar from './components/docs/DocsSidebar';
+import DocumentationPage from './components/docs/DocumentationPage';
+
+type AppView = 'dashboard' | 'docs';
+
+function viewFromHash(): AppView {
+  if (typeof window === 'undefined') return 'dashboard';
+  const id = window.location.hash.replace(/^#/, '');
+  return id === 'docs' || id.startsWith('docs-') ? 'docs' : 'dashboard';
+}
 
 export default function App() {
   const auto = useAutoForecast();
@@ -25,13 +37,43 @@ export default function App() {
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
     : undefined;
 
+  const [view, setView] = useState<AppView>(() => viewFromHash());
+
+  useEffect(() => {
+    const sync = () => setView(viewFromHash());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+
+  // After a view change, scroll to the hash target (or the top of the page).
+  // Same-view hash changes are handled natively by the browser.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash.replace(/^#/, '');
+    const raf = window.requestAnimationFrame(() => {
+      if (!hash) {
+        window.scrollTo({ top: 0 });
+        return;
+      }
+      const el = document.getElementById(hash);
+      if (el) {
+        el.scrollIntoView({ block: 'start' });
+      } else {
+        window.scrollTo({ top: 0 });
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [view]);
+
   return (
     <div className="min-h-screen bg-paper text-ink lg:flex">
-      <DashboardSidebar
-        onRefresh={auto.refreshNow}
-      />
+      {view === 'docs' ? <DocsSidebar /> : <DashboardSidebar />}
 
       <div className="flex min-w-0 flex-1 flex-col">
+        {view === 'docs' ? (
+          <DocumentationPage />
+        ) : (
+          <>
         <CommandHeader
           bundle={auto.bundle}
           selectedValidTime={snapshot?.validTimeISO}
@@ -112,6 +154,8 @@ export default function App() {
             />
           </section>
         </main>
+          </>
+        )}
 
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
