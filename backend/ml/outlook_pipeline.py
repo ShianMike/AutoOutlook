@@ -401,6 +401,7 @@ def run_incremental_pipeline(
     output_dir: Path = DEFAULT_INCREMENTAL_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
     process_forecast_hours: Iterable[int] | None = None,
+    artifact_generation_id: str | None = None,
     now: datetime | None = None,
     max_workers: int | None = None,
     hour_workers: int | None = None,
@@ -440,6 +441,8 @@ def run_incremental_pipeline(
     range_workers = _resolve_worker_count(range_workers if range_workers is not None else max_workers, DEFAULT_RANGE_WORKERS)
     grid_stride = _resolve_grid_stride(grid_stride)
     tile_stride = _resolve_tile_stride(tile_stride, grid_stride)
+    artifact_generation_id = artifact_generation_id or os.environ.get("AUTOOUTLOOK_ARTIFACT_GENERATION_ID") or os.environ.get("CLOUD_RUN_EXECUTION") or ""
+    sharded_run = set(process_requested_hours) != set(hours)
 
     session = requests.Session()
     session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0 incremental"
@@ -495,6 +498,8 @@ def run_incremental_pipeline(
                 *_int_list(existing_index.get("failedForecastHours")),
             })
 
+        artifact_changes = False
+
         def write_index(status: str) -> dict[str, Any]:
             ready = sorted({int(hour) for hour in ready_hours})
             failed = sorted({int(item["forecastHour"]) for item in failed_hours})
@@ -509,6 +514,8 @@ def run_incremental_pipeline(
                 "mode": "incremental",
                 "requestedForecastHours": hours,
                 "processForecastHours": process_requested_hours,
+                "artifactGenerationId": artifact_generation_id or None,
+                "artifactChangesThisRun": artifact_changes,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata),
                 "readyForecastHours": ready,
                 "failedForecastHours": failed,
@@ -579,6 +586,7 @@ def run_incremental_pipeline(
                         no_cache,
                         grid_stride,
                         tile_stride,
+                        artifact_generation_id,
                     )
                     future_to_hour[future] = forecast_hour
                     if hour_delay_seconds > 0:
@@ -658,16 +666,26 @@ def run_incremental_pipeline(
             status = "complete" if all_requested_ready and stop_after_hour is None and not failed_hours else "partial"
             index = write_index(status)
         complete_dir = _incremental_complete_output_dir(output_dir)
-        complete_snapshot_ready = _incremental_index_covers_requested_hours(
-            _read_incremental_index_payload(complete_dir),
-            hours,
-        )
-        if artifact_changes or not complete_snapshot_ready:
-            _publish_complete_incremental_snapshot(output_dir, index, hours)
-            if publish_gcs_bucket:
-                _publish_incremental_artifacts_to_gcs(output_dir, index, hours, publish_gcs_bucket, publish_gcs_prefix)
-        elif publish_gcs_bucket:
-            print("[gcs publish skip] no artifact changes; existing complete snapshot is current", flush=True)
+        if sharded_run:
+            if publish_gcs_bucket and process_hours:
+                _publish_incremental_shard_artifacts_to_gcs(
+                    output_dir,
+                    index,
+                    process_hours,
+                    publish_gcs_bucket,
+                    publish_gcs_prefix,
+                )
+        else:
+            complete_snapshot_ready = _incremental_index_covers_requested_hours(
+                _read_incremental_index_payload(complete_dir),
+                hours,
+            )
+            if artifact_changes or not complete_snapshot_ready:
+                _publish_complete_incremental_snapshot(output_dir, index, hours)
+                if publish_gcs_bucket:
+                    _publish_incremental_artifacts_to_gcs(output_dir, index, hours, publish_gcs_bucket, publish_gcs_prefix)
+            elif publish_gcs_bucket:
+                print("[gcs publish skip] no artifact changes; existing complete snapshot is current", flush=True)
         return index
     except Exception:
         if output_dir.exists():
@@ -679,6 +697,8 @@ def run_incremental_pipeline(
                 "mode": "incremental",
                 "requestedForecastHours": hours,
                 "processForecastHours": process_requested_hours if "process_requested_hours" in locals() else hours,
+                "artifactGenerationId": artifact_generation_id if "artifact_generation_id" in locals() and artifact_generation_id else None,
+                "artifactChangesThisRun": artifact_changes if "artifact_changes" in locals() else None,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata if "cycle_detection_metadata" in locals() else {
                     "requestedForecastHours": hours,
                     "requiredForecastHourForCycle": required_forecast_hour,
@@ -790,6 +810,7 @@ def _process_incremental_hour(
     no_cache: bool,
     grid_stride: int,
     tile_stride: int,
+    artifact_generation_id: str = "",
 ) -> IncrementalHourResult:
     hour_started = time.perf_counter()
     ref = hour_ref(cycle, forecast_hour)
@@ -828,6 +849,7 @@ def _process_incremental_hour(
             "validTimeISO": built["validTimeISO"],
             "status": "ready",
             "generatedAtISO": _now_iso(),
+            "artifactGenerationId": artifact_generation_id or None,
             "latencyMs": 0,
             "timing": timing,
             "categoryCounts": counts,
@@ -1620,6 +1642,47 @@ def _publish_incremental_artifacts_to_gcs(
     return result
 
 
+def _publish_incremental_shard_artifacts_to_gcs(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    processed_hours: Iterable[int],
+    bucket_name: str,
+    prefix: str = "",
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    bucket_name = bucket_name.strip()
+    if not bucket_name:
+        return {"enabled": False, "latencyMs": 0, "currentFiles": 0, "completeFiles": 0}
+
+    client = _get_gcs_storage_client()
+    bucket = client.bucket(bucket_name)
+    output_dir = Path(output_dir)
+    current_files = 0
+    for forecast_hour in sorted({int(hour) for hour in processed_hours}):
+        hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
+        current_files += _upload_directory_to_gcs(
+            bucket,
+            hour_dir,
+            _gcs_join(prefix, output_dir.name, "hours", f"f{forecast_hour:02d}"),
+        )
+
+    result = {
+        "enabled": True,
+        "bucket": bucket_name,
+        "prefix": prefix.strip("/"),
+        "currentFiles": current_files,
+        "completeFiles": 0,
+        "latencyMs": int((time.perf_counter() - started) * 1000),
+    }
+    print(
+        f"[gcs shard publish] bucket={bucket_name} prefix={result['prefix']} "
+        f"hours={sorted({int(hour) for hour in processed_hours})} "
+        f"currentFiles={current_files} latency={result['latencyMs']}ms",
+        flush=True,
+    )
+    return result
+
+
 def _finalize_sharded_incremental_snapshot(
     output_dir: Path,
     index: Mapping[str, Any],
@@ -1635,6 +1698,7 @@ def _finalize_sharded_incremental_snapshot(
     deadline = started + max(1, int(timeout_seconds))
     poll = max(1, int(poll_seconds))
     cycle_time_iso = str(index.get("cycleTimeISO") or "")
+    artifact_generation_id = str(index.get("artifactGenerationId") or "") if index.get("artifactChangesThisRun") else ""
     last_payload = dict(index)
 
     while True:
@@ -1642,7 +1706,12 @@ def _finalize_sharded_incremental_snapshot(
         ready = [
             hour
             for hour in requested
-            if _incremental_hour_ready(output_dir, hour, cycle_time_iso=cycle_time_iso)
+            if _incremental_hour_ready(
+                output_dir,
+                hour,
+                cycle_time_iso=cycle_time_iso,
+                artifact_generation_id=artifact_generation_id,
+            )
         ]
         failed_hours = _failed_incremental_hours_for_cycle(output_dir, requested, cycle_time_iso)
         failed = sorted({int(item["forecastHour"]) for item in failed_hours})
@@ -1918,7 +1987,12 @@ def _clear_incremental_hour_artifact(output_dir: Path, forecast_hour: int) -> No
         shutil.rmtree(hour_dir, ignore_errors=True)
 
 
-def _incremental_hour_ready(output_dir: Path, forecast_hour: int, cycle_time_iso: str | None = None) -> bool:
+def _incremental_hour_ready(
+    output_dir: Path,
+    forecast_hour: int,
+    cycle_time_iso: str | None = None,
+    artifact_generation_id: str | None = None,
+) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
     if not all(
         (hour_dir / name).exists()
@@ -1929,6 +2003,7 @@ def _incremental_hour_ready(output_dir: Path, forecast_hour: int, cycle_time_iso
     return (
         _incremental_metadata_has_focus_fields(metadata_path)
         and _incremental_metadata_matches_cycle(metadata_path, forecast_hour, cycle_time_iso)
+        and _incremental_metadata_matches_generation(metadata_path, artifact_generation_id)
     )
 
 
@@ -1947,6 +2022,16 @@ def _incremental_metadata_matches_cycle(path: Path, forecast_hour: int, cycle_ti
         return False
     expected = cycle_time + timedelta(hours=int(forecast_hour))
     return abs((valid_time - expected).total_seconds()) <= 60
+
+
+def _incremental_metadata_matches_generation(path: Path, artifact_generation_id: str | None = None) -> bool:
+    if not artifact_generation_id:
+        return True
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return metadata.get("artifactGenerationId") == artifact_generation_id
 
 
 def _failed_incremental_hours_for_cycle(
@@ -2396,7 +2481,13 @@ def main() -> None:
                     publish_gcs_bucket=args.publish_gcs_bucket,
                     publish_gcs_prefix=args.publish_gcs_prefix,
                 )
-                if task_shard is not None and task_shard.index == 0 and args.publish_gcs_bucket:
+                needs_shard_finalizer = (
+                    task_shard is not None
+                    and task_shard.index == 0
+                    and bool(args.publish_gcs_bucket)
+                    and (metadata.get("status") != "complete" or bool(metadata.get("artifactChangesThisRun")))
+                )
+                if needs_shard_finalizer:
                     metadata = _finalize_sharded_incremental_snapshot(
                         output_dir,
                         metadata,

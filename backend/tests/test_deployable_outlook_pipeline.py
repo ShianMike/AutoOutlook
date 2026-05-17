@@ -50,7 +50,9 @@ from backend.ml.outlook_pipeline import (
     _hydrate_incremental_artifacts_from_gcs,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
+    _publish_incremental_shard_artifacts_to_gcs,
     _publish_working_dir,
+    _incremental_hour_ready,
     _region_from_max_risk_grid,
     resolve_cloud_run_task_forecast_hours,
     resolve_cycle_policy,
@@ -2068,6 +2070,65 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertIn(complete_hour_key, uploads)
         self.assertLess(uploads.index(current_hour_key), uploads.index(current_index_key))
         self.assertLess(uploads.index(complete_hour_key), uploads.index(complete_index_key))
+
+    def test_gcs_shard_publish_uploads_only_processed_hour_dirs(self) -> None:
+        uploads: list[str] = []
+
+        class FakeBlob:
+            def __init__(self, name: str):
+                self.name = name
+
+            def upload_from_filename(self, _filename: str) -> None:
+                uploads.append(self.name)
+
+        class FakeBucket:
+            def blob(self, name: str) -> FakeBlob:
+                return FakeBlob(name)
+
+        class FakeClient:
+            def bucket(self, _name: str) -> FakeBucket:
+                return FakeBucket()
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline._get_gcs_storage_client",
+            return_value=FakeClient(),
+        ):
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            for hour in (0, 1):
+                hour_dir = output_dir / "hours" / f"f{hour:02d}"
+                hour_dir.mkdir(parents=True)
+                for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
+                    (hour_dir / name).write_text(json.dumps({"hour": hour, "name": name}), encoding="utf-8")
+            index = {"status": "partial", "artifactGenerationId": "exec-1"}
+
+            result = _publish_incremental_shard_artifacts_to_gcs(output_dir, index, [1], "bucket", "prod/artifacts")
+
+        self.assertEqual(result["currentFiles"], 4)
+        self.assertTrue(all("/hours/f01/" in name for name in uploads))
+        self.assertNotIn("prod/artifacts/latest_incremental/hours/f00/metadata.json", uploads)
+        self.assertNotIn("prod/artifacts/latest_incremental/index.json", uploads)
+
+    def test_incremental_hour_ready_can_require_current_generation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            metadata = {
+                "forecastHour": 0,
+                "validTimeISO": "2024-05-04T12:00:00Z",
+                "status": "ready",
+                "artifactGenerationId": "exec-new",
+                "region": {"centerLat": 35.0, "centerLon": -97.0},
+                "ingredients": {},
+                "ingredientSample": {"gridRow": 1, "gridCol": 1},
+            }
+            for name in ("probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
+                (hour_dir / name).write_text("{}", encoding="utf-8")
+            (hour_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            self.assertTrue(_incremental_hour_ready(output_dir, 0, cycle_time_iso="2024-05-04T12:00:00Z", artifact_generation_id="exec-new"))
+            self.assertFalse(_incremental_hour_ready(output_dir, 0, cycle_time_iso="2024-05-04T12:00:00Z", artifact_generation_id="exec-old"))
 
     def test_gcs_hydrate_restores_incremental_artifact_layout(self) -> None:
         class FakeBlob:
