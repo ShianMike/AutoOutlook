@@ -862,13 +862,13 @@ def _json_artifact_or_incremental(name: str):
         payload = _merged_incremental_risk_polygons()
         if payload is not None:
             return _json_response(payload)
+    path = _artifact_path(name)
+    if _artifact_exists(path):
+        return _json_path(path)
     if name == "probability_tiles.json":
         payload = _incremental_probability_tiles()
         if payload is not None:
             return _json_response(payload)
-    path = _artifact_path(name)
-    if _artifact_exists(path):
-        return _json_path(path)
     return _json_path(path)
 
 

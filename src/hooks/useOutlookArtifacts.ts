@@ -286,7 +286,6 @@ export function useOutlookArtifacts(
   const riskPolygonCacheRef = useRef<Map<number, OutlookArtifactFeatureCollection>>(new Map());
   const mergedRiskPolygonsRef = useRef<OutlookArtifactFeatureCollection | undefined>(undefined);
   const prefetchingHoursRef = useRef<Set<number>>(new Set());
-  const warmedFullTileCyclesRef = useRef<Set<string>>(new Set());
   const warmedRiskPolygonCyclesRef = useRef<Set<string>>(new Set());
   const cacheCycleRef = useRef<string | null>(null);
   const isMountedRef = useRef(true);
@@ -432,27 +431,6 @@ export function useOutlookArtifacts(
       }));
     };
 
-    const warmFullProbabilityTiles = async (
-      incremental: OutlookIncrementalIndex,
-      cacheKey: string,
-    ) => {
-      if (warmedFullTileCyclesRef.current.has(cacheKey)) return;
-      warmedFullTileCyclesRef.current.add(cacheKey);
-      try {
-        const probabilityTiles = await fetchJson<OutlookProbabilityTiles>('/api/outlook/probability-tiles');
-        if (cacheCycleRef.current !== cacheKey) return;
-        const displayHours = probabilityTiles.hours.map((hour) =>
-          displayProbabilityHourFromArtifactHour(hour, selectedForecastHour, selectedValidTimeISO),
-        ).filter((hour) => hour.forecastHour >= 0 && hour.forecastHour <= 96);
-        if (!displayHours.length) return;
-        cacheProbabilityHours(displayHours);
-        if (!isMountedRef.current) return;
-        setState((previous) => mergeCachedHoursIntoState(previous, incremental, displayHours));
-      } catch {
-        warmedFullTileCyclesRef.current.delete(cacheKey);
-      }
-    };
-
     const prefetchNeighborProbabilityTiles = async (
       incremental: OutlookIncrementalIndex,
       cacheKey: string,
@@ -525,7 +503,6 @@ export function useOutlookArtifacts(
         if (incremental && selectedForecastHour !== undefined) {
           const cacheKey = resetProbabilityCacheIfNeeded(incremental);
           void warmMergedRiskPolygons(incremental, cacheKey);
-          void warmFullProbabilityTiles(incremental, cacheKey);
           const ready = incremental.readyForecastHours ?? [];
           const failed = incremental.failedForecastHours ?? [];
           const pending = incremental.pendingForecastHours ?? [];
