@@ -3,8 +3,9 @@
 //
 // The SPC determines the categorical risk by finding the MAXIMUM implied
 // category across all individual hazard probabilities.  Tornado uses
-// lower probability thresholds (2/5/10/15/30%) because tornadoes are
-// rarer, while wind and hail use higher thresholds (5/15/30/45/60%).
+// lower probability thresholds because tornadoes are rarer, while wind and
+// hail use higher thresholds. Significant-severe rows are only used when a
+// separate significant-severe probability exists.
 // The categorical graphic is therefore a *derived product* — not a
 // separate score.  AutoOutlook follows the same philosophy: compute
 // per-hazard probabilities first (hazardEngine), then let the highest
@@ -45,78 +46,6 @@ export function categoryFromHazards(
     }
   });
   return { category: best, drivingHazard: driver };
-}
-
-function capCategory(category: RiskCategory, maxCategory: RiskCategory): RiskCategory {
-  return catOrd(category) > catOrd(maxCategory) ? maxCategory : category;
-}
-
-function comfortableForCategory(hazard: HazardKey, probability: number, category: RiskCategory): boolean {
-  if (category === 'SLGT') return hazard === 'tornado' ? probability >= 0.05 : probability >= 0.15;
-  if (category === 'ENH') return hazard === 'tornado' ? probability >= 0.11 : probability >= 0.32;
-  if (category === 'MOD') return hazard === 'tornado' ? probability >= 0.17 : probability >= 0.47;
-  if (category === 'HIGH') return hazard === 'tornado' ? probability >= 0.32 : probability >= 0.64;
-  return true;
-}
-
-function strictCategoryGate(
-  category: RiskCategory,
-  ing: Ingredients,
-  hazards: Record<HazardKey, HazardAssessment>,
-  confidence: number,
-): RiskCategory {
-  const ord = catOrd(category);
-  if (ord < 2) return category;
-
-  const maxCape = Math.max(ing.mlcape, ing.mucape);
-  const severeHazards = CATEGORICAL_HAZARDS.filter((k) => catOrd(hazards[k].level) >= 2);
-  const sigSevere = CATEGORICAL_HAZARDS.some((k) => hazards[k].significantSevere);
-  const driver = CATEGORICAL_HAZARDS.reduce((a, b) =>
-    catOrd(hazards[b].level) > catOrd(hazards[a].level) ||
-    (catOrd(hazards[b].level) === catOrd(hazards[a].level) && hazards[b].probability > hazards[a].probability)
-      ? b
-      : a,
-  'wind' as HazardKey);
-
-  if (ing.initiationConf < 0.40 || maxCape < 750 || ing.shear06Kt < 25) return 'MRGL';
-  if (ing.capStrength === 'strong' && ing.frontSignal === 'none') return 'MRGL';
-  if (!comfortableForCategory(driver, hazards[driver].probability, 'SLGT')) return 'MRGL';
-
-  let gated = category;
-  if (catOrd(gated) >= 3) {
-    const enhEnvironment =
-      ing.initiationConf >= 0.58 &&
-      maxCape >= 1500 &&
-      ing.shear06Kt >= 35 &&
-      confidence >= 0.58 &&
-      severeHazards.length >= 1 &&
-      comfortableForCategory(driver, hazards[driver].probability, 'ENH');
-    if (!enhEnvironment) gated = capCategory(gated, 'SLGT');
-  }
-
-  if (catOrd(gated) >= 4) {
-    const modEnvironment =
-      ing.initiationConf >= 0.70 &&
-      maxCape >= 2500 &&
-      ing.shear06Kt >= 45 &&
-      confidence >= 0.70 &&
-      sigSevere &&
-      comfortableForCategory(driver, hazards[driver].probability, 'MOD');
-    if (!modEnvironment) gated = capCategory(gated, 'ENH');
-  }
-
-  if (catOrd(gated) >= 5) {
-    const highEnvironment =
-      ing.initiationConf >= 0.82 &&
-      maxCape >= 3500 &&
-      ing.shear06Kt >= 55 &&
-      confidence >= 0.82 &&
-      sigSevere &&
-      comfortableForCategory(driver, hazards[driver].probability, 'HIGH');
-    if (!highEnvironment) gated = capCategory(gated, 'MOD');
-  }
-
-  return gated;
 }
 
 // ── Legacy helper — kept for callers that only have Ingredients ──────
@@ -254,10 +183,6 @@ export function buildOutlook(
   }
 
   const confidence = confidenceFromIngredients(ing, hazards);
-  const mlDriven = hazards && CATEGORICAL_HAZARDS.some((k) => hazards[k].source === 'ml');
-  if (hazards && !mlDriven) {
-    category = strictCategoryGate(category, ing, hazards, confidence);
-  }
   return {
     category,
     mainHazard,

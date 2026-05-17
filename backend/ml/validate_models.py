@@ -12,22 +12,20 @@ from .inference import METADATA_FILE, MODEL_DIR
 
 CATEGORY_THRESHOLDS = {
     "tornado": (
-        (0.30, "HIGH"),
-        (0.15, "MOD"),
+        (0.45, "HIGH"),
+        (0.30, "MOD"),
         (0.10, "ENH"),
         (0.05, "SLGT"),
         (0.02, "MRGL"),
     ),
     "hail": (
-        (0.60, "HIGH"),
-        (0.45, "MOD"),
+        (0.60, "MOD"),
         (0.30, "ENH"),
         (0.15, "SLGT"),
         (0.05, "MRGL"),
     ),
     "wind": (
-        (0.60, "HIGH"),
-        (0.45, "MOD"),
+        (0.60, "MOD"),
         (0.30, "ENH"),
         (0.15, "SLGT"),
         (0.05, "MRGL"),

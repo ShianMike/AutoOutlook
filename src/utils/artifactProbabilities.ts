@@ -171,12 +171,18 @@ export function measureArtifactBandRadius(
 }
 
 export function getArtifactHazardLevel(hazard: ArtifactHazardKey, probability: number): RiskCategory {
-  const thresholds = hazardThresholds(hazard);
-  if (probability >= thresholds[4]) return 'HIGH';
-  if (probability >= thresholds[3]) return 'MOD';
-  if (probability >= thresholds[2]) return 'ENH';
-  if (probability >= thresholds[1]) return 'SLGT';
-  if (probability >= thresholds[0]) return 'MRGL';
+  if (hazard === 'tornado') {
+    if (probability >= 0.45) return 'HIGH';
+    if (probability >= 0.30) return 'MOD';
+    if (probability >= 0.10) return 'ENH';
+    if (probability >= 0.05) return 'SLGT';
+    if (probability >= 0.02) return 'MRGL';
+    return 'TSTM';
+  }
+  if (probability >= 0.60) return 'MOD';
+  if (probability >= 0.30) return 'ENH';
+  if (probability >= 0.15) return 'SLGT';
+  if (probability >= 0.05) return 'MRGL';
   return 'TSTM';
 }
 
@@ -305,24 +311,6 @@ export function getArtifactMaxCategory(
     if (Number.isFinite(value)) maxOrdinal = Math.max(maxOrdinal, Number(value));
   }));
   return (['NONE', 'TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'][maxOrdinal] ?? 'NONE') as ArtifactRiskCategory;
-}
-
-export function getArtifactRiskPolygonMaxCategory(
-  artifacts: OutlookArtifacts | null,
-  forecastHour: number | undefined,
-): ArtifactRiskCategory | undefined {
-  if (forecastHour === undefined) return undefined;
-  const features = artifacts?.riskPolygons.features ?? [];
-  let best: ArtifactRiskCategory | undefined;
-  features.forEach((feature) => {
-    if (feature.properties.forecastHour !== forecastHour) return;
-    const category = feature.properties.category;
-    if (category === 'NONE') return;
-    if (!best || categoryOrdinal(category) > categoryOrdinal(best)) {
-      best = category;
-    }
-  });
-  return best;
 }
 
 export function getArtifactMainHazard(

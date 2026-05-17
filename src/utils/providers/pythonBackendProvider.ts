@@ -137,10 +137,6 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 }
 
-function mlSignificantSevere(hazard: Exclude<HazardKey, 'flood'>, probability: number): boolean {
-  return hazard === 'tornado' ? probability >= 0.10 : probability >= 0.30;
-}
-
 function mlExplanation(hazard: Exclude<HazardKey, 'flood'>, probability: number, level: RiskCategory): string {
   const percent = Math.round(probability * 100);
   const label = hazard === 'tornado' ? 'tornado' : hazard === 'hail' ? 'severe hail' : 'damaging wind';
@@ -164,7 +160,7 @@ function buildHazardsFromMl(
       level,
       probability,
       confidence: clamp01(0.42 + probability * 0.68),
-      significantSevere: mlSignificantSevere(hazard, probability),
+      significantSevere: prior.significantSevere,
       source: 'ml',
       supporting: [
         'Backend ML hazard model',

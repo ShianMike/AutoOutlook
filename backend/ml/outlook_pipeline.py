@@ -210,6 +210,7 @@ def run_pipeline(
         hour_artifacts = []
         hourly_collections: list[dict[str, Any]] = []
         category_grids: list[np.ndarray] = []
+        risk_map_category_grids: list[np.ndarray] = []
         probability_grids: list[dict[str, np.ndarray]] = []
         feature_grids: list[dict[str, np.ndarray]] = []
         successful_hours: list[int] = []
@@ -239,6 +240,7 @@ def run_pipeline(
                 base_lats = np.asarray(fetched.lats, dtype=float)
                 base_lons = np.asarray(fetched.lons, dtype=float)
             category_grids.append(built["categoryGrid"])
+            risk_map_category_grids.append(built["riskMapCategoryGrid"])
             probability_grids.append(built["probabilities"])
             feature_grids.append(built["features"].raw)
             hourly_collections.append(built["polygons"])
@@ -250,6 +252,7 @@ def run_pipeline(
                 "categoryCountsBeforeCaps": category_counts(built["categoryGridBeforeCaps"]),
                 "categoryCountsAfterCaps": category_counts(built["categoryGridAfterCaps"]),
                 "categoryCountsAfterSmoothing": category_counts(built["categoryGrid"]),
+                "riskMapCategoryCounts": category_counts(built["riskMapCategoryGrid"]),
                 "probabilityStats": built["probabilityReport"],
                 "postProcessing": built["postProcessingReport"],
                 "featureStats": feature_stats(built["features"]),
@@ -269,12 +272,13 @@ def run_pipeline(
             raise RuntimeError("No HRRR forecast hours produced gridded category output")
 
         aggregate_grid = np.maximum.reduce(category_grids)
+        aggregate_risk_map_grid = np.maximum.reduce(risk_map_category_grids)
         aggregate_probabilities = _aggregate_probabilities(probability_grids)
         aggregate_features = _aggregate_feature_grids(feature_grids)
         aggregate_polygons = risk_polygons_from_grid(
             base_lats,
             base_lons,
-            aggregate_grid,
+            aggregate_risk_map_grid,
             forecast_hour=-1,
             valid_time_iso=f"{_valid_iso(cycle, min(successful_hours))}/{_valid_iso(cycle, max(successful_hours))}",
         )
@@ -296,7 +300,7 @@ def run_pipeline(
 
         preview_file = None
         if preview:
-            preview_file = _render_preview(working_dir / "preview.png", base_lats, base_lons, aggregate_grid)
+            preview_file = _render_preview(working_dir / "preview.png", base_lats, base_lons, aggregate_risk_map_grid)
 
         verification_summary = None
         if verify_spc:
@@ -354,6 +358,7 @@ def run_pipeline(
                 "verificationSummary": "verification_summary.json" if verification_summary else None,
             },
             "aggregateCategoryCounts": category_counts(aggregate_grid),
+            "riskMapAggregateCategoryCounts": category_counts(aggregate_risk_map_grid),
             "postProcessing": _aggregate_postprocessing(hour_artifacts),
             "hours": [
                 {k: v for k, v in artifact.items() if k not in ("tile",)}
@@ -792,6 +797,7 @@ def _process_incremental_hour(
             "categoryCountsBeforeCaps": category_counts(built["categoryGridBeforeCaps"]),
             "categoryCountsAfterCaps": category_counts(built["categoryGridAfterCaps"]),
             "categoryCountsAfterSmoothing": counts,
+            "riskMapCategoryCounts": category_counts(built["riskMapCategoryGrid"]),
             "probabilityStats": built["probabilityReport"],
             "postProcessing": built["postProcessingReport"],
             "region": built["region"],
@@ -913,6 +919,12 @@ def _build_hour_artifact(
         fetched.lats,
         fetched.lons,
     )
+    risk_map_probability_result = apply_offshore_probability_suppression(
+        cap_result.probabilities,
+        fetched.lats,
+        fetched.lons,
+    )
+    risk_map_category_grid = category_grid_from_probabilities(risk_map_probability_result.probabilities, features, model)
     probability_report = {
         **cap_result.report,
         "environmentalCappedProbabilityMax": cap_result.report.get("cappedProbabilityMax"),
@@ -921,12 +933,12 @@ def _build_hour_artifact(
         **final_probability_result.report,
     }
     valid_time_iso = _valid_iso(cycle, forecast_hour)
-    polygons = risk_polygons_from_grid(fetched.lats, fetched.lons, post_result.category_grid, forecast_hour, valid_time_iso)
+    polygons = risk_polygons_from_grid(fetched.lats, fetched.lons, risk_map_category_grid, forecast_hour, valid_time_iso)
     hazard_shapes = hazard_probability_shapes_from_grids(
         fetched.lats,
         fetched.lons,
-        final_probability_result.probabilities,
-        post_result.category_grid,
+        risk_map_probability_result.probabilities,
+        risk_map_category_grid,
         forecast_hour,
         valid_time_iso,
     )
@@ -958,6 +970,7 @@ def _build_hour_artifact(
         "categoryGridBeforeCaps": category_before_caps,
         "categoryGridAfterCaps": category_after_caps,
         "categoryGrid": post_result.category_grid,
+        "riskMapCategoryGrid": risk_map_category_grid,
         "postProcessingReport": post_result.report,
         "validTimeISO": valid_time_iso,
         "polygons": polygons,

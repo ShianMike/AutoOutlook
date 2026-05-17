@@ -16,18 +16,21 @@ import type {
 // ── SPC Day-1 Probability → Category conversion tables ──────────────
 // Tornado uses lower thresholds because tornadoes are rarer; even a 2%
 // probability within 25 mi is well above climatology.
+// These are the non-significant-severe rows from the SPC Day 1/2
+// probability-to-category table. AutoOutlook does not forecast a separate
+// significant-severe probability grid here, so MDT/HIGH are not inferred
+// from significant-severe rows.
 const TOR_THRESHOLDS: [number, RiskCategory][] = [
-  [0.30, 'HIGH'],
-  [0.15, 'MOD'],
+  [0.45, 'HIGH'],
+  [0.30, 'MOD'],
   [0.10, 'ENH'],
   [0.05, 'SLGT'],
   [0.02, 'MRGL'],
 ];
 
-// Wind and hail share identical SPC threshold ladders.
+// Wind and hail share the same non-significant-severe category ladder.
 const WIND_HAIL_THRESHOLDS: [number, RiskCategory][] = [
-  [0.60, 'HIGH'],
-  [0.45, 'MOD'],
+  [0.60, 'MOD'],
   [0.30, 'ENH'],
   [0.15, 'SLGT'],
   [0.05, 'MRGL'],

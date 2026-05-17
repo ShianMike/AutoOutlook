@@ -1628,10 +1628,15 @@ def _default_for(name: str) -> float:
 
 
 def _hazard_ord(hazard: str, probability: np.ndarray) -> np.ndarray:
+    # NWSI 10-512 Table 3 has separate rows for "with Significant Severe".
+    # The gridded model currently predicts unconditional tornado, hail, and
+    # wind probabilities only, so use the non-significant-severe Day 1/2
+    # conversion rows. This keeps MDT/HIGH from being inferred without a
+    # separate significant-severe signal.
     if hazard == "tornado":
-        thresholds = ((0.30, 6), (0.15, 5), (0.10, 4), (0.05, 3), (0.02, 2))
+        thresholds = ((0.45, 6), (0.30, 5), (0.10, 4), (0.05, 3), (0.02, 2))
     else:
-        thresholds = ((0.60, 6), (0.45, 5), (0.30, 4), (0.15, 3), (0.05, 2))
+        thresholds = ((0.60, 5), (0.30, 4), (0.15, 3), (0.05, 2))
     out = np.zeros_like(probability, dtype=np.int16)
     for threshold, ordinal in thresholds:
         out = np.where((probability >= threshold) & (out < ordinal), ordinal, out)
@@ -1682,21 +1687,21 @@ def _model_probability_caps(category_cap: int) -> dict[str, float]:
     if category_cap <= SPC_RISK_LABELS.index("SLGT"):
         return {"tornado": 0.099, "hail": 0.29, "wind": 0.29}
     if category_cap <= SPC_RISK_LABELS.index("ENH"):
-        return {"tornado": 0.149, "hail": 0.44, "wind": 0.44}
-    if category_cap <= SPC_RISK_LABELS.index("MDT"):
         return {"tornado": 0.299, "hail": 0.59, "wind": 0.59}
+    if category_cap <= SPC_RISK_LABELS.index("MDT"):
+        return {"tornado": 0.449, "hail": 1.0, "wind": 1.0}
     return {"tornado": 1.0, "hail": 1.0, "wind": 1.0}
 
 
 def _category_probability_cap_grid(hazard: str, category_grid: np.ndarray) -> np.ndarray:
     """Return per-cell ceilings just below the next higher category threshold."""
     caps_by_ordinal = {
-        0: 0.014 if hazard == "tornado" else 0.044,
-        1: 0.014 if hazard == "tornado" else 0.044,
-        2: 0.044 if hazard == "tornado" else 0.144,
-        3: 0.094 if hazard == "tornado" else 0.294,
-        4: 0.144 if hazard == "tornado" else 0.444,
-        5: 0.294 if hazard == "tornado" else 0.594,
+        0: 0.019 if hazard == "tornado" else 0.049,
+        1: 0.019 if hazard == "tornado" else 0.049,
+        2: 0.049 if hazard == "tornado" else 0.149,
+        3: 0.099 if hazard == "tornado" else 0.299,
+        4: 0.299 if hazard == "tornado" else 0.599,
+        5: 0.449 if hazard == "tornado" else 1.0,
         6: 1.0,
     }
     out = np.ones(np.asarray(category_grid).shape, dtype=float)

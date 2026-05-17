@@ -6,7 +6,6 @@ import {
   getArtifactHazardPeak,
   getArtifactMainHazard,
   getArtifactMaxCategory,
-  getArtifactRiskPolygonMaxCategory,
 } from './artifactProbabilities';
 import { focusLocationFromSnapshot } from './focusLocation';
 
@@ -91,8 +90,9 @@ function getBestArtifactCategory(
   forecastHour: number,
   timelineHour: OutlookTimelineHourSummary | undefined,
 ): ArtifactRiskCategory | undefined {
+  // Final category math must come from the capped probability tile/counts,
+  // not the broader non-strict visual contour polygons.
   return getArtifactMaxCategory(artifacts ?? null, forecastHour)
-    ?? getArtifactRiskPolygonMaxCategory(artifacts ?? null, forecastHour)
     ?? timelineHour?.category
     ?? maxCategoryFromCounts(categoryCountsForHour(artifacts, forecastHour));
 }

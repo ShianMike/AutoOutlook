@@ -368,7 +368,11 @@ class MlPipelineTests(unittest.TestCase):
         self.assertGreater(metrics["averagePrecisionLift"], 1.0)
         self.assertGreater(metrics["brierSkillScore"], 0.0)
         self.assertEqual(category_for_probability("tornado", 0.10), "ENH")
+        self.assertEqual(category_for_probability("tornado", 0.15), "ENH")
+        self.assertEqual(category_for_probability("tornado", 0.30), "MOD")
         self.assertEqual(category_for_probability("wind", 0.30), "ENH")
+        self.assertEqual(category_for_probability("wind", 0.45), "ENH")
+        self.assertEqual(category_for_probability("wind", 0.60), "MOD")
 
 
 if __name__ == "__main__":

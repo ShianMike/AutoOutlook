@@ -18,8 +18,8 @@ const LEVELS: LevelRow[] = [
   { code: 'MRGL', blurb: 'Isolated severe storms possible. Low coverage, short-lived, marginal intensity.',                                            tornado: '≥ 2%',  hail: '≥ 5%',  wind: '≥ 5%'  },
   { code: 'SLGT', blurb: 'Scattered severe storms. A few organized cells with brief tornadoes, large hail, or damaging gusts.',                        tornado: '≥ 5%',  hail: '≥ 15%', wind: '≥ 15%' },
   { code: 'ENH',  blurb: 'Numerous severe storms. Several intense, longer-lived storms; significant severe possible.',                                 tornado: '≥ 10%', hail: '≥ 30%', wind: '≥ 30%' },
-  { code: 'MOD',  blurb: 'Widespread severe weather. Strong/significant tornadoes, very large hail, or widespread damaging winds expected.',           tornado: '≥ 15%', hail: '≥ 45%', wind: '≥ 45%' },
-  { code: 'HIGH', blurb: 'Outbreak-level threat. Long-track strong tornadoes or extensive derecho-scale wind events likely.',                          tornado: '≥ 30%', hail: '≥ 60%', wind: '≥ 60%' },
+  { code: 'MOD',  blurb: 'Widespread severe weather. Strong/significant tornadoes, very large hail, or widespread damaging winds expected.',           tornado: '≥ 30%', hail: '≥ 60%', wind: '≥ 60%' },
+  { code: 'HIGH', blurb: 'Outbreak-level threat. Long-track strong tornadoes or extensive derecho-scale wind events likely.',                          tornado: '≥ 45%', hail: 'not used', wind: '60% + sig' },
 ];
 
 interface ConfidenceFloor {
@@ -882,11 +882,11 @@ function DocsHazards() {
       </div>
 
       <Body>
-        Significant-severe (the SPC SIG hatch) activates when the peak hazard
-        probability for the active forecast hour clears a per-hazard threshold:{' '}
-        <Mono>≥ 10% tornado</Mono> for EF2+, <Mono>≥ 30% hail</Mono> for stones ≥ 2 in,
-        or <Mono>≥ 30% wind</Mono> for gusts ≥ 74 mph. General thunder and flood do
-        not carry a SIG layer.
+        Significant-severe (the SPC SIG hatch) is a separate signal, not the
+        same thing as the ordinary hazard probability. It activates at{' '}
+        <Mono>≥ 10%</Mono> probability of EF2+ tornadoes, hail at least 2 in,
+        or convective wind at least 65 kt. General thunder and flood do not
+        carry a SIG layer.
       </Body>
 
       <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">

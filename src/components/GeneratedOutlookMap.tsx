@@ -200,7 +200,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   const renderedMax = maxCategory(renderedCollection);
   const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
   const hasGeneratedArtifact = Boolean(selectedTile || artifactRiskCollection?.features.length || aggregateRiskCollection?.features.length);
-  const mapCategory = hasGeneratedArtifact ? tileMax ?? renderedMax : undefined;
+  const mapCategory = hasGeneratedArtifact ? renderedMax ?? tileMax : undefined;
 
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
 
