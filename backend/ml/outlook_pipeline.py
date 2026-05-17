@@ -1792,6 +1792,10 @@ def _download_gcs_prefix_to_directory(bucket: Any, source_prefix: str, destinati
     source_prefix = source_prefix.strip("/")
     list_prefix = f"{source_prefix}/" if source_prefix else ""
     downloaded = 0
+    try:
+        from google.api_core import exceptions as gcs_exceptions  # type: ignore
+    except Exception:  # noqa: BLE001
+        gcs_exceptions = None
     for blob in bucket.list_blobs(prefix=list_prefix):
         blob_name = str(blob.name)
         if not blob_name or blob_name.endswith("/"):
@@ -1801,7 +1805,17 @@ def _download_gcs_prefix_to_directory(bucket: Any, source_prefix: str, destinati
             continue
         destination = destination_dir / Path(relative_name)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        blob.download_to_filename(str(destination))
+        try:
+            blob.download_to_filename(str(destination))
+        except Exception as exc:  # noqa: BLE001
+            not_found = (
+                (gcs_exceptions is not None and isinstance(exc, gcs_exceptions.NotFound))
+                or type(exc).__name__ == "NotFound"
+            )
+            if not_found:
+                print(f"[gcs hydrate skip] missing object during concurrent publish {blob_name}", flush=True)
+                continue
+            raise
         downloaded += 1
     return downloaded
 

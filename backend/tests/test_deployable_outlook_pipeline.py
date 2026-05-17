@@ -2168,6 +2168,45 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(result["currentFiles"], 2)
         self.assertEqual(result["completeFiles"], 1)
 
+    def test_gcs_hydrate_skips_objects_deleted_during_concurrent_publish(self) -> None:
+        class NotFound(Exception):
+            pass
+
+        class FakeBlob:
+            def __init__(self, name: str, data: str | None):
+                self.name = name
+                self.data = data
+
+            def download_to_filename(self, filename: str) -> None:
+                if self.data is None:
+                    raise NotFound("missing")
+                Path(filename).write_text(self.data, encoding="utf-8")
+
+        class FakeBucket:
+            def __init__(self):
+                self.blobs = [
+                    FakeBlob("prod/latest_incremental/hours/f00/metadata.json", '{"forecastHour":0}'),
+                    FakeBlob("prod/latest_incremental/hours/f00/risk_polygons.geojson", None),
+                ]
+
+            def list_blobs(self, prefix: str):
+                return [blob for blob in self.blobs if blob.name.startswith(prefix)]
+
+        class FakeClient:
+            def bucket(self, _name: str) -> FakeBucket:
+                return FakeBucket()
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline._get_gcs_storage_client",
+            return_value=FakeClient(),
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            result = _hydrate_incremental_artifacts_from_gcs(output_dir, "bucket", "prod")
+
+            self.assertTrue((output_dir / "hours" / "f00" / "metadata.json").exists())
+
+        self.assertEqual(result["currentFiles"], 1)
+
     def test_incremental_pipeline_can_publish_finished_artifacts_to_gcs(self) -> None:
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)
