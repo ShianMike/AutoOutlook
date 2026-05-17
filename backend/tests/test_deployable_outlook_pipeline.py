@@ -46,10 +46,13 @@ from backend.ml.gridded_outlook import (
 from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
     PRODUCTION_FORECAST_HOURS,
+    CloudRunTaskShard,
     _hydrate_incremental_artifacts_from_gcs,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
     _publish_working_dir,
+    _region_from_max_risk_grid,
+    resolve_cloud_run_task_forecast_hours,
     resolve_cycle_policy,
     resolve_forecast_hours,
     resolve_cli_forecast_hours,
@@ -329,6 +332,54 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         args.forecast_hours = [0, 6]
         self.assertEqual(resolve_cli_forecast_hours(args), [0, 6])
+
+    def test_cloud_run_task_shard_splits_requested_hours(self) -> None:
+        hours = list(range(10))
+
+        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=0, count=3)), [0, 3, 6, 9])
+        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=1, count=3)), [1, 4, 7])
+        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=2, count=3)), [2, 5, 8])
+
+    def test_incremental_pipeline_processes_task_shard_but_indexes_all_requested_hours(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        fetched_hours: list[int] = []
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            fetched_hours.append(ref.forecast_hour)
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            probs[2, 2] = 0.2
+            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            index = run_incremental_pipeline(
+                output_dir=Path(tmp) / "latest_incremental",
+                forecast_hours=[0, 1, 2, 3],
+                process_forecast_hours=[1, 3],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                hour_workers=1,
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+        self.assertEqual(fetched_hours, [1, 3])
+        self.assertEqual(index["requestedForecastHours"], [0, 1, 2, 3])
+        self.assertEqual(index["processForecastHours"], [1, 3])
+        self.assertEqual(index["readyForecastHours"], [1, 3])
+        self.assertEqual(index["pendingForecastHours"], [0, 2])
+        self.assertEqual(index["status"], "partial")
 
     def test_pipeline_passes_requested_hour_requirement_to_cycle_detection(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -1479,7 +1530,8 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             row = hour_metadata["ingredientSample"]["gridRow"]
             col = hour_metadata["ingredientSample"]["gridCol"]
             self.assertEqual((row, col), (2, 2))
-            self.assertEqual(hour_metadata["region"]["focusMethod"], "highest_category_peak_probability")
+            self.assertEqual(hour_metadata["region"]["focusHazard"], "hail")
+            self.assertEqual(hour_metadata["region"]["focusMethod"], "highest_hail_probability")
             ingredients = hour_metadata["ingredients"]
             self.assertAlmostEqual(ingredients["mlcape"], float(fields["cape_ml"][row, col]))
             self.assertAlmostEqual(ingredients["mucape"], float(fields["cape_mu"][row, col]))
@@ -1497,6 +1549,54 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 json.loads((output_dir / "hours" / "f01" / "metadata.json").read_text(encoding="utf-8"))["status"],
                 "failed",
             )
+
+    def test_risk_center_locator_prioritizes_tornado_probability(self) -> None:
+        lats = np.array([30.0, 31.0, 32.0])
+        lons = np.array([-100.0, -99.0, -98.0])
+        category_grid = np.full((3, 3), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        category_grid[2, 2] = SPC_RISK_LABELS.index("ENH")
+        tornado = np.zeros((3, 3), dtype=float)
+        hail = np.zeros((3, 3), dtype=float)
+        wind = np.zeros((3, 3), dtype=float)
+        tornado[0, 0] = 0.02
+        hail[1, 1] = 0.45
+        wind[2, 2] = 0.60
+
+        region = _region_from_max_risk_grid(
+            lats,
+            lons,
+            category_grid,
+            {"tornado": tornado, "hail": hail, "wind": wind},
+            {"type": "FeatureCollection", "features": []},
+        )
+
+        self.assertEqual(region["focusHazard"], "tornado")
+        self.assertEqual(region["focusMethod"], "highest_tornado_probability")
+        self.assertEqual((region["centerLat"], region["centerLon"]), (30.0, -100.0))
+        self.assertAlmostEqual(region["focusProbability"], 0.02)
+
+    def test_risk_center_locator_falls_back_to_highest_wind_or_hail_probability(self) -> None:
+        lats = np.array([30.0, 31.0, 32.0])
+        lons = np.array([-100.0, -99.0, -98.0])
+        category_grid = np.full((3, 3), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        tornado = np.zeros((3, 3), dtype=float)
+        hail = np.zeros((3, 3), dtype=float)
+        wind = np.zeros((3, 3), dtype=float)
+        wind[2, 0] = 0.30
+        hail[0, 2] = 0.55
+
+        region = _region_from_max_risk_grid(
+            lats,
+            lons,
+            category_grid,
+            {"tornado": tornado, "hail": hail, "wind": wind},
+            {"type": "FeatureCollection", "features": []},
+        )
+
+        self.assertEqual(region["focusHazard"], "hail")
+        self.assertEqual(region["focusMethod"], "highest_hail_probability")
+        self.assertEqual((region["centerLat"], region["centerLon"]), (30.0, -98.0))
+        self.assertAlmostEqual(region["focusProbability"], 0.55)
 
     def test_generated_risk_map_keeps_less_strict_generated_contours(self) -> None:
         cycle = HrrrCycle("20240504", 12)

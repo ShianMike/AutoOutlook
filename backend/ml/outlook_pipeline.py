@@ -128,6 +128,12 @@ class GcsRunLock:
     generation: int | None
 
 
+@dataclass(frozen=True)
+class CloudRunTaskShard:
+    index: int
+    count: int
+
+
 def run_pipeline(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
@@ -394,6 +400,7 @@ def run_pipeline(
 def run_incremental_pipeline(
     output_dir: Path = DEFAULT_INCREMENTAL_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
+    process_forecast_hours: Iterable[int] | None = None,
     now: datetime | None = None,
     max_workers: int | None = None,
     hour_workers: int | None = None,
@@ -421,8 +428,12 @@ def run_incremental_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "hours").mkdir(parents=True, exist_ok=True)
-    requested_force_hours = set(resolve_forecast_hours(forecast_hours))
-    hours = sorted(requested_force_hours)
+    hours = resolve_forecast_hours(forecast_hours)
+    if process_forecast_hours is None:
+        process_requested_hours = list(hours)
+    else:
+        process_requested_hours = _resolve_process_forecast_hours(process_forecast_hours, hours)
+    requested_force_hours = set(process_requested_hours)
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=True)
     required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
     hour_workers = _resolve_worker_count(hour_workers, DEFAULT_HOUR_WORKERS)
@@ -497,6 +508,7 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
+                "processForecastHours": process_requested_hours,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata),
                 "readyForecastHours": ready,
                 "failedForecastHours": failed,
@@ -528,7 +540,7 @@ def run_incremental_pipeline(
 
         index = write_index("running")
         process_hours: list[int] = []
-        for forecast_hour in hours:
+        for forecast_hour in process_requested_hours:
             if stop_after_hour is not None and forecast_hour > stop_after_hour:
                 continue
             should_force_hour = force and forecast_hour in requested_force_hours
@@ -642,7 +654,8 @@ def run_incremental_pipeline(
             _write_pending_incremental_hour(output_dir, pending_from, FileNotFoundError(hour_ref(cycle, pending_from).idx_url))
             index = write_index("partial")
         else:
-            status = "partial" if stop_after_hour is not None or failed_hours else "complete"
+            all_requested_ready = set(hours).issubset({int(hour) for hour in ready_hours})
+            status = "complete" if all_requested_ready and stop_after_hour is None and not failed_hours else "partial"
             index = write_index(status)
         complete_dir = _incremental_complete_output_dir(output_dir)
         complete_snapshot_ready = _incremental_index_covers_requested_hours(
@@ -665,6 +678,7 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
+                "processForecastHours": process_requested_hours if "process_requested_hours" in locals() else hours,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata if "cycle_detection_metadata" in locals() else {
                     "requestedForecastHours": hours,
                     "requiredForecastHourForCycle": required_forecast_hour,
@@ -890,6 +904,21 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _resolve_process_forecast_hours(
+    process_forecast_hours: Iterable[int],
+    requested_forecast_hours: Iterable[int],
+) -> list[int]:
+    requested = set(resolve_forecast_hours(requested_forecast_hours))
+    selected = sorted({int(hour) for hour in process_forecast_hours})
+    invalid = [hour for hour in selected if hour < 0 or hour > 48]
+    if invalid:
+        raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
+    unknown = [hour for hour in selected if hour not in requested]
+    if unknown:
+        raise ValueError(f"Process forecast hours must be a subset of requested forecast hours: {unknown}")
+    return selected
+
+
 def _normalize_fetched_hour(
     ref: HrrrHourRef,
     result: tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour,
@@ -1050,21 +1079,16 @@ def _region_from_max_risk_grid(
     if category_arr.ndim != 2 or lat_grid.shape != category_arr.shape or lon_grid.shape != category_arr.shape:
         return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
 
-    probability_peak = _probability_peak_grid(probabilities, category_arr.shape)
-    if probability_peak is None:
-        probability_peak = np.zeros(category_arr.shape, dtype=float)
-
-    peak_category = int(np.nanmax(category_arr)) if category_arr.size else 0
-    if peak_category > 0:
-        target_mask = category_arr == peak_category
-        method = "highest_category_peak_probability"
-    else:
-        finite_prob = probability_peak[np.isfinite(probability_peak)]
-        if finite_prob.size == 0 or float(np.nanmax(finite_prob)) <= 0:
-            return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
-        peak_value = float(np.nanmax(finite_prob))
-        target_mask = probability_peak >= max(peak_value * 0.75, peak_value - 0.01)
-        method = "highest_probability"
+    focus = _prioritized_focus_probability_grid(probabilities, category_arr.shape)
+    if focus is None:
+        return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+    focus_hazard, probability_peak = focus
+    finite_prob = probability_peak[np.isfinite(probability_peak)]
+    if finite_prob.size == 0 or float(np.nanmax(finite_prob)) <= 0:
+        return _region_from_risk_polygons(fallback_polygons, _forecast_category_from_grid(category_arr))
+    peak_value = float(np.nanmax(finite_prob))
+    target_mask = probability_peak >= max(peak_value * 0.75, peak_value - 0.01)
+    method = f"highest_{focus_hazard}_probability"
 
     seed = _max_probability_index(probability_peak, target_mask)
     if seed is None:
@@ -1078,6 +1102,7 @@ def _region_from_max_risk_grid(
 
     center_lat = float(lat_grid[seed])
     center_lon = float(lon_grid[seed])
+    focus_category = int(category_arr[seed]) if category_arr.size else 0
     bbox = _bbox_for_grid_component(component_lats, component_lons, lat_grid, lon_grid)
     return {
         "label": "Highlighted corridor",
@@ -1085,24 +1110,55 @@ def _region_from_max_risk_grid(
         "centerLon": center_lon,
         "bbox": bbox,
         "states": [],
-        "focusCategory": SPC_RISK_LABELS[peak_category] if 0 <= peak_category < len(SPC_RISK_LABELS) else "NONE",
+        "focusCategory": SPC_RISK_LABELS[focus_category] if 0 <= focus_category < len(SPC_RISK_LABELS) else "NONE",
+        "focusHazard": focus_hazard,
         "focusMethod": method,
         "focusProbability": float(probability_peak[seed]) if np.isfinite(probability_peak[seed]) else 0.0,
     }
 
 
-def _probability_peak_grid(probabilities: Mapping[str, np.ndarray], shape: tuple[int, int]) -> np.ndarray | None:
-    grids = []
-    for hazard in ("tornado", "hail", "wind"):
-        value = probabilities.get(hazard)
-        if value is None:
-            continue
-        arr = np.asarray(value, dtype=float)
-        if arr.shape == shape:
-            grids.append(np.where(np.isfinite(arr), arr, 0.0))
-    if not grids:
+def _prioritized_focus_probability_grid(
+    probabilities: Mapping[str, np.ndarray],
+    shape: tuple[int, int],
+) -> tuple[str, np.ndarray] | None:
+    tornado = _hazard_probability_grid(probabilities, "tornado", shape)
+    tornado_max = _finite_grid_max(tornado)
+    if tornado is not None and tornado_max > 0:
+        return "tornado", tornado
+
+    fallback: list[tuple[float, int, str, np.ndarray]] = []
+    for priority, hazard in enumerate(("wind", "hail")):
+        grid = _hazard_probability_grid(probabilities, hazard, shape)
+        peak = _finite_grid_max(grid)
+        if grid is not None and peak > 0:
+            fallback.append((peak, -priority, hazard, grid))
+    if not fallback:
         return None
-    return np.maximum.reduce(grids)
+    _, _, hazard, grid = max(fallback, key=lambda item: (item[0], item[1]))
+    return hazard, grid
+
+
+def _hazard_probability_grid(
+    probabilities: Mapping[str, np.ndarray],
+    hazard: str,
+    shape: tuple[int, int],
+) -> np.ndarray | None:
+    value = probabilities.get(hazard)
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=float)
+    if arr.shape != shape:
+        return None
+    return np.where(np.isfinite(arr), arr, 0.0)
+
+
+def _finite_grid_max(grid: np.ndarray | None) -> float:
+    if grid is None:
+        return 0.0
+    finite = grid[np.isfinite(grid)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.nanmax(finite))
 
 
 def _max_probability_index(probability_peak: np.ndarray, mask: np.ndarray) -> tuple[int, int] | None:
@@ -1564,6 +1620,72 @@ def _publish_incremental_artifacts_to_gcs(
     return result
 
 
+def _finalize_sharded_incremental_snapshot(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    requested_hours: Iterable[int],
+    bucket_name: str,
+    prefix: str = "",
+    timeout_seconds: int = 2700,
+    poll_seconds: int = 20,
+) -> dict[str, Any]:
+    requested = resolve_forecast_hours(requested_hours)
+    output_dir = Path(output_dir)
+    started = time.perf_counter()
+    deadline = started + max(1, int(timeout_seconds))
+    poll = max(1, int(poll_seconds))
+    cycle_time_iso = str(index.get("cycleTimeISO") or "")
+    last_payload = dict(index)
+
+    while True:
+        _hydrate_incremental_artifacts_from_gcs(output_dir, bucket_name, prefix)
+        ready = [
+            hour
+            for hour in requested
+            if _incremental_hour_ready(output_dir, hour, cycle_time_iso=cycle_time_iso)
+        ]
+        failed_hours = _failed_incremental_hours_for_cycle(output_dir, requested, cycle_time_iso)
+        failed = sorted({int(item["forecastHour"]) for item in failed_hours})
+        pending = [hour for hour in requested if hour not in ready and hour not in failed]
+        status = "complete" if not pending and not failed else "partial"
+        last_payload = {
+            **dict(index),
+            "generatedAtISO": _now_iso(),
+            "requestedForecastHours": requested,
+            "processForecastHours": requested,
+            "readyForecastHours": ready,
+            "failedForecastHours": failed,
+            "failedHours": failed_hours,
+            "pendingForecastHours": pending,
+            "latestReadyForecastHour": ready[-1] if ready else None,
+            "status": status,
+            "taskShardFinalized": True,
+            "taskShardFinalizeLatencyMs": int((time.perf_counter() - started) * 1000),
+        }
+        _write_json(output_dir / "index.json", last_payload)
+        _write_json(output_dir / "metadata.json", last_payload)
+        if status == "complete":
+            _publish_complete_incremental_snapshot(output_dir, last_payload, requested)
+            _publish_incremental_artifacts_to_gcs(output_dir, last_payload, requested, bucket_name, prefix)
+            print(
+                f"[task shard finalize] complete ready={len(ready)} requested={len(requested)}",
+                flush=True,
+            )
+            return last_payload
+        if time.perf_counter() >= deadline:
+            _publish_incremental_artifacts_to_gcs(output_dir, last_payload, requested, bucket_name, prefix)
+            print(
+                f"[task shard finalize] timeout ready={len(ready)} pending={len(pending)} failed={len(failed)}",
+                flush=True,
+            )
+            return last_payload
+        print(
+            f"[task shard finalize] waiting ready={len(ready)} pending={len(pending)} failed={len(failed)}",
+            flush=True,
+        )
+        time.sleep(poll)
+
+
 def _hydrate_incremental_artifacts_from_gcs(
     output_dir: Path,
     bucket_name: str,
@@ -1796,14 +1918,60 @@ def _clear_incremental_hour_artifact(output_dir: Path, forecast_hour: int) -> No
         shutil.rmtree(hour_dir, ignore_errors=True)
 
 
-def _incremental_hour_ready(output_dir: Path, forecast_hour: int) -> bool:
+def _incremental_hour_ready(output_dir: Path, forecast_hour: int, cycle_time_iso: str | None = None) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
     if not all(
         (hour_dir / name).exists()
         for name in ("risk_polygons.geojson", "probability_tile.json", "upper_air_overlay.json", "metadata.json")
     ):
         return False
-    return _incremental_metadata_has_focus_fields(hour_dir / "metadata.json")
+    metadata_path = hour_dir / "metadata.json"
+    return (
+        _incremental_metadata_has_focus_fields(metadata_path)
+        and _incremental_metadata_matches_cycle(metadata_path, forecast_hour, cycle_time_iso)
+    )
+
+
+def _incremental_metadata_matches_cycle(path: Path, forecast_hour: int, cycle_time_iso: str | None = None) -> bool:
+    if not cycle_time_iso:
+        return True
+    cycle_time = _parse_iso(cycle_time_iso)
+    if cycle_time is None:
+        return True
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        valid_time = _parse_iso(metadata.get("validTimeISO"))
+    except Exception:
+        return False
+    if valid_time is None:
+        return False
+    expected = cycle_time + timedelta(hours=int(forecast_hour))
+    return abs((valid_time - expected).total_seconds()) <= 60
+
+
+def _failed_incremental_hours_for_cycle(
+    output_dir: Path,
+    requested_hours: Iterable[int],
+    cycle_time_iso: str | None,
+) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for forecast_hour in requested_hours:
+        metadata_path = output_dir / "hours" / f"f{int(forecast_hour):02d}" / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if metadata.get("status") != "failed":
+            continue
+        if cycle_time_iso and not _incremental_metadata_matches_cycle(metadata_path, int(forecast_hour), cycle_time_iso):
+            continue
+        failed.append({
+            "forecastHour": int(forecast_hour),
+            "stage": metadata.get("stage", "incremental"),
+            "error": metadata.get("error", "failed"),
+            "generatedAtISO": metadata.get("generatedAtISO"),
+        })
+    return failed
 
 
 def _incremental_metadata_has_focus_fields(path: Path) -> bool:
@@ -2130,6 +2298,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gcs-lock-bucket", default=os.environ.get("AUTOOUTLOOK_RUN_LOCK_BUCKET", ""), help="Cloud Storage bucket used for best-effort overlap prevention.")
     parser.add_argument("--gcs-lock-name", default=os.environ.get("AUTOOUTLOOK_RUN_LOCK_NAME", "locks/autooutlook-artifact-refresh.lock"), help="Object name used for the overlap-prevention lock.")
     parser.add_argument("--gcs-lock-ttl-seconds", type=int, default=DEFAULT_GCS_LOCK_TTL_SECONDS, help="Seconds before an abandoned GCS run lock may be replaced.")
+    parser.add_argument("--task-shard-finalize-timeout-seconds", type=int, default=_env_int("AUTOOUTLOOK_TASK_SHARD_FINALIZE_TIMEOUT_SECONDS", 2700), help="Seconds task 0 waits for all task-sharded incremental hours before publishing the complete snapshot.")
+    parser.add_argument("--task-shard-finalize-poll-seconds", type=int, default=_env_int("AUTOOUTLOOK_TASK_SHARD_FINALIZE_POLL_SECONDS", 20), help="Seconds between task-shard finalization GCS hydrate checks.")
     args = parser.parse_args()
     if args.all_hours and args.forecast_hours:
         parser.error("--all-hours cannot be combined with --forecast-hours")
@@ -2148,21 +2318,56 @@ def resolve_cli_forecast_hours(args: argparse.Namespace) -> list[int]:
     return forecast_hours
 
 
+def cloud_run_task_shard_from_env(environ: Mapping[str, str] | None = None) -> CloudRunTaskShard | None:
+    env = environ if environ is not None else os.environ
+    raw_count = _optional_int(env.get("CLOUD_RUN_TASK_COUNT"))
+    raw_index = _optional_int(env.get("CLOUD_RUN_TASK_INDEX"))
+    if raw_count is None or raw_index is None or raw_count <= 1:
+        return None
+    if raw_index < 0 or raw_index >= raw_count:
+        raise ValueError(f"CLOUD_RUN_TASK_INDEX must be in 0..{raw_count - 1}: {raw_index}")
+    return CloudRunTaskShard(index=raw_index, count=raw_count)
+
+
+def resolve_cloud_run_task_forecast_hours(
+    forecast_hours: Iterable[int],
+    task_shard: CloudRunTaskShard | None,
+) -> list[int]:
+    hours = resolve_forecast_hours(forecast_hours)
+    if task_shard is None:
+        return hours
+    return [
+        hour
+        for ordinal, hour in enumerate(hours)
+        if ordinal % task_shard.count == task_shard.index
+    ]
+
+
+def _task_sharded_lock_name(lock_name: str, task_shard: CloudRunTaskShard | None) -> str:
+    clean = lock_name.strip().strip("/")
+    if task_shard is None:
+        return clean
+    return f"{clean}.task-{task_shard.index:02d}"
+
+
 def main() -> None:
     args = parse_args()
     incremental_mode = args.incremental or args.publish_each_hour
     forecast_hours = resolve_cli_forecast_hours(args)
+    task_shard = cloud_run_task_shard_from_env() if incremental_mode else None
+    process_forecast_hours = resolve_cloud_run_task_forecast_hours(forecast_hours, task_shard)
     cycle_policy = resolve_cycle_policy(args.cycle_policy, incremental=incremental_mode)
     output_dir = args.output_dir or (DEFAULT_INCREMENTAL_OUTPUT_DIR if incremental_mode else DEFAULT_OUTPUT_DIR)
     run_lock = None
     if args.gcs_lock_bucket:
-        run_lock = _try_acquire_gcs_run_lock(args.gcs_lock_bucket, args.gcs_lock_name, args.gcs_lock_ttl_seconds)
+        lock_name = _task_sharded_lock_name(args.gcs_lock_name, task_shard)
+        run_lock = _try_acquire_gcs_run_lock(args.gcs_lock_bucket, lock_name, args.gcs_lock_ttl_seconds)
         if run_lock is None:
             print(json.dumps({
                 "status": "skipped",
                 "reason": "run_lock_held",
                 "lockBucket": args.gcs_lock_bucket,
-                "lockName": args.gcs_lock_name,
+                "lockName": lock_name,
             }, indent=2))
             return
     try:
@@ -2173,6 +2378,7 @@ def main() -> None:
                 metadata = run_incremental_pipeline(
                     output_dir=output_dir,
                     forecast_hours=forecast_hours,
+                    process_forecast_hours=process_forecast_hours,
                     max_workers=args.max_workers,
                     hour_workers=args.hour_workers,
                     range_workers=args.range_workers,
@@ -2190,6 +2396,16 @@ def main() -> None:
                     publish_gcs_bucket=args.publish_gcs_bucket,
                     publish_gcs_prefix=args.publish_gcs_prefix,
                 )
+                if task_shard is not None and task_shard.index == 0 and args.publish_gcs_bucket:
+                    metadata = _finalize_sharded_incremental_snapshot(
+                        output_dir,
+                        metadata,
+                        forecast_hours,
+                        args.publish_gcs_bucket,
+                        args.publish_gcs_prefix,
+                        timeout_seconds=args.task_shard_finalize_timeout_seconds,
+                        poll_seconds=args.task_shard_finalize_poll_seconds,
+                    )
             else:
                 metadata = run_pipeline(
                     output_dir=output_dir,
@@ -2213,6 +2429,8 @@ def main() -> None:
                 "latencyMs": metadata["latencyMs"],
                 "hourWorkers": metadata.get("hourWorkers"),
                 "rangeWorkers": metadata.get("rangeWorkers"),
+                "taskShard": {"index": task_shard.index, "count": task_shard.count} if task_shard else None,
+                "processForecastHours": metadata.get("processForecastHours"),
                 "gridStride": metadata.get("gridStride"),
                 "tileStride": metadata.get("tileStride"),
             }, indent=2))
