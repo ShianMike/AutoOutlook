@@ -946,7 +946,7 @@ def _build_hour_artifact(
         fetched.lats,
         fetched.lons,
         post_result.category_grid,
-        cap_result.probabilities,
+        final_probability_result.probabilities,
         polygons,
     )
     ingredients, ingredient_sample = _point_sampled_ingredients(features, fetched.lats, fetched.lons, region)
@@ -1064,7 +1064,14 @@ def _max_probability_index(probability_peak: np.ndarray, mask: np.ndarray) -> tu
     if not np.any(valid):
         return None
     scores = np.where(valid, probability_peak, -np.inf)
-    return tuple(int(x) for x in np.unravel_index(int(np.nanargmax(scores)), scores.shape))
+    max_score = float(np.nanmax(scores))
+    candidates = np.argwhere(np.isclose(scores, max_score, rtol=1e-6, atol=1e-9))
+    if candidates.size == 0:
+        return tuple(int(x) for x in np.unravel_index(int(np.nanargmax(scores)), scores.shape))
+    center = np.mean(candidates, axis=0)
+    distances = np.sum((candidates - center) ** 2, axis=1)
+    row, col = candidates[int(np.argmin(distances))]
+    return int(row), int(col)
 
 
 def _connected_component(mask: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
@@ -1442,24 +1449,27 @@ def _publish_complete_incremental_snapshot(
         return
     complete_dir = _incremental_complete_output_dir(output_dir)
     complete_dir.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir = complete_dir.with_name(f"{complete_dir.name}.tmp")
-    backup_dir = complete_dir.with_name(f"{complete_dir.name}.previous")
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir, ignore_errors=True)
-    shutil.copytree(output_dir, tmp_dir)
-    try:
-        if complete_dir.exists():
-            shutil.move(str(complete_dir), str(backup_dir))
-        shutil.move(str(tmp_dir), str(complete_dir))
-    except Exception:
-        shutil.rmtree(complete_dir, ignore_errors=True)
-        if backup_dir.exists():
-            shutil.move(str(backup_dir), str(complete_dir))
-        raise
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        shutil.rmtree(backup_dir, ignore_errors=True)
+    complete_dir.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(path for path in output_dir.rglob("*") if path.is_file())
+    for source in files:
+        relative = source.relative_to(output_dir)
+        if relative == Path("index.json"):
+            continue
+        _copy_file_atomic(source, complete_dir / relative)
+
+    # Publish the index last so readers only switch to the new complete snapshot
+    # after all referenced per-hour artifacts are present.
+    _write_json(complete_dir / "index.json", index)
+
+
+def _copy_file_atomic(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_name(f"{destination.name}.tmp")
+    if tmp.exists():
+        tmp.unlink()
+    shutil.copyfile(source, tmp)
+    tmp.replace(destination)
 
 
 def _incremental_complete_output_dir(output_dir: Path) -> Path:
@@ -1541,10 +1551,34 @@ def _clear_incremental_hour_artifact(output_dir: Path, forecast_hour: int) -> No
 
 def _incremental_hour_ready(output_dir: Path, forecast_hour: int) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
-    return all(
+    if not all(
         (hour_dir / name).exists()
         for name in ("risk_polygons.geojson", "probability_tile.json", "upper_air_overlay.json", "metadata.json")
-    )
+    ):
+        return False
+    return _incremental_metadata_has_focus_fields(hour_dir / "metadata.json")
+
+
+def _incremental_metadata_has_focus_fields(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    region = payload.get("region")
+    ingredients = payload.get("ingredients")
+    sample = payload.get("ingredientSample")
+    if not isinstance(region, dict) or not isinstance(ingredients, dict) or not isinstance(sample, dict):
+        return False
+    try:
+        center_lat = float(region.get("centerLat"))
+        center_lon = float(region.get("centerLon"))
+        int(sample.get("gridRow"))
+        int(sample.get("gridCol"))
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(center_lat) and np.isfinite(center_lon))
 
 
 def _int_list(value: Any) -> list[int]:

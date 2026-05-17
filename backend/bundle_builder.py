@@ -229,19 +229,50 @@ def _classify_signal(value: float, thresholds: tuple[float, float, float]) -> st
 
 def _classify_cap(cin: float) -> str:
     a = abs(cin)
-    if a >= 200: return "strong"
-    if a >= 100: return "moderate"
-    if a >= 25:  return "weak"
+    if a >= 150: return "strong"
+    if a >= 50:  return "moderate"
+    if a >= 15:  return "weak"
     return "none"
 
 
-def _classify_storm_mode(shear_kt: float, srh03: float, front: str) -> str:
-    if front == "strong" and shear_kt >= 35: return "linear"
-    if front == "strong" and shear_kt >= 25: return "mixed"
-    if front == "moderate" and shear_kt >= 30: return "mixed"
-    if shear_kt >= 40 and srh03 >= 200: return "discrete"
-    if shear_kt < 20: return "multicell"
+def _classify_storm_mode(
+    shear_kt: float,
+    srh03: float,
+    front: str,
+    boundary_kind: str | None = None,
+) -> str:
+    if shear_kt < 25:
+        return "multicell"
+    supercell_signal = shear_kt >= 40 and srh03 >= 150
+    if boundary_kind in {"dryline", "triple-point"} and supercell_signal:
+        return "discrete"
+    if front == "strong" and boundary_kind == "frontal" and supercell_signal:
+        return "mixed"
+    if front == "strong" and shear_kt < 45 and srh03 < 200:
+        return "linear"
+    if supercell_signal:
+        return "discrete"
     return "mixed"
+
+
+def _initiation_confidence(front: str, cin: float, cape: float, td_f: float) -> float:
+    forcing_factor = {
+        "strong": 0.90,
+        "moderate": 0.60,
+        "weak": 0.30,
+        "none": 0.08,
+    }.get(front, 0.08)
+    cap_relief = np.clip((200.0 + cin) / 150.0, 0.0, 1.0)
+    moisture_factor = np.clip((td_f - 50.0) / 18.0, 0.0, 1.0)
+    cape_floor = np.clip(cape / 1000.0, 0.0, 1.0)
+    return float(np.clip(
+        0.50 * forcing_factor +
+        0.30 * cap_relief +
+        0.10 * moisture_factor +
+        0.10 * cape_floor,
+        0.0,
+        1.0,
+    ))
 
 
 def _ingredients_at_point(
@@ -250,6 +281,7 @@ def _ingredients_at_point(
     shear_kt: float, srh01: float, srh03: float, sr_wind_kt: float,
     composites: dict[str, float],
     front_override: str | None = None,
+    boundary_kind: str | None = None,
 ) -> dict[str, Any]:
     sbcape = max(0.0, surface_cape) if np.isfinite(surface_cape) else 0.0
     mlcape = max(0.0, mlcape) if np.isfinite(mlcape) else sbcape * 0.85
@@ -257,17 +289,10 @@ def _ingredients_at_point(
     cin = min(0.0, cin) if np.isfinite(cin) else 0.0
     td_F = (td2m_K - 273.15) * 9 / 5 + 32 if np.isfinite(td2m_K) else 50.0
     pwat_in = (pwat_kg_m2 / 25.4) if np.isfinite(pwat_kg_m2) else 0.8
-    front = front_override or _classify_signal(shear_kt, (15, 25, 35))
+    front = front_override or "none"
     cap = _classify_cap(cin)
-    cap_factor = 1.0 if cap != "strong" else 0.4
-    forcing_boost = {
-        "strong": 0.20,
-        "moderate": 0.10,
-        "weak": 0.03,
-        "none": 0.0,
-    }.get(front, 0.0)
-    init_conf = float(np.clip((mlcape / 2500.0) * cap_factor + forcing_boost, 0, 1))
-    storm_mode = _classify_storm_mode(shear_kt, srh03, front)
+    init_conf = _initiation_confidence(front, cin, mlcape, td_F)
+    storm_mode = _classify_storm_mode(shear_kt, srh03, front, boundary_kind)
     if np.isfinite(t2m_K) and np.isfinite(td2m_K):
         lcl_m = float(np.clip(125.0 * max(0.0, t2m_K - td2m_K), 100.0, 3500.0))
     else:
@@ -501,6 +526,7 @@ def _hour_payload_from_fields(
         sr_wind,
         comps_scalar,
         _surface_boundary_signal(surface_boundary),
+        surface_boundary.get("kind") if surface_boundary else None,
     )
     payload = {
         "forecastHour": h,
@@ -843,7 +869,9 @@ def _quick_area_score_field(cape: np.ndarray, shear_kt: np.ndarray, td_f: np.nda
 
 def _quick_area_ingredients(cape: float, shear_kt: float, td_f: float, cin: float) -> dict[str, Any]:
     cap = _classify_cap(cin)
-    front = _classify_signal(shear_kt, (18, 30, 42))
+    front = "none"
+    srh01 = float(max(0.0, (shear_kt - 25.0) * 3.0))
+    srh03 = float(max(0.0, (shear_kt - 20.0) * 5.0))
     return {
         "mlcape": float(max(0.0, cape * 0.85)),
         "mucape": float(max(0.0, cape)),
@@ -853,13 +881,13 @@ def _quick_area_ingredients(cape: float, shear_kt: float, td_f: float, cin: floa
         "pwatIn": float(1.5 if td_f >= 68 else 1.2 if td_f >= 60 else 0.9),
         "lclM": float(np.clip(1700.0 - max(td_f - 50.0, 0.0) * 55.0, 350.0, 2200.0)),
         "moistureDepthM": float(2500.0 if td_f >= 65 else 1800.0),
-        "srh01": float(max(0.0, (shear_kt - 25.0) * 3.0)),
-        "srh03": float(max(0.0, (shear_kt - 20.0) * 5.0)),
+        "srh01": srh01,
+        "srh03": srh03,
         "shear06Kt": float(max(0.0, shear_kt)),
         "stormRelWindKt": float(max(0.0, shear_kt * 0.5)),
         "frontSignal": front,
-        "initiationConf": float(np.clip((cape / 2500.0) + (0.20 if front == "strong" else 0.10 if front == "moderate" else 0.03), 0.0, 1.0)),
-        "stormMode": "mixed" if shear_kt >= 30 else "multicell",
+        "initiationConf": _initiation_confidence(front, min(0.0, cin), cape * 0.85, td_f),
+        "stormMode": _classify_storm_mode(shear_kt, srh03, front),
         "capStrength": cap,
         "stp": 0.0,
         "scp": float(np.clip((cape / 1000.0) * (shear_kt / 25.0), 0.0, 8.0)),

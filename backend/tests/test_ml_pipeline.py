@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import numpy as np
 
+from backend import metpy_diagnostics as diag
+from backend.bundle_builder import _classify_cap, _classify_storm_mode, _ingredients_at_point
 from backend.ml.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, feature_row, feature_schema_hash
 from backend.ml.gather_archive import (
     NEGATIVE_POINTS,
@@ -143,6 +145,65 @@ class MlPipelineTests(unittest.TestCase):
         self.assertIsInstance(ingredients["stp"], float)
         self.assertIsInstance(ingredients["scp"], float)
         self.assertIsInstance(ingredients["tornadoComposite"], float)
+
+    def test_spc_composite_shear_and_cin_terms_are_unit_correct(self) -> None:
+        weak_shear = diag.composites(
+            cape=np.array([1500.0]),
+            mlcape=np.array([1500.0]),
+            mucape=np.array([1000.0]),
+            shear_kt=np.array([15.0]),
+            srh01=np.array([150.0]),
+            srh03=np.array([50.0]),
+            cin=np.array([-25.0]),
+            td2m_K=np.array([293.15]),
+        )
+        self.assertEqual(float(weak_shear["stp"][0]), 0.0)
+        self.assertEqual(float(weak_shear["scp"][0]), 0.0)
+
+        inhibited = diag.composites(
+            cape=np.array([1500.0]),
+            mlcape=np.array([1500.0]),
+            mucape=np.array([1000.0]),
+            shear_kt=np.array([40.0]),
+            srh01=np.array([150.0]),
+            srh03=np.array([50.0]),
+            cin=np.array([-150.0]),
+            td2m_K=np.array([293.15]),
+        )
+        self.assertGreater(float(inhibited["stp"][0]), 0.25)
+        self.assertLess(float(inhibited["stp"][0]), 0.45)
+
+    def test_forcing_cap_and_mode_formulas_do_not_confuse_shear_with_forcing(self) -> None:
+        self.assertEqual(_classify_cap(-10), "none")
+        self.assertEqual(_classify_cap(-30), "weak")
+        self.assertEqual(_classify_cap(-80), "moderate")
+        self.assertEqual(_classify_cap(-175), "strong")
+
+        self.assertEqual(_classify_storm_mode(20, 250, "strong"), "multicell")
+        self.assertEqual(_classify_storm_mode(45, 180, "none"), "discrete")
+        self.assertEqual(_classify_storm_mode(45, 180, "strong", "frontal"), "mixed")
+        self.assertEqual(_classify_storm_mode(45, 180, "strong", "dryline"), "discrete")
+        self.assertEqual(_classify_storm_mode(53, 335, "strong"), "discrete")
+        self.assertEqual(_classify_storm_mode(53, 144, "strong"), "mixed")
+
+        composites = {"stp": 1.0, "scp": 2.0, "ehi": 1.0, "ship": 1.0, "tor_comp": 1.0}
+        ingredients = _ingredients_at_point(
+            surface_cape=3000.0,
+            mlcape=2500.0,
+            mucape=3200.0,
+            cin=-175.0,
+            td2m_K=294.15,
+            t2m_K=304.15,
+            pwat_kg_m2=35.0,
+            shear_kt=45.0,
+            srh01=120.0,
+            srh03=180.0,
+            sr_wind_kt=22.0,
+            composites=composites,
+        )
+        self.assertEqual(ingredients["frontSignal"], "none")
+        self.assertEqual(ingredients["stormMode"], "discrete")
+        self.assertLess(ingredients["initiationConf"], 0.35)
 
     def test_hrrr_ref_iterator_can_target_known_valid_hours(self) -> None:
         refs = list(iter_hrrr_refs(

@@ -98,15 +98,22 @@ def composites(
 
     cape_term = np.clip(mlcape_eff / 1500.0, 0, 1.5)
     srh_term  = np.clip(srh01 / 150.0, 0, 1.5)
-    shr_term  = np.clip((shear_kt - 12.5) / 12.5, 0, 1.5)
-    cin_term  = np.where(cin > -50, 1.0,
-                np.where(cin > -150, 1.0 - (np.abs(cin) - 50) / 100.0, 0.0))
+    shear_ms = shear_kt / KT_PER_MS
+    shr_term = np.where(shear_ms < 12.5, 0.0, np.clip(shear_ms / 20.0, 0.0, 1.5))
+    cin_term = np.clip((200.0 + cin) / 150.0, 0.0, 1.0)
     # Coarse LCL surrogate from Td near surface. Td > 65F => low LCL.
     td_F = (td2m_K - 273.15) * 9 / 5 + 32
     lcl_term = np.where(td_F >= 67, 1.0, np.clip((td_F - 50) / 17.0, 0, 1.0))
     stp = np.clip(cape_term * srh_term * shr_term * lcl_term * cin_term, 0, 6)
 
-    scp = np.clip((mucape_eff / 1000.0) * (np.clip(srh03_eff / 50, 0, 6)) * np.clip(shear_kt / 20, 0, 1.5), 0, 12)
+    scp_shear_term = np.where(shear_ms < 10.0, 0.0, np.minimum(shear_ms / 20.0, 1.0))
+    scp = np.clip(
+        (mucape_eff / 1000.0) *
+        np.maximum(srh03_eff, 0.0) / 50.0 *
+        scp_shear_term,
+        0,
+        12,
+    )
     ehi = (mlcape_eff * srh01) / 160_000.0
     ship = np.clip((mucape_eff / 2500.0) * (shear_kt / 30.0) * 0.6, 0, 6)
     tor_comp = stp * 0.6 + np.clip(srh01 / 200, 0, 1.5)

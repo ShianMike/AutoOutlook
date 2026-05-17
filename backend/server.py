@@ -27,7 +27,13 @@ from flask import abort, jsonify, send_file, send_from_directory, Flask  # noqa:
 from flask_cors import CORS  # noqa: E402
 
 from backend.cache import TTLCache  # noqa: E402
-from backend.bundle_builder import CONUS_CITIES, build_bundle  # noqa: E402
+from backend.bundle_builder import (  # noqa: E402
+    CONUS_CITIES,
+    _classify_cap,
+    _classify_storm_mode,
+    _initiation_confidence,
+    build_bundle,
+)
 from backend.nomads_pipeline import NomadsFetchError  # noqa: E402
 
 LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s :: %(message)s"
@@ -603,8 +609,33 @@ def _artifact_metadata_ingredients(
 ) -> dict:
     ingredients = metadata.get("ingredients") if isinstance(metadata, dict) else None
     if isinstance(ingredients, dict) and _valid_artifact_ingredients(ingredients):
-        return ingredients
+        return _normalize_artifact_ingredients(ingredients)
     return _artifact_ingredients(category, main_hazard, probabilities, forecast_hour)
+
+
+def _normalize_artifact_ingredients(ingredients: dict) -> dict:
+    normalized = dict(ingredients)
+    cin = _ingredient_float(normalized, "cin", 0.0)
+    mlcape = _ingredient_float(normalized, "mlcape", 0.0)
+    td_f = _ingredient_float(normalized, "sfcDewpointF", 50.0)
+    shear_kt = _ingredient_float(normalized, "shear06Kt", 0.0)
+    srh03 = _ingredient_float(normalized, "srh03", 0.0)
+    front = str(normalized.get("frontSignal") or "none")
+    if front not in {"none", "weak", "moderate", "strong"}:
+        front = "none"
+    normalized["frontSignal"] = front
+    normalized["capStrength"] = _classify_cap(cin)
+    normalized["initiationConf"] = _initiation_confidence(front, cin, mlcape, td_f)
+    normalized["stormMode"] = _classify_storm_mode(shear_kt, srh03, front)
+    return normalized
+
+
+def _ingredient_float(ingredients: dict, key: str, default: float) -> float:
+    try:
+        value = float(ingredients.get(key))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def _valid_region(region: dict) -> bool:

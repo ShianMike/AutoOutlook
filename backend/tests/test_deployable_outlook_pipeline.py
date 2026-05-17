@@ -46,6 +46,7 @@ from backend.ml.gridded_outlook import (
 from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
     PRODUCTION_FORECAST_HOURS,
+    _publish_complete_incremental_snapshot,
     _publish_working_dir,
     resolve_cycle_policy,
     resolve_forecast_hours,
@@ -1620,6 +1621,33 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(complete_index["status"], "complete")
         self.assertEqual(complete_index["readyForecastHours"], [0, 1])
 
+    def test_complete_snapshot_publish_avoids_directory_moves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            index = {
+                "status": "complete",
+                "readyForecastHours": [0],
+                "requestedForecastHours": [0],
+                "cycle": "new",
+            }
+            (output_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
+            for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
+                (hour_dir / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+
+            complete_dir = root / "latest_incremental_complete"
+            complete_dir.mkdir()
+            (complete_dir / "index.json").write_text(json.dumps({"cycle": "old"}), encoding="utf-8")
+
+            with patch("backend.ml.outlook_pipeline.shutil.move", side_effect=AssertionError("directory move should not run")):
+                _publish_complete_incremental_snapshot(output_dir, index, [0])
+
+            complete_index = json.loads((complete_dir / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(complete_index["cycle"], "new")
+            self.assertTrue((complete_dir / "hours" / "f00" / "probability_tile.json").exists())
+
     def test_incremental_pipeline_merges_existing_ready_hours(self) -> None:
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)
@@ -1716,6 +1744,61 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
             self.assertEqual(fetched_hours, [0, 0])
             self.assertTrue((output_dir / "hours" / "f00" / "upper_air_overlay.json").exists())
+
+    def test_incremental_pipeline_regenerates_old_hours_missing_focus_metadata(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        fetched_hours: list[int] = []
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(ref, _session):
+            fetched_hours.append(ref.forecast_hour)
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            probs[1:4, 1:4] = 0.20
+            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+            metadata_path = output_dir / "hours" / "f00" / "metadata.json"
+            stale_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            stale_metadata.pop("region")
+            stale_metadata.pop("ingredients")
+            stale_metadata.pop("ingredientSample")
+            metadata_path.write_text(json.dumps(stale_metadata), encoding="utf-8")
+
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+            )
+
+            regenerated = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(fetched_hours, [0, 0])
+            self.assertIn("region", regenerated)
+            self.assertIn("ingredients", regenerated)
+            self.assertIn("ingredientSample", regenerated)
 
     def test_pipeline_failure_preserves_previous_latest_artifacts(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -1982,9 +2065,9 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                     "srh03": 228.0,
                     "shear06Kt": 47.0,
                     "stormRelWindKt": 23.5,
-                    "frontSignal": "moderate",
-                    "initiationConf": 0.72,
-                    "stormMode": "mixed",
+                    "frontSignal": "strong",
+                    "initiationConf": 1.0,
+                    "stormMode": "linear",
                     "capStrength": "weak",
                     "stp": 1.4,
                     "scp": 3.2,
@@ -2058,6 +2141,9 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(payload["hours"][0]["region"]["centerLon"], -88.75)
             self.assertEqual(payload["hours"][0]["ingredients"]["mlcape"], 2222.0)
             self.assertEqual(payload["hours"][0]["ingredients"]["shear06Kt"], 47.0)
+            self.assertEqual(payload["hours"][0]["ingredients"]["stormMode"], "discrete")
+            self.assertEqual(payload["hours"][0]["ingredients"]["capStrength"], "moderate")
+            self.assertLess(payload["hours"][0]["ingredients"]["initiationConf"], 1.0)
             self.assertEqual(payload["hours"][0]["upperAirOverlay"]["domain"], "CONUS")
             self.assertTrue(payload["hours"][0]["upperAirOverlay"]["hasHeightContours"])
             self.assertTrue(payload["hours"][0]["upperAirOverlay"]["hasWindVectors"])

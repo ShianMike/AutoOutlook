@@ -81,6 +81,234 @@ const HAZARD_BANDS: HazardBand[] = [
   },
 ];
 
+interface ResearchSource {
+  title: string;
+  category: string;
+  source: string;
+  href: string;
+  usedFor: string;
+}
+
+const RESEARCH_SOURCES: ResearchSource[] = [
+  {
+    title: 'SPC Severe Weather Parameters',
+    category: 'SPC / Operations',
+    source: 'NOAA Storm Prediction Center',
+    href: 'https://origin-west-www-spc.woc.noaa.gov/exper/mesoanalysis/help/begin.html',
+    usedFor: 'Base ingredient definitions for instability, shear, storm-relative winds, SCP, STP, and SPC-style parameter interpretation.',
+  },
+  {
+    title: 'Significant Tornado Parameter',
+    category: 'Tornado Composite',
+    source: 'NOAA Storm Prediction Center',
+    href: 'https://origin-west-www-spc.woc.noaa.gov/exper/soundings/help/stp.html',
+    usedFor: 'STP term weights, shear handling, CIN handling, and the idea that significant tornado potential requires overlapping ingredients.',
+  },
+  {
+    title: 'Close-Proximity Supercell Soundings',
+    category: 'Supercell Soundings',
+    source: 'Thompson et al., Weather and Forecasting, 2003',
+    href: 'https://training.weather.gov/wdtd/courses/woc/severe/storm-structures-hazards/storm-modes/hodograph-srh/story_content/external_files/ruc_waf.pdf',
+    usedFor: 'Supercell environment calibration for CAPE, shear, SRH, LCL, and tornadic versus nontornadic parameter overlap.',
+  },
+  {
+    title: 'SCP / STP Parameter Update',
+    category: 'Composite Update',
+    source: 'Thompson, Edwards, and Mead, SPC, 2004',
+    href: 'https://ams.confex.com/ams/pdfpapers/82100.pdf',
+    usedFor: 'Updated SCP/STP formulation logic, including effective shear, effective SRH, and the CIN term used to reduce broad false-alarm areas.',
+  },
+  {
+    title: 'MetPy Significant Tornado',
+    category: 'Calculation Check',
+    source: 'Unidata MetPy',
+    href: 'https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.significant_tornado.html',
+    usedFor: 'Cross-checking fixed-layer STP units and threshold behavior against a maintained meteorological calculation library.',
+  },
+  {
+    title: 'MetPy Supercell Composite',
+    category: 'Calculation Check',
+    source: 'Unidata MetPy',
+    href: 'https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.supercell_composite.html',
+    usedFor: 'Cross-checking SCP ingredient normalization for instability, storm-relative helicity, and deep-layer shear.',
+  },
+  {
+    title: 'MetPy Storm-Relative Helicity',
+    category: 'Calculation Check',
+    source: 'Unidata MetPy',
+    href: 'https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.storm_relative_helicity.html',
+    usedFor: 'Reference calculation for SRH, which supports low-level rotation, mesocyclone, and tornado-favorability wording.',
+  },
+  {
+    title: 'MetPy Bulk Shear',
+    category: 'Calculation Check',
+    source: 'Unidata MetPy',
+    href: 'https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.bulk_shear.html',
+    usedFor: 'Reference calculation for deep-layer bulk shear used in organized storm, supercell, and storm-mode interpretation.',
+  },
+  {
+    title: 'MetPy LCL',
+    category: 'Calculation Check',
+    source: 'Unidata MetPy',
+    href: 'https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.lcl.html',
+    usedFor: 'Reference calculation for lifted condensation level, used in cloud-base and tornado-environment interpretation.',
+  },
+  {
+    title: 'Baseline Supercell Parameter Climatology',
+    category: 'Parameter Climatology',
+    source: 'Rasmussen and Blanchard, Weather and Forecasting, 1998',
+    href: 'https://training.weather.gov/wdtd/courses/rac/severe/parameters/rasmussenAndBlanchard1998.pdf',
+    usedFor: 'Context for sounding-derived supercell and tornado parameters, including CAPE, SRH, shear, EHI, VGP, and LCL interpretation.',
+  },
+  {
+    title: 'Baseline Severe Parameter Climatology',
+    category: 'Parameter Climatology',
+    source: 'Craven and Brooks, National Weather Digest, 2004',
+    href: 'https://www.nssl.noaa.gov/users/brooks/public_html/papers/cravenbrooksnwa.pdf',
+    usedFor: 'Broad severe-weather parameter ranges for thunderstorms, severe storms, significant hail/wind, and significant tornado environments.',
+  },
+  {
+    title: 'Storm-Relative Helicity',
+    category: 'SRH / Rotation',
+    source: 'Davies-Jones, Burgess, and Foster, NOAA/NWS, 1990',
+    href: 'https://repository.library.noaa.gov/view/noaa/7309',
+    usedFor: 'Low-level rotation and storm-relative helicity concepts used in tornado and supercell-favorability wording.',
+  },
+  {
+    title: 'NWS Helicity Glossary',
+    category: 'SRH / Rotation',
+    source: 'NOAA National Weather Service',
+    href: 'https://forecast.weather.gov/glossary.php?word=helicity',
+    usedFor: 'Plain-language SRH definition and operational threshold context for mid-level rotation and mesocyclone potential.',
+  },
+  {
+    title: 'Supercell Motion Hodograph Technique',
+    category: 'Storm Motion',
+    source: 'Bunkers et al., Weather and Forecasting, 2000',
+    href: 'https://www.weather.gov/media/unr/soo/scm/BKZTW00.pdf',
+    usedFor: 'Supercell motion and storm-relative inflow context behind SRH and right-moving supercell assumptions.',
+  },
+  {
+    title: 'Storm Shear and Buoyancy',
+    category: 'Shear / Instability',
+    source: 'Weisman and Klemp, Monthly Weather Review, 1982',
+    href: 'https://doi.org/10.1175/1520-0493(1982)110%3C0504:TDONSC%3E2.0.CO;2',
+    usedFor: 'Deep-layer shear and buoyancy relationships used to distinguish weak convection, multicells, and organized severe storms.',
+  },
+  {
+    title: 'Strong Long-Lived Squall Lines',
+    category: 'Linear Mode',
+    source: 'Rotunno, Klemp, and Weisman, Journal of the Atmospheric Sciences, 1988',
+    href: 'https://doi.org/10.1175/1520-0469(1988)045%3C0463:ATFSLL%3E2.0.CO;2',
+    usedFor: 'QLCS and squall-line context for linear storm-mode wording and shear/cold-pool organization.',
+  },
+  {
+    title: 'Convective Inhibition',
+    category: 'Capping',
+    source: 'NOAA / NWS Fort Worth',
+    href: 'https://www.weather.gov/fwd/convectiveparameterscin',
+    usedFor: 'Capping language and CIN interpretation: CIN as the strength of the cap, with small CIN more easily breakable.',
+  },
+  {
+    title: 'NWS Weather Glossary',
+    category: 'Moisture / Thermodynamics',
+    source: 'NOAA National Weather Service',
+    href: 'https://www.weather.gov/otx/Full_Weather_Glossary',
+    usedFor: 'Reference wording for dewpoint, precipitable water, lifted index, LCL, and moisture-related forecast terms.',
+  },
+  {
+    title: 'NWS Precipitable Water',
+    category: 'Moisture / PWAT',
+    source: 'NOAA National Weather Service',
+    href: 'https://forecast.weather.gov/glossary.php?word=pw',
+    usedFor: 'PWAT definition used for deep moisture and heavy-rain-favorability language.',
+  },
+  {
+    title: 'NWS Thunderstorm Ingredients',
+    category: 'Ingredients Framework',
+    source: 'NOAA National Weather Service',
+    href: 'https://www.weather.gov/source/zhu/ZHU_Training_Page/thunderstorm_stuff/Thunderstorms/thunderstorms.htm',
+    usedFor: 'Operational framing for moisture, instability, lift, and storm-relative wind shear as severe-thunderstorm ingredients.',
+  },
+  {
+    title: 'NWS Dryline Glossary',
+    category: 'Forcing / Boundaries',
+    source: 'NOAA National Weather Service',
+    href: 'https://www.weather.gov/ggw/GlossaryD',
+    usedFor: 'Dryline definition and severe-weather relevance for boundary forcing and initiation wording.',
+  },
+  {
+    title: 'NWS Outflow Boundary Reference',
+    category: 'Forcing / Boundaries',
+    source: 'NOAA National Weather Service',
+    href: 'https://www.weather.gov/gid/29139',
+    usedFor: 'Outflow-boundary definition and boundary-interaction context for initiation and local storm enhancement.',
+  },
+  {
+    title: 'NSHARP Hail and Tornado Reference',
+    category: 'Hail / Tornado Tools',
+    source: 'NOAA Virtual Lab',
+    href: 'https://vlab.noaa.gov/web/oclo/nsharp-hail-and-tornado-reference',
+    usedFor: 'Operational sounding-tool context for significant hail and tornado parameters, including SHIP/STP display conventions.',
+  },
+  {
+    title: 'Large Hail Environments and SHIP',
+    category: 'Hail Composite',
+    source: 'Tang et al., npj Climate and Atmospheric Science, 2019',
+    href: 'https://www.nature.com/articles/s41612-019-0103-7',
+    usedFor: 'Context for large-hail environments and SHIP/LHP as hail-discrimination parameters.',
+  },
+  {
+    title: 'Conditional Severe Hail and Wind Intensity',
+    category: 'Hail / Wind Intensity',
+    source: 'Jirak et al., NOAA/SPC',
+    href: 'https://origin-west-www-spc.woc.noaa.gov/publications/jirak/cond-int.pdf',
+    usedFor: 'Significant hail and wind intensity context behind higher-end severe hazard wording.',
+  },
+  {
+    title: 'Short-Term Convective Mode Evolution',
+    category: 'Storm Mode',
+    source: 'Dial, Racy, and Thompson, Weather and Forecasting, 2010',
+    href: 'https://training.weather.gov/wdtd/courses/woc/severe/storm-structures-hazards/storm-modes/understanding-sm/story_content/external_files/Dialetal2010.pdf',
+    usedFor: 'Storm-mode wording: boundary forcing matters, but linear, discrete, and mixed modes depend on shear, wind orientation, forcing, and residence time near the boundary.',
+  },
+  {
+    title: 'SPC Convective Outlooks',
+    category: 'Outlook Conventions',
+    source: 'NOAA Storm Prediction Center',
+    href: 'https://www.spc.noaa.gov/misc/SPC_probotlk_info.html',
+    usedFor: 'SPC-style categorical outlook framing, hazard probabilities, and significant-severe hatch terminology.',
+  },
+  {
+    title: 'SPC Severe Weather Reports',
+    category: 'Reports / Verification',
+    source: 'NOAA Storm Prediction Center',
+    href: 'https://origin-west-www-spc.woc.noaa.gov/wcm/index.html',
+    usedFor: 'Historical tornado, hail, and wind report context used for verification, climatology, and severe-weather outcome definitions.',
+  },
+  {
+    title: 'High-Resolution Rapid Refresh',
+    category: 'Model Data',
+    source: 'NOAA Global Systems Laboratory',
+    href: 'https://rapidrefresh.noaa.gov/hrrr/',
+    usedFor: 'HRRR model context for hourly, convection-allowing fields that feed the environmental ingredient dashboard.',
+  },
+  {
+    title: 'Rapid Refresh / HRRR Archive',
+    category: 'Model Data',
+    source: 'NOAA National Centers for Environmental Information',
+    href: 'https://www.ncei.noaa.gov/products/weather-climate-models/rapid-refresh-update',
+    usedFor: 'Archive and model-family context for RAP/HRRR fields used in historical gathering and forecast artifacts.',
+  },
+  {
+    title: 'HRRR System Description',
+    category: 'Model Data',
+    source: 'Dowell et al., Weather and Forecasting / NOAA Repository',
+    href: 'https://repository.library.noaa.gov/view/noaa/53029',
+    usedFor: 'Technical background for HRRR as an hourly updated, convection-allowing forecast model.',
+  },
+];
+
 // YIQ luminance contrast picker: returns ink for light backgrounds and
 // paper for dark ones, so the probability label stays legible on every
 // chip in the SPC color ramp (green/tan/red/magenta/purple/cyan/yellow).
@@ -108,6 +336,7 @@ interface GlossaryGroup {
   code: string;
   accent: GlossaryAccent;
   blurb: string;
+  note?: string;
   entries: GlossaryEntry[];
 }
 
@@ -152,12 +381,12 @@ const GLOSSARY: GlossaryGroup[] = [
     title: 'Forcing & Mode',
     code: 'FM',
     accent: 'orange',
-    blurb: 'Surface boundaries, initiation confidence, and the expected storm character.',
+    blurb: 'Surface boundaries, initiation confidence, capping, and the expected storm character.',
     entries: [
-      { term: 'Front signal',     unit: '',  definition: 'Strength of a surface boundary (cold front, dryline, outflow). Strong boundaries focus initiation. Reported as weak / moderate / strong.' },
-      { term: 'Initiation Conf.', unit: '%', favorable: '≥ 60', definition: 'Confidence that storms initiate over the focus region during the forecast hour.' },
-      { term: 'Storm Mode',       unit: '',  definition: 'Expected dominant mode: discrete supercells, multicell clusters, linear (QLCS), or mixed. Discrete favors tornadoes/hail; linear favors damaging wind.' },
-      { term: 'Capping',          unit: '',  definition: 'Strength of an inhibiting warm layer aloft. Strong cap suppresses storms; weak cap allows initiation. Reported as weak / moderate / strong.' },
+      { term: 'Front signal',     unit: '',  definition: 'Strength of a surface boundary such as a cold front, dryline, outflow boundary, or triple point. Stronger boundaries focus lift and initiation.' },
+      { term: 'Initiation Conf.', unit: '%', favorable: '≥ 60', definition: 'Confidence that storms initiate over the focus region during the forecast hour. It weighs boundary support, cap relief, moisture, and instability together.' },
+      { term: 'Storm Mode',       unit: '',  definition: 'Expected dominant mode: discrete supercells, multicell clusters, linear QLCS, or mixed. Mode helps frame the likely tornado, hail, and wind threat.' },
+      { term: 'Capping',          unit: '',  definition: 'Strength of the inhibiting warm layer aloft, based on CIN magnitude. Weak or moderate caps can still break; strong caps may suppress storms even in unstable air.' },
     ],
   },
   {
@@ -185,9 +414,9 @@ const GLOSSARY_ACCENT_BG: Record<GlossaryAccent, string> = {
 
 export default function DocumentationPage() {
   return (
-    <div className="flex flex-col">
+    <div className="flex min-w-0 flex-col">
       <DocsHero />
-      <main className="w-full min-w-0 flex-1 px-3 py-2 sm:px-4 xl:px-5 flex flex-col gap-3 xl:gap-4">
+      <main className="flex w-full min-w-0 flex-1 flex-col gap-3 px-3 py-2 sm:px-4 xl:gap-4 xl:px-5">
         <DocsOverview />
         <DocsLevels />
         <DocsPerformance />
@@ -196,6 +425,7 @@ export default function DocumentationPage() {
         <DocsSources />
         <DocsGlossary />
         <DocsDisclaimerSection />
+        <DocsResearchSources />
       </main>
     </div>
   );
@@ -220,7 +450,7 @@ function DocsHero() {
       </div>
       <div className="border-t-[2px] border-paper/20 bg-ink px-4 py-1.5 xl:px-5">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/55">
-          Eight sections · Architecture · Levels · Skill · Predictability · Bands · Providers · Glossary · Disclaimer
+          Nine sections · Architecture · Levels · Skill · Predictability · Bands · Providers · Glossary · Disclaimer · Research
         </span>
       </div>
     </header>
@@ -665,45 +895,39 @@ function DocsHazards() {
             SIG Layer
           </span>
           <span className="font-mono text-[10px] uppercase tracking-widest text-ink/50">
-            Offset · Morphing
+            Significant Severe
           </span>
         </div>
 
         <p className="mt-2 text-[12.5px] leading-snug text-ink/75">
-          Unlike SPC's per-cell hatching, ACRI renders SIG as a{' '}
-          <span className="font-bold text-ink">single smooth polygon</span> that is{' '}
-          <span className="font-bold text-ink">offset along a per-hazard axis</span>{' '}
-          from the primary high-probability band, so the SIG core has its own location
-          instead of sitting directly on top of the ENH+ region.
+          SIG is not a separate hazard category. It marks the favored corridor where the
+          active tornado, hail, or wind threat may reach significant-severe criteria:
+          EF2+ tornadoes, hail at least 2 inches in diameter, or thunderstorm gusts of at
+          least 74 mph.
         </p>
 
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <SigOffsetCard
             hazard="Tornado"
-            offset="+0.55 / −0.45"
-            rationale="Toward the warm-sector / triple-point where STP and 0–1 km SRH peak."
+            focus="Warm-sector / triple-point"
+            rationale="Favored where low-level rotation, moisture, and supercell support overlap."
           />
           <SigOffsetCard
             hazard="Hail"
-            offset="−0.65 / +0.55"
-            rationale="Back-left along the dry-line / mid-level lapse-rate axis where 2″+ stones cluster."
+            focus="Dryline / lapse-rate axis"
+            rationale="Favored where strong instability, steep lapse rates, and organized updrafts overlap."
           />
           <SigOffsetCard
             hazard="Wind"
-            offset="+0.95 / +0.40"
-            rationale="Downshear along the QLCS / cold-pool axis where 74+ mph gusts cluster."
+            focus="Downshear / QLCS corridor"
+            rationale="Favored where organized storm lines and strong flow support higher-end gusts."
           />
         </div>
 
         <p className="mt-3 text-[12.5px] leading-snug text-ink/75">
-          The SIG polygon also{' '}
-          <span className="font-bold text-ink">morphs through the forecast cycle</span>{' '}
-          — it rotates (about ±14°), stretches (aspect ±20%), wobbles its centroid
-          around the peak cell, and scales with how far the peak exceeds the SIG
-          threshold (roughly <Mono>0.78×</Mono> at threshold to <Mono>1.43×</Mono> when
-          the peak is well above it). Different hazards morph out of phase with each
-          other so the four panels read as distinct objects through the loop instead
-          of pulsing in lock-step.
+          The hatch should be read as a favored significant-severe corridor, not a precise
+          warning boundary. Its shape follows the strongest part of the threat and can shift
+          or stretch from hour to hour as the environment changes.
         </p>
       </div>
     </DocSection>
@@ -712,11 +936,11 @@ function DocsHazards() {
 
 function SigOffsetCard({
   hazard,
-  offset,
+  focus,
   rationale,
 }: {
   hazard: string;
-  offset: string;
+  focus: string;
   rationale: string;
 }) {
   return (
@@ -725,8 +949,8 @@ function SigOffsetCard({
         <span className="font-display text-[11px] font-extrabold uppercase tracking-widest text-ink">
           {hazard}
         </span>
-        <span className="font-mono text-[10px] font-bold tracking-wider text-ink/80">
-          {offset}
+        <span className="max-w-[70%] text-right font-mono text-[10px] font-bold leading-tight tracking-wider text-ink/80">
+          {focus}
         </span>
       </div>
       <p className="mt-1 text-[11.5px] leading-snug text-ink/70">{rationale}</p>
@@ -837,10 +1061,22 @@ function DocsGlossary() {
 
       <GlossaryLegend />
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 xl:hidden">
         {GLOSSARY.map((group) => (
           <GlossaryGroupCard key={group.title} group={group} />
         ))}
+      </div>
+      <div className="hidden grid-cols-2 items-start gap-3 xl:grid">
+        <div className="flex flex-col gap-3">
+          {[GLOSSARY[0], GLOSSARY[2], GLOSSARY[4]].map((group) => (
+            <GlossaryGroupCard key={group.title} group={group} />
+          ))}
+        </div>
+        <div className="flex flex-col gap-3">
+          {[GLOSSARY[1], GLOSSARY[3]].map((group) => (
+            <GlossaryGroupCard key={group.title} group={group} />
+          ))}
+        </div>
       </div>
     </DocSection>
   );
@@ -892,7 +1128,7 @@ function LegendChip({ sample, label }: { sample: ReactNode; label: string }) {
 
 function GlossaryGroupCard({ group }: { group: GlossaryGroup }) {
   return (
-    <div className="border-[3px] border-ink bg-paper shadow-retro overflow-hidden">
+    <div className="self-start overflow-hidden border-[3px] border-ink bg-paper shadow-retro">
       <header
         className={`flex items-stretch border-b-[3px] border-ink ${GLOSSARY_ACCENT_BG[group.accent]}`}
       >
@@ -916,11 +1152,19 @@ function GlossaryGroupCard({ group }: { group: GlossaryGroup }) {
         </div>
       </header>
 
+      {group.note && (
+        <div className="border-b-[1.5px] border-ink/20 bg-signal-orange/20 px-4 py-3">
+          <p className="font-mono text-[10.5px] uppercase leading-relaxed tracking-[0.12em] text-ink/75">
+            {group.note}
+          </p>
+        </div>
+      )}
+
       <ul className="flex flex-col">
         {group.entries.map((entry, idx) => (
           <li
             key={entry.term}
-            className={`grid grid-cols-1 gap-2 px-4 py-3.5 md:grid-cols-[170px_minmax(0,1fr)] md:gap-5 ${idx > 0 ? 'border-t-[1.5px] border-ink/15' : ''}`}
+            className={`grid grid-cols-1 gap-2 px-3 py-3 md:grid-cols-[160px_minmax(0,1fr)] md:gap-4 ${idx > 0 ? 'border-t-[1.5px] border-ink/15' : ''}`}
           >
             <div className="flex flex-col gap-1.5">
               <span className="font-display text-[15px] font-extrabold uppercase leading-none tracking-wider text-ink">
@@ -939,7 +1183,7 @@ function GlossaryGroupCard({ group }: { group: GlossaryGroup }) {
                 )}
               </div>
             </div>
-            <p className="text-[13px] leading-relaxed text-ink/85">
+            <p className="min-w-0 text-[13px] leading-relaxed text-ink/85">
               {entry.definition}
             </p>
           </li>
@@ -989,5 +1233,67 @@ function DocsDisclaimerSection() {
         <ForecastDisclaimer />
       </div>
     </DocSection>
+  );
+}
+
+function DocsResearchSources() {
+  return (
+    <DocSection
+      id="docs-research"
+      eyebrow="DOC / 09 · FORMULATION REFERENCES"
+      title="Research Sources"
+      badge={<RetroBadge tone="lime">{RESEARCH_SOURCES.length} refs</RetroBadge>}
+    >
+      <Lead>
+        The Environmental Ingredients board is backed by operational SPC guidance,
+        maintained MetPy calculations, NWS meteorological references, HRRR model
+        documentation, and peer-reviewed severe-storm research.
+      </Lead>
+
+      <Body>
+        This catalog covers the displayed instability, moisture, kinematic, forcing,
+        storm-mode, composite, hazard-threshold, and model-data assumptions. The
+        dashboard uses these sources for formulation alignment and plain-language
+        documentation; official forecasts and warnings still come from NOAA/NWS and
+        local hydrometeorological services.
+      </Body>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {RESEARCH_SOURCES.map((item) => (
+          <ResearchSourceCard key={item.href} item={item} />
+        ))}
+      </div>
+    </DocSection>
+  );
+}
+
+function ResearchSourceCard({ item }: { item: ResearchSource }) {
+  return (
+    <a
+      href={item.href}
+      target="_blank"
+      rel="noreferrer"
+      className="group flex min-h-[178px] flex-col justify-between border-[2px] border-ink bg-paper p-3 shadow-retro-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:bg-signal-lime/35 hover:shadow-retro"
+    >
+      <div>
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div>
+            <span className="mb-1.5 inline-block max-w-full border-[1.5px] border-ink bg-signal-lime/45 px-1.5 py-[1px] font-mono text-[8px] font-bold uppercase leading-tight tracking-[0.18em] text-ink">
+              {item.category}
+            </span>
+            <h3 className="font-display text-[13px] font-extrabold uppercase leading-tight tracking-widest text-ink">
+              {item.title}
+            </h3>
+            <p className="mt-1 font-mono text-[9px] uppercase tracking-[0.2em] text-ink/55">
+              {item.source}
+            </p>
+          </div>
+          <span className="shrink-0 border-[2px] border-ink bg-ink px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-paper group-hover:bg-paper group-hover:text-ink">
+            Open
+          </span>
+        </div>
+        <p className="text-[12.5px] leading-snug text-ink/80">{item.usedFor}</p>
+      </div>
+    </a>
   );
 }

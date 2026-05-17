@@ -147,6 +147,91 @@ function srhProxy(uSfc: number, vSfc: number, u850: number, v850: number): numbe
   return Math.max(0, cross * 0.6);
 }
 
+// ── Synoptic forcing proxy (replacement for LI-based frontSignal) ───
+// Lifted Index is an instability metric, NOT a forcing metric — a hot
+// capped airmass with LI=-10 has no synoptic forcing, while a marginal
+// cold-frontal passage with LI=-1 can have very strong forcing. The
+// previous frontSignal derivation conflated the two and corrupted every
+// downstream consumer (outlook gates, confidence, lobes, SIG morph,
+// triple point, etc.).
+//
+// Replacement uses three available wind-field proxies for synoptic
+// frontal forcing:
+//   1. Sfc→850 mb directional change (baroclinicity proxy). Strong
+//      veering ⇒ warm-air advection in the warm sector (Holton 2004
+//      §6.6, thermal-wind relation: clockwise turning with height ↔
+//      WAA in the NH). Strong backing ⇒ cold-air advection behind a
+//      cold front. Both indicate proximity to a baroclinic zone, so
+//      |veer| (signed angle, taken in absolute value) is the score.
+//   2. 250 mb wind speed (jet-streak / upper-level divergence proxy).
+//      Strong upper jets ⇒ ageostrophic cross-stream secondary
+//      circulation producing ascent on the equatorward exit / poleward
+//      entrance (Uccellini & Johnson 1979).
+//   3. 850 mb wind speed (low-level jet proxy). Significant LLJ
+//      (≥25 kt) is climatologically co-located with cold-front /
+//      warm-front systems and transports moisture into the warm sector
+//      (Bonner 1968).
+// Composite weights reflect that surface baroclinicity is the most
+// direct frontal signal, jet support second, LLJ tertiary.
+function signedVeerDeg(dirSfc: number, dirUpper: number): number {
+  // Positive ⇒ clockwise turning (veering ⇒ WAA in NH).
+  // Negative ⇒ counter-clockwise turning (backing ⇒ CAA in NH).
+  let diff = dirUpper - dirSfc;
+  while (diff > 180) diff -= 360;
+  while (diff < -180) diff += 360;
+  return diff;
+}
+
+function deriveFrontSignalFromWinds(args: {
+  dirSfc: number;
+  dir850: number;
+  spd850: number;
+  spd250: number;
+}): SignalStrength {
+  const { dirSfc, dir850, spd850, spd250 } = args;
+  // 1. Baroclinic-zone proximity from |sfc→850 directional turning|.
+  //    10° = onset of organised advection, 60° = sharp baroclinic zone.
+  const veerMag = Math.abs(signedVeerDeg(dirSfc, dir850));
+  const advectionScore = Math.max(0, Math.min(1, (veerMag - 10) / 50));
+  // 2. 250 mb jet support. 50 kt = weak upper flow, 100 kt = strong
+  //    jet streak with substantial cross-stream ageostrophic ascent.
+  const jetScore = Math.max(0, Math.min(1, (spd250 - 50) / 50));
+  // 3. 850 mb LLJ. 25 kt = Bonner category-1 LLJ onset, 55 kt = strong.
+  const lljScore = Math.max(0, Math.min(1, (spd850 - 25) / 30));
+  const composite = 0.50 * advectionScore + 0.30 * jetScore + 0.20 * lljScore;
+  if (composite >= 0.55) return 'strong';
+  if (composite >= 0.30) return 'moderate';
+  if (composite >= 0.10) return 'weak';
+  return 'none';
+}
+
+// ── Initiation confidence (replacement for LI-based formula) ────────
+// Initiation hinges on forcing overcoming CIN — not on raw instability.
+// A "loaded gun" (huge CAPE, huge cap, no forcing) has LOW initiation
+// confidence even though LI is extreme. The replacement composite
+// mirrors Thompson, Edwards & Mead (2003) STP's CIN term
+// (200 + MLCIN)/150 for cap relief and weights forcing dominantly.
+function deriveInitiationConfFromForcing(args: {
+  frontSignal: SignalStrength;
+  cin: number;
+  cape: number;
+  sfcDewpointF: number;
+}): number {
+  const { frontSignal, cin, cape, sfcDewpointF } = args;
+  const forcingFactor =
+    frontSignal === 'strong' ? 0.90 :
+    frontSignal === 'moderate' ? 0.60 :
+    frontSignal === 'weak' ? 0.30 : 0.08;
+  // CIN is stored negative; STP-style relief = (200 + CIN)/150.
+  const capRelief = Math.max(0, Math.min(1, (200 + cin) / 150));
+  const moistureFactor = Math.max(0, Math.min(1, (sfcDewpointF - 50) / 18));
+  // Some buoyancy must exist for any storm at all — small floor weight.
+  const capeFloor = Math.max(0, Math.min(1, cape / 1000));
+  return Math.max(0, Math.min(1,
+    0.50 * forcingFactor + 0.30 * capRelief + 0.10 * moistureFactor + 0.10 * capeFloor,
+  ));
+}
+
 function snapshotFromPoint(
   hourIdx: number,
   hour: number,
@@ -162,28 +247,50 @@ function snapshotFromPoint(
   if (idx < 0) return null;
 
   const cape = h.cape[idx] ?? 0;
-  const cin = h.convective_inhibition[idx] ?? 0;
+  const rawCin = h.convective_inhibition[idx] ?? 0;
+  const cin = rawCin > 0 ? -rawCin : rawCin;
   const tdF = h.dewpoint_2m[idx] ?? 50;
   // total_column_integrated_water_vapour is in kg/m^2 (= mm of water).
   const pwatMm = h.total_column_integrated_water_vapour[idx] ?? 25;
   const pwatIn = pwatMm / 25.4;
-  const li = h.lifted_index[idx] ?? 0;
+  // (Lifted index intentionally NOT used for forcing/initiation here;
+  // those are now derived from wind & CIN proxies. LI is still requested
+  // upstream and used by scorePointAtHour for region ranking only.)
 
-  const [uSfc, vSfc] = uvFromSpdDir(h.wind_speed_10m[idx], h.wind_direction_10m[idx]);
-  const [u850, v850] = uvFromSpdDir(h.wind_speed_850hPa[idx], h.wind_direction_850hPa[idx]);
+  const dirSfc = h.wind_direction_10m[idx] ?? 0;
+  const spdSfc = h.wind_speed_10m[idx] ?? 0;
+  const dir850 = h.wind_direction_850hPa[idx] ?? 0;
+  const spd850 = h.wind_speed_850hPa[idx] ?? 0;
+  const spd250 = h.wind_speed_250hPa[idx] ?? 0;
+
+  const [uSfc, vSfc] = uvFromSpdDir(spdSfc, dirSfc);
+  const [u850, v850] = uvFromSpdDir(spd850, dir850);
   const [u500, v500] = uvFromSpdDir(h.wind_speed_500hPa[idx], h.wind_direction_500hPa[idx]);
 
   const shear06Kt = bulkShearKt(uSfc, vSfc, u500, v500);
   const srh01 = srhProxy(uSfc, vSfc, u850, v850);
-  const srh03 = srh01 * 1.4;
+  // 0-3 km SRH climatologically averages ~2x 0-1 km SRH in moderately
+  // sheared environments, with curved hodographs producing higher
+  // ratios (Bunkers et al. 2000; Thompson 2003 close-proximity sounding
+  // climatology). Previous 1.4 multiplier systematically under-reported
+  // srh03 and starved the discrete-supercell branch in deriveStormMode.
+  const srh03 = srh01 * 2.0;
   const stormRelWindKt = Math.sqrt(u500 * u500 + v500 * v500) * 0.4;
 
-  // Approximate LCL height via Td depression (T_2m not requested, but estimate from LI bias).
+  // Approximate LCL height from dewpoint only; T_2m is not requested here.
   const lclM = Math.max(400, 1500 - Math.max(0, tdF - 50) * 25);
 
-  const frontSignal: SignalStrength =
-    li < -6 ? 'strong' : li < -3 ? 'moderate' : li < 0 ? 'weak' : 'none';
-  const initiationConf = Math.max(0, Math.min(1, (-li) / 8 + Math.min(cape / 2500, 1) * 0.4));
+  // Forcing & initiation: derived from wind/CIN/moisture proxies, not
+  // from LI (LI is a buoyancy metric and is meteorologically unrelated
+  // to synoptic forcing or initiation potential). See the
+  // deriveFrontSignalFromWinds / deriveInitiationConfFromForcing
+  // headers above for citations.
+  const frontSignal: SignalStrength = deriveFrontSignalFromWinds({
+    dirSfc, dir850, spd850, spd250,
+  });
+  const initiationConf = deriveInitiationConfFromForcing({
+    frontSignal, cin, cape, sfcDewpointF: tdF,
+  });
 
   const capStrength = deriveCapStrength(cin);
   const stormMode: StormMode = deriveStormMode({ shear06Kt, srh03, frontStrength: frontSignal });
@@ -238,7 +345,8 @@ function scorePointAtHour(resp: ApiResponse, baseISO: string, hour: number): num
   if (idx < 0) return 0;
 
   const cape = h.cape[idx] ?? 0;
-  const cin = h.convective_inhibition[idx] ?? 0;
+  const rawCin = h.convective_inhibition[idx] ?? 0;
+  const cin = rawCin > 0 ? -rawCin : rawCin;
   const td = h.dewpoint_2m[idx] ?? 50;
   const li = h.lifted_index[idx] ?? 0;
   const [uSfc, vSfc] = uvFromSpdDir(

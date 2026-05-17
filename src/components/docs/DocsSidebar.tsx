@@ -15,6 +15,7 @@ export const DOCS_NAV_ITEMS: DocsNavItem[] = [
   { id: 'docs-sources',        label: 'Provider Chain',        code: '06' },
   { id: 'docs-glossary',       label: 'Ingredients Glossary',  code: '07' },
   { id: 'docs-disclaimer',     label: 'Verification & Notes',  code: '08' },
+  { id: 'docs-research',       label: 'Research Sources',      code: '09' },
 ];
 
 export default function DocsSidebar() {
