@@ -102,17 +102,14 @@ Recommended public Cloud Run service environment:
 ```powershell
 AUTOOUTLOOK_FORECAST_SOURCE=artifact
 AUTOOUTLOOK_ENABLE_LIVE_BUILD=false
-AUTOOUTLOOK_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest
-AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest_incremental
-AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR=/mnt/autooutlook-artifacts/latest_incremental_complete
+AUTOOUTLOOK_ARTIFACT_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963
 ```
 
 With `AUTOOUTLOOK_ENABLE_LIVE_BUILD=false`, `/api/forecast` returns the latest generated artifact bundle. If artifacts are missing or incomplete, the public service returns `{"code":"outlook_not_ready"}` instead of starting expensive model work. Raw artifact storage paths are not exposed in public API errors.
 
-If artifacts are stored in a private Cloud Storage bucket instead of a mounted filesystem, set:
+If a prefix is used inside the private Cloud Storage bucket, also set:
 
 ```powershell
-AUTOOUTLOOK_ARTIFACT_BUCKET=your-private-artifact-bucket
 AUTOOUTLOOK_ARTIFACT_PREFIX=optional/path/prefix
 ```
 
@@ -154,9 +151,16 @@ When a release changes backend artifact-generation code or shared code used by t
 ```powershell
 gcloud run jobs update autooutlook-artifact-refresh `
   --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
+  --command sh `
+  --args "-c,python -m backend.ml.outlook_pipeline --incremental --all-hours --cycle-policy complete-requested --output-dir /tmp/autooutlook-artifacts/latest_incremental --cache-dir /tmp/autooutlook-cache/hrrr_selected --publish-gcs-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --gcs-lock-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --hour-workers 2 --range-workers 2 --grid-stride 3 --tile-stride 1" `
+  --set-env-vars "AUTOOUTLOOK_PUBLISH_GCS_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_RUN_LOCK_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_HOUR_WORKERS=2,AUTOOUTLOOK_RANGE_WORKERS=2,AUTOOUTLOOK_GRID_STRIDE=3,AUTOOUTLOOK_TILE_STRIDE=1" `
+  --remove-volume-mount /mnt/autooutlook-artifacts `
+  --remove-volume artifacts `
   --region us-central1 `
   --project project-f47ca9d9-31bc-4a21-963
 ```
+
+The job should write working artifacts to local `/tmp` and upload finished JSON artifacts through the Cloud Storage client. Avoid routing generation output through a Cloud Storage FUSE mount; it adds filesystem translation overhead and makes overlapping executions more expensive.
 
 Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-30m` with schedule `0 * * * *` in `Etc/UTC`.
 

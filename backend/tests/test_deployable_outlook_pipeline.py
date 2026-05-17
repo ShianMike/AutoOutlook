@@ -46,7 +46,9 @@ from backend.ml.gridded_outlook import (
 from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
     PRODUCTION_FORECAST_HOURS,
+    _hydrate_incremental_artifacts_from_gcs,
     _publish_complete_incremental_snapshot,
+    _publish_incremental_artifacts_to_gcs,
     _publish_working_dir,
     resolve_cycle_policy,
     resolve_forecast_hours,
@@ -1752,6 +1754,181 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             complete_index = json.loads((complete_dir / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(complete_index["cycle"], "new")
             self.assertTrue((complete_dir / "hours" / "f00" / "probability_tile.json").exists())
+
+    def test_gcs_incremental_publish_uses_artifact_layout_and_index_last(self) -> None:
+        uploads: list[str] = []
+
+        class FakeBlob:
+            def __init__(self, name: str):
+                self.name = name
+
+            def upload_from_filename(self, _filename: str) -> None:
+                uploads.append(self.name)
+
+        class FakeBucket:
+            def blob(self, name: str) -> FakeBlob:
+                return FakeBlob(name)
+
+        class FakeClient:
+            def bucket(self, _name: str) -> FakeBucket:
+                return FakeBucket()
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline._get_gcs_storage_client",
+            return_value=FakeClient(),
+        ):
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            index = {
+                "status": "complete",
+                "readyForecastHours": [0],
+                "requestedForecastHours": [0],
+                "cycle": "new",
+            }
+            (output_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
+            for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
+                (hour_dir / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+            _publish_complete_incremental_snapshot(output_dir, index, [0])
+
+            result = _publish_incremental_artifacts_to_gcs(output_dir, index, [0], "bucket", "prod/artifacts")
+
+        current_hour_key = "prod/artifacts/latest_incremental/hours/f00/probability_tile.json"
+        current_index_key = "prod/artifacts/latest_incremental/index.json"
+        complete_hour_key = "prod/artifacts/latest_incremental_complete/hours/f00/probability_tile.json"
+        complete_index_key = "prod/artifacts/latest_incremental_complete/index.json"
+        self.assertEqual(result["currentFiles"], 5)
+        self.assertEqual(result["completeFiles"], 5)
+        self.assertIn(current_hour_key, uploads)
+        self.assertIn(complete_hour_key, uploads)
+        self.assertLess(uploads.index(current_hour_key), uploads.index(current_index_key))
+        self.assertLess(uploads.index(complete_hour_key), uploads.index(complete_index_key))
+
+    def test_gcs_hydrate_restores_incremental_artifact_layout(self) -> None:
+        class FakeBlob:
+            def __init__(self, name: str, data: str):
+                self.name = name
+                self.data = data
+
+            def download_to_filename(self, filename: str) -> None:
+                Path(filename).write_text(self.data, encoding="utf-8")
+
+        class FakeBucket:
+            def __init__(self):
+                self.blobs = [
+                    FakeBlob("prod/latest_incremental/index.json", '{"status":"complete"}'),
+                    FakeBlob("prod/latest_incremental/hours/f00/metadata.json", '{"forecastHour":0}'),
+                    FakeBlob("prod/latest_incremental_complete/index.json", '{"status":"complete"}'),
+                ]
+
+            def list_blobs(self, prefix: str):
+                return [blob for blob in self.blobs if blob.name.startswith(prefix)]
+
+        class FakeClient:
+            def bucket(self, _name: str) -> FakeBucket:
+                return FakeBucket()
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline._get_gcs_storage_client",
+            return_value=FakeClient(),
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            result = _hydrate_incremental_artifacts_from_gcs(output_dir, "bucket", "prod")
+
+            self.assertTrue((output_dir / "index.json").exists())
+            self.assertTrue((output_dir / "hours" / "f00" / "metadata.json").exists())
+            self.assertTrue((Path(tmp) / "latest_incremental_complete" / "index.json").exists())
+
+        self.assertEqual(result["currentFiles"], 2)
+        self.assertEqual(result["completeFiles"], 1)
+
+    def test_incremental_pipeline_can_publish_finished_artifacts_to_gcs(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(_ref, _session):
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            return {"tornado": probs, "hail": probs, "wind": probs}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ), patch(
+            "backend.ml.outlook_pipeline._publish_incremental_artifacts_to_gcs",
+            return_value={"enabled": True},
+        ) as publish_mock:
+            output_dir = Path(tmp) / "latest_incremental"
+            index = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+                publish_gcs_bucket="bucket",
+                publish_gcs_prefix="prod/artifacts",
+            )
+
+        self.assertEqual(index["status"], "complete")
+        publish_mock.assert_called_once()
+
+    def test_incremental_pipeline_skips_gcs_publish_when_nothing_changed(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ), patch(
+            "backend.ml.outlook_pipeline._publish_incremental_artifacts_to_gcs",
+            side_effect=AssertionError("unchanged artifacts should not be republished"),
+        ):
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            complete_dir = root / "latest_incremental_complete"
+            hour_dir = output_dir / "hours" / "f00"
+            complete_hour_dir = complete_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            complete_hour_dir.mkdir(parents=True)
+            index = {
+                "cycle": cycle.label,
+                "status": "complete",
+                "readyForecastHours": [0],
+                "requestedForecastHours": [0],
+                "model": {"active": True},
+            }
+            (output_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
+            (complete_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
+            for directory in (hour_dir, complete_hour_dir):
+                (directory / "risk_polygons.geojson").write_text("{}", encoding="utf-8")
+                (directory / "probability_tile.json").write_text("{}", encoding="utf-8")
+                (directory / "upper_air_overlay.json").write_text("{}", encoding="utf-8")
+                (directory / "metadata.json").write_text(json.dumps({
+                    "region": {"centerLat": 35.0, "centerLon": -97.0},
+                    "ingredients": {},
+                    "ingredientSample": {"gridRow": 0, "gridCol": 0},
+                }), encoding="utf-8")
+
+            result = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                detect_cycle_fn=fake_detect,
+                publish_gcs_bucket="bucket",
+            )
+
+        self.assertEqual(result["readyForecastHours"], [0])
 
     def test_incremental_pipeline_merges_existing_ready_hours(self) -> None:
         cycle = HrrrCycle("20240504", 12)
