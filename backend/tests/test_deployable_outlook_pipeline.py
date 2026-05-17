@@ -1576,6 +1576,91 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(hour_metadata["categoryCounts"].get("ENH", 0), 0)
             self.assertEqual(hour_metadata["riskMapCategoryCounts"]["ENH"], 16)
 
+    def test_generated_artifacts_keep_strict_water_regions_none(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        shape = (12, 12)
+        cases = {
+            "gulfOfMexico": (
+                np.linspace(25.5, 27.5, shape[0]),
+                np.linspace(-94.0, -90.0, shape[1]),
+            ),
+            "southTexasGulfCoast": (
+                np.linspace(27.2, 28.2, shape[0]),
+                np.linspace(-97.6, -96.4, shape[1]),
+            ),
+            "floridaGulf": (
+                np.linspace(24.2, 25.0, shape[0]),
+                np.linspace(-83.0, -81.0, shape[1]),
+            ),
+            "atlanticOcean": (
+                np.linspace(30.0, 32.0, shape[0]),
+                np.linspace(-78.0, -76.0, shape[1]),
+            ),
+        }
+
+        fields = small_fields(shape)
+        fields["cape"] = np.full(shape, 2500.0)
+        fields["cape_ml"] = np.full(shape, 1700.0)
+        fields["cape_mu"] = np.full(shape, 2600.0)
+        fields["cin_ml"] = np.full(shape, -55.0)
+        fields["td2m"] = np.full(shape, 296.15)
+        fields["t2m"] = np.full(shape, 304.15)
+        fields["u500"] = np.full(shape, 44.0)
+        fields["v500"] = np.full(shape, 1.0)
+        fields["srh01"] = np.full(shape, 80.0)
+        fields["srh03"] = np.full(shape, 160.0)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_predict(features):
+            probs = np.full(features.shape, 0.35)
+            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
+
+        model_status_payload = {
+            "active": True,
+            "version": "unit",
+            "featureSchemaHash": "hash",
+            "productionCapable": True,
+            "trainingRows": 6000,
+            "datasetQuality": {
+                "trainingRows": 6000,
+                "minimumRecommendedRows": 5000,
+                "status": "production",
+            },
+        }
+
+        for case_name, (lats, lons) in cases.items():
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmp, patch(
+                "backend.ml.outlook_pipeline.model_status",
+                return_value=model_status_payload,
+            ):
+                def fake_fetch(_ref, _session):
+                    return lats, lons, fields
+
+                output_dir = Path(tmp) / "latest_incremental"
+                run_incremental_pipeline(
+                    output_dir=output_dir,
+                    forecast_hours=[0],
+                    now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                    tile_stride=1,
+                    detect_cycle_fn=fake_detect,
+                    fetch_hour_fn=fake_fetch,
+                    predictor_fn=fake_predict,
+                )
+
+                hour_dir = output_dir / "hours" / "f00"
+                hour_metadata = json.loads((hour_dir / "metadata.json").read_text(encoding="utf-8"))
+                risk_geojson = json.loads((hour_dir / "risk_polygons.geojson").read_text(encoding="utf-8"))
+                hazard_geojson = json.loads((hour_dir / "hazard_probability_shapes.geojson").read_text(encoding="utf-8"))
+                tile = json.loads((hour_dir / "probability_tile.json").read_text(encoding="utf-8"))
+
+                self.assertEqual(hour_metadata["categoryCounts"], {"NONE": shape[0] * shape[1]})
+                self.assertEqual(hour_metadata["riskMapCategoryCounts"], {"NONE": shape[0] * shape[1]})
+                self.assertEqual(risk_geojson["features"], [])
+                self.assertEqual(hazard_geojson["features"], [])
+                self.assertEqual(max(max(row) for row in tile["categoryOrdinal"]), SPC_RISK_LABELS.index("NONE"))
+
     def test_incremental_pipeline_processes_forecast_hours_in_parallel(self) -> None:
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)

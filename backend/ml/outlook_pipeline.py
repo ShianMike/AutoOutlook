@@ -40,6 +40,7 @@ from backend.ml.gridded_outlook import (
     apply_category_probability_ceiling,
     apply_environmental_probability_caps,
     apply_offshore_probability_suppression,
+    apply_regional_strict_category_caps,
     category_counts,
     category_grid_from_probabilities,
     feature_stats,
@@ -941,12 +942,22 @@ def _build_hour_artifact(
         fetched.lats,
         fetched.lons,
     )
-    risk_map_probability_result = apply_offshore_probability_suppression(
+    initial_risk_map_probability_result = apply_offshore_probability_suppression(
         cap_result.probabilities,
         fetched.lats,
         fetched.lons,
     )
-    risk_map_category_grid = category_grid_from_probabilities(risk_map_probability_result.probabilities, features, model)
+    risk_map_category_grid = category_grid_from_probabilities(initial_risk_map_probability_result.probabilities, features, model)
+    risk_map_category_grid = apply_regional_strict_category_caps(risk_map_category_grid, fetched.lats, fetched.lons)
+    risk_map_category_probability_result = apply_category_probability_ceiling(
+        initial_risk_map_probability_result.probabilities,
+        risk_map_category_grid,
+    )
+    risk_map_probability_result = apply_offshore_probability_suppression(
+        risk_map_category_probability_result.probabilities,
+        fetched.lats,
+        fetched.lons,
+    )
     probability_report = {
         **cap_result.report,
         "environmentalCappedProbabilityMax": cap_result.report.get("cappedProbabilityMax"),

@@ -273,6 +273,18 @@ def apply_offshore_probability_suppression(
     })
 
 
+def apply_regional_strict_category_caps(
+    category_grid: np.ndarray,
+    lats: np.ndarray,
+    lons: np.ndarray,
+) -> np.ndarray:
+    """Apply hard regional caps used by generated artifact vector layers."""
+    grid = np.asarray(category_grid, dtype=np.int16).copy()
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, grid.shape)
+    max_category_grid = _regional_strict_max_category_grid(lat_grid, lon_grid)
+    return np.minimum(grid, max_category_grid).astype(np.int16)
+
+
 def category_grid_from_probabilities(
     probabilities: Mapping[str, np.ndarray],
     features: GriddedFeatures,
@@ -520,6 +532,7 @@ def risk_polygons_from_grid(
 ) -> dict[str, Any]:
     lat_grid, lon_grid = _lat_lon_grid(lats, lons, category_grid.shape)
     grid = np.asarray(category_grid, dtype=np.int16)
+    regional_max_grid = _regional_strict_max_category_grid(lat_grid, lon_grid)
     features: list[dict[str, Any]] = []
     try:
         from scipy import ndimage
@@ -531,11 +544,14 @@ def risk_polygons_from_grid(
         # SPC-style categorical outlooks are drawn cumulatively: TSTM is the
         # full thunder area, MRGL is MRGL-or-higher, then higher risks paint on
         # top. This avoids visible annular grid seams and preserves hierarchy.
-        mask = np.asarray(grid >= ordinal)
+        mask = _clip_mask_to_regional_strictness(grid >= ordinal, ordinal, regional_max_grid)
         if not np.any(mask):
             continue
         settings = _category_generalization_settings(mask, ordinal, min_cells)
-        limit_mask = _cartographic_limit_mask(grid >= max(1, ordinal - 1), ndimage, int(settings["closeIterations"]) + 1)
+        limit_base = _clip_mask_to_regional_strictness(grid >= max(1, ordinal - 1), ordinal, regional_max_grid)
+        limit_mask = _cartographic_limit_mask(limit_base, ndimage, int(settings["closeIterations"]) + 1)
+        if limit_mask is not None:
+            limit_mask = _clip_mask_to_regional_strictness(limit_mask, ordinal, regional_max_grid)
         mask = _generalize_mask(
             mask,
             ndimage,
@@ -545,9 +561,12 @@ def risk_polygons_from_grid(
             max_hole_cells=int(settings["maximumHoleCells"]),
             limit_mask=limit_mask,
         )
+        mask = _clip_mask_to_regional_strictness(mask, ordinal, regional_max_grid)
         if np.any(mask):
             masks_by_ordinal[ordinal] = (mask, settings)
     _enforce_cumulative_mask_hierarchy(masks_by_ordinal)
+    for ordinal, (mask, _settings) in masks_by_ordinal.items():
+        mask &= regional_max_grid >= ordinal
 
     for ordinal in range(1, len(SPC_RISK_LABELS)):
         item = masks_by_ordinal.get(ordinal)
@@ -607,6 +626,7 @@ def hazard_probability_shapes_from_grids(
     """Build smooth cumulative probability contour polygons for hazard maps."""
     lat_grid, lon_grid = _lat_lon_grid(lats, lons, category_grid.shape)
     grid = np.asarray(category_grid, dtype=np.int16)
+    regional_max_grid = _regional_strict_max_category_grid(lat_grid, lon_grid)
     try:
         from scipy import ndimage
     except Exception:
@@ -640,8 +660,17 @@ def hazard_probability_shapes_from_grids(
         settings_by_bucket: list[dict[str, int | float | bool]] = []
         generalized_masks: list[np.ndarray] = []
         for bucket, mask in enumerate(masks):
+            threshold = thresholds[bucket]
+            regional_allowed_mask = _regional_probability_allowed_mask(hazard, threshold, regional_max_grid)
+            mask = np.asarray(mask, dtype=bool) & regional_allowed_mask
             settings = _probability_generalization_settings(mask, bucket, min_cells)
-            limit_mask = _cartographic_limit_mask(support_mask, ndimage, int(settings["closeIterations"]) + 1)
+            limit_mask = _cartographic_limit_mask(
+                np.asarray(support_mask, dtype=bool) & regional_allowed_mask,
+                ndimage,
+                int(settings["closeIterations"]) + 1,
+            )
+            if limit_mask is not None:
+                limit_mask &= regional_allowed_mask
             generalized = _generalize_mask(
                 mask,
                 ndimage,
@@ -651,9 +680,12 @@ def hazard_probability_shapes_from_grids(
                 max_hole_cells=int(settings["maximumHoleCells"]),
                 limit_mask=limit_mask,
             )
+            generalized &= regional_allowed_mask
             generalized_masks.append(generalized)
             settings_by_bucket.append(settings)
         _enforce_probability_mask_hierarchy(generalized_masks)
+        for bucket, threshold in enumerate(thresholds):
+            generalized_masks[bucket] &= _regional_probability_allowed_mask(hazard, threshold, regional_max_grid)
         colors = _PROBABILITY_COLORS[hazard]
         for bucket, (threshold, mask) in enumerate(zip(thresholds, generalized_masks, strict=False)):
             if not np.any(mask):
@@ -1925,6 +1957,41 @@ def _strict_category_cap_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> di
     return {
         "texasMexicoBorder": _texas_mexico_border_mrgl_cap_mask(lat_grid, lon_grid),
     }
+
+
+def _regional_strict_max_category_grid(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    max_category = np.full(np.asarray(lat_grid).shape, len(SPC_RISK_LABELS) - 1, dtype=np.int16)
+    for mask in _strict_offshore_masks(lat_grid, lon_grid).values():
+        max_category[np.asarray(mask, dtype=bool)] = SPC_RISK_LABELS.index("NONE")
+    for mask in _strict_category_cap_masks(lat_grid, lon_grid).values():
+        target = np.asarray(mask, dtype=bool)
+        max_category[target] = np.minimum(max_category[target], SPC_RISK_LABELS.index("MRGL"))
+    return max_category
+
+
+def _clip_mask_to_regional_strictness(
+    mask: np.ndarray,
+    ordinal: int,
+    regional_max_grid: np.ndarray,
+) -> np.ndarray:
+    return np.asarray(mask, dtype=bool) & (np.asarray(regional_max_grid, dtype=np.int16) >= int(ordinal))
+
+
+def _regional_probability_allowed_mask(
+    hazard: str,
+    threshold: float,
+    regional_max_grid: np.ndarray,
+) -> np.ndarray:
+    max_grid = np.asarray(regional_max_grid, dtype=np.int16)
+    if hazard == "thunder":
+        if threshold >= 0.70:
+            required_ordinal = SPC_RISK_LABELS.index("ENH")
+        elif threshold >= 0.40:
+            required_ordinal = SPC_RISK_LABELS.index("MRGL")
+        else:
+            required_ordinal = SPC_RISK_LABELS.index("TSTM")
+        return max_grid >= required_ordinal
+    return _category_probability_cap_grid(hazard, max_grid) >= float(threshold)
 
 
 def _points_in_polygon(x: np.ndarray, y: np.ndarray, ring: list[tuple[float, float]]) -> np.ndarray:
