@@ -1661,6 +1661,67 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 self.assertEqual(hazard_geojson["features"], [])
                 self.assertEqual(max(max(row) for row in tile["categoryOrdinal"]), SPC_RISK_LABELS.index("NONE"))
 
+    def test_probability_tiles_route_prefers_complete_incremental_snapshot(self) -> None:
+        import backend.server as server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            latest_dir = root / "latest"
+            incremental_dir = root / "latest_incremental"
+            complete_dir = root / "latest_incremental_complete"
+            latest_dir.mkdir(parents=True)
+            (complete_dir / "hours" / "f00").mkdir(parents=True)
+            (latest_dir / "probability_tiles.json").write_text(json.dumps({
+                "cycle": "HRRR 06Z 20260504",
+                "hours": [],
+            }), encoding="utf-8")
+            (complete_dir / "index.json").write_text(json.dumps({
+                "status": "complete",
+                "cycle": "HRRR 06Z 20260517",
+                "cycleTimeISO": "2026-05-17T06:00:00Z",
+                "generatedAtISO": "2026-05-17T10:18:46Z",
+                "readyForecastHours": list(range(49)),
+                "featureSchemaHash": "hash",
+                "gridStride": 3,
+                "tileStride": 1,
+                "riskLabels": list(SPC_RISK_LABELS),
+            }), encoding="utf-8")
+            (complete_dir / "hours" / "f00" / "probability_tile.json").write_text(json.dumps({
+                "forecastHour": 0,
+                "validTimeISO": "2026-05-17T06:00:00Z",
+                "categoryOrdinal": [[0]],
+                "categoryLabel": [["NONE"]],
+                "probabilities": {"tornado": [[0.0]], "hail": [[0.0]], "wind": [[0.0]]},
+                "lats": [[26.0]],
+                "lons": [[-94.0]],
+            }), encoding="utf-8")
+            (complete_dir / "hours" / "f00" / "metadata.json").write_text(json.dumps({
+                "forecastHour": 0,
+                "validTimeISO": "2026-05-17T06:00:00Z",
+                "categoryCounts": {"NONE": 1},
+            }), encoding="utf-8")
+
+            with patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}), patch.object(
+                server,
+                "ARTIFACT_DIR",
+                latest_dir,
+            ), patch.object(
+                server,
+                "INCREMENTAL_ARTIFACT_DIR",
+                incremental_dir,
+            ), patch.object(
+                server,
+                "INCREMENTAL_COMPLETE_ARTIFACT_DIR",
+                complete_dir,
+            ):
+                response = server.app.test_client().get("/api/outlook/probability-tiles")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["cycle"], "HRRR 06Z 20260517")
+        self.assertEqual(len(payload["hours"]), 1)
+        self.assertEqual(payload["hours"][0]["tile"]["categoryLabel"], [["NONE"]])
+
     def test_incremental_pipeline_processes_forecast_hours_in_parallel(self) -> None:
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)
@@ -2228,12 +2289,18 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
     def test_server_serves_latest_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            artifact_dir = Path(tmp)
+            root = Path(tmp)
+            artifact_dir = root / "latest"
+            incremental_dir = root / "latest_incremental"
+            complete_dir = root / "latest_incremental_complete"
+            artifact_dir.mkdir()
             (artifact_dir / "metadata.json").write_text(json.dumps({"cycle": "unit"}), encoding="utf-8")
             from backend import server
 
             with (
                 patch.object(server, "ARTIFACT_DIR", artifact_dir),
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", complete_dir),
                 patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()

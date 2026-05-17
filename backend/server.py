@@ -854,11 +854,10 @@ def _json_artifact(name: str):
 
 
 def _json_artifact_or_incremental(name: str):
-    path = _artifact_path(name)
-    if _artifact_exists(path):
-        return _json_path(path)
     if name == "metadata.json":
-        return _json_path(_selected_incremental_artifact_dir() / "index.json")
+        incremental_path = _selected_incremental_artifact_dir() / "index.json"
+        if _artifact_exists(incremental_path):
+            return _json_path(incremental_path)
     if name in {"risk_polygons.geojson", "aggregate_risk_polygons.geojson"}:
         payload = _merged_incremental_risk_polygons()
         if payload is not None:
@@ -867,6 +866,9 @@ def _json_artifact_or_incremental(name: str):
         payload = _incremental_probability_tiles()
         if payload is not None:
             return _json_response(payload)
+    path = _artifact_path(name)
+    if _artifact_exists(path):
+        return _json_path(path)
     return _json_path(path)
 
 
