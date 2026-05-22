@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { Fragment, useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { HourSnapshot, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
@@ -21,6 +21,10 @@ import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../util
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 
 const STATES_URL = '/us-states-10m.json';
+const HAZARD_SEPARATOR_STROKE_WIDTH = 4.0;
+const HAZARD_SEPARATOR_STROKE_OPACITY = 0.58;
+const HAZARD_BOUNDARY_STROKE_WIDTH = 0.45;
+const HAZARD_BOUNDARY_STROKE_OPACITY = 0.64;
 
 export type GeneratedHazardKey = GeneratedArtifactHazardKey;
 
@@ -39,6 +43,24 @@ export function hasGeneratedHazardTile(
 ): boolean {
   if (forecastHour === undefined) return false;
   return Boolean(artifacts?.probabilityTiles?.hours.some((hour) => hour.forecastHour === forecastHour));
+}
+
+function lowerProbabilityFill(color: unknown, colors: string[]): string | null {
+  if (typeof color !== 'string') return null;
+  const index = colors.indexOf(color);
+  if (index <= 0) return null;
+  return colors[index - 1];
+}
+
+function darkenHexColor(color: unknown, amount = 0.72): string {
+  if (typeof color !== 'string') return 'rgba(72, 64, 52, 0.64)';
+  const match = color.trim().match(/^#?([0-9a-f]{6})$/i);
+  if (!match) return color;
+  const hex = match[1];
+  const r = Math.max(0, Math.round(parseInt(hex.slice(0, 2), 16) * amount));
+  const g = Math.max(0, Math.round(parseInt(hex.slice(2, 4), 16) * amount));
+  const b = Math.max(0, Math.round(parseInt(hex.slice(4, 6), 16) * amount));
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 export default function GeneratedHazardProbabilityMap({
@@ -222,39 +244,137 @@ export default function GeneratedHazardProbabilityMap({
           {featureCollection.features.length > 0 && (
             <Geographies geography={featureCollection}>
               {({ geographies }) =>
-                geographies.map((geo, index) => (
-                  <Geography
-                    key={`artifact-prob-${hazard}-${geo.rsmKey ?? index}`}
-                    geography={geo}
-                    tabIndex={-1}
-                    style={{
-                      default: {
-                        fill: geo.properties.color as string,
-                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
-                        stroke: '#111111',
-                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
-                        outline: 'none',
-                        pointerEvents: 'none',
-                      },
-                      hover: {
-                        fill: geo.properties.color as string,
-                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
-                        stroke: '#111111',
-                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
-                        outline: 'none',
-                        pointerEvents: 'none',
-                      },
-                      pressed: {
-                        fill: geo.properties.color as string,
-                        fillOpacity: usingVectorProbability ? 0.50 : 0.58,
-                        stroke: '#111111',
-                        strokeWidth: usingVectorProbability ? 0.7 : 0.08,
-                        outline: 'none',
-                        pointerEvents: 'none',
-                      },
-                    }}
-                  />
-                ))
+                geographies.map((geo, index) => {
+                  const fill = geo.properties.color as string;
+                  const separatorStroke = usingVectorProbability ? lowerProbabilityFill(geo.properties.color, cfg.colors) : null;
+                  const featureKey = `${hazard}-${geo.rsmKey ?? index}`;
+                  return (
+                    <Fragment key={`artifact-prob-layer-${featureKey}`}>
+                      {separatorStroke && (
+                        <Geography
+                          key={`artifact-prob-separator-${featureKey}`}
+                          geography={geo}
+                          tabIndex={-1}
+                          style={{
+                            default: {
+                              fill: 'none',
+                              stroke: separatorStroke,
+                              strokeWidth: HAZARD_SEPARATOR_STROKE_WIDTH,
+                              strokeOpacity: HAZARD_SEPARATOR_STROKE_OPACITY,
+                              strokeLinecap: 'round',
+                              strokeLinejoin: 'round',
+                              outline: 'none',
+                              pointerEvents: 'none',
+                            },
+                            hover: {
+                              fill: 'none',
+                              stroke: separatorStroke,
+                              strokeWidth: HAZARD_SEPARATOR_STROKE_WIDTH,
+                              strokeOpacity: HAZARD_SEPARATOR_STROKE_OPACITY,
+                              strokeLinecap: 'round',
+                              strokeLinejoin: 'round',
+                              outline: 'none',
+                              pointerEvents: 'none',
+                            },
+                            pressed: {
+                              fill: 'none',
+                              stroke: separatorStroke,
+                              strokeWidth: HAZARD_SEPARATOR_STROKE_WIDTH,
+                              strokeOpacity: HAZARD_SEPARATOR_STROKE_OPACITY,
+                              strokeLinecap: 'round',
+                              strokeLinejoin: 'round',
+                              outline: 'none',
+                              pointerEvents: 'none',
+                            },
+                          }}
+                        />
+                      )}
+                      <Geography
+                        key={`artifact-prob-${featureKey}`}
+                        geography={geo}
+                        tabIndex={-1}
+                        style={{
+                          default: {
+                            fill,
+                            fillOpacity: usingVectorProbability ? 0.50 : 0.58,
+                            stroke: 'none',
+                            strokeWidth: 0,
+                            strokeOpacity: 0,
+                            outline: 'none',
+                            pointerEvents: 'none',
+                          },
+                          hover: {
+                            fill,
+                            fillOpacity: usingVectorProbability ? 0.50 : 0.58,
+                            stroke: 'none',
+                            strokeWidth: 0,
+                            strokeOpacity: 0,
+                            outline: 'none',
+                            pointerEvents: 'none',
+                          },
+                          pressed: {
+                            fill,
+                            fillOpacity: usingVectorProbability ? 0.50 : 0.58,
+                            stroke: 'none',
+                            strokeWidth: 0,
+                            strokeOpacity: 0,
+                            outline: 'none',
+                            pointerEvents: 'none',
+                          },
+                        }}
+                      />
+                    </Fragment>
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {usingVectorProbability && featureCollection.features.length > 0 && (
+            <Geographies geography={featureCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const boundaryStroke = darkenHexColor(geo.properties.color);
+                  return (
+                    <Geography
+                      key={`artifact-prob-boundary-${hazard}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: {
+                          fill: 'none',
+                          stroke: boundaryStroke,
+                          strokeWidth: HAZARD_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: HAZARD_BOUNDARY_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        hover: {
+                          fill: 'none',
+                          stroke: boundaryStroke,
+                          strokeWidth: HAZARD_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: HAZARD_BOUNDARY_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        pressed: {
+                          fill: 'none',
+                          stroke: boundaryStroke,
+                          strokeWidth: HAZARD_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: HAZARD_BOUNDARY_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                      }}
+                    />
+                  );
+                })
               }
             </Geographies>
           )}

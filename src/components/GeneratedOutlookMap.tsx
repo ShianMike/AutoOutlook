@@ -58,7 +58,10 @@ const LEVEL_STYLE: Record<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>, { fill:
 };
 
 const CATEGORY_RAMP: Array<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>> = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'];
-const RISK_BAND_OUTLINE_WIDTH = 0.75;
+const RISK_BAND_BOUNDARY_STROKE_WIDTH = 1.05;
+const RISK_BAND_BOUNDARY_STROKE_OPACITY = 0.78;
+const RISK_BAND_SEPARATOR_STROKE_WIDTH = 5.25;
+const RISK_BAND_SEPARATOR_STROKE_OPACITY = 0.58;
 const CATEGORY_ORD: Record<ArtifactRiskCategory, number> = {
   NONE: 0,
   TSTM: 1,
@@ -69,6 +72,73 @@ const CATEGORY_ORD: Record<ArtifactRiskCategory, number> = {
   MOD: 5,
   HIGH: 6,
 };
+
+// Minimum planar area (deg^2) below which a feature is demoted one risk
+// category. Tiny ML/contour artifacts (e.g., a single-cell ENH dot) end
+// up rendering as a meaningless speck inside the surrounding band; we
+// collapse them down so the visualization matches what SPC would draw.
+const MIN_FEATURE_AREA_DEG2: Partial<Record<ArtifactRiskCategory, number>> = {
+  ENH: 0.04,
+  MDT: 0.04,
+  MOD: 0.04,
+  HIGH: 0.04,
+};
+
+function ringArea(ring: number[][]): number {
+  let area = 0;
+  for (let i = 0; i < ring.length; i += 1) {
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[(i + 1) % ring.length];
+    area += x0 * y1 - x1 * y0;
+  }
+  return Math.abs(area / 2);
+}
+
+function polygonArea(rings: number[][][]): number {
+  if (!rings || rings.length === 0) return 0;
+  const exterior = ringArea(rings[0]);
+  const holes = rings.slice(1).reduce((sum, hole) => sum + ringArea(hole), 0);
+  return Math.max(0, exterior - holes);
+}
+
+function geometryArea(geometry: { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] } | undefined): number {
+  if (!geometry) return 0;
+  if (geometry.type === 'Polygon') {
+    return polygonArea(geometry.coordinates as number[][][]);
+  }
+  return (geometry.coordinates as number[][][][]).reduce(
+    (total, polygon) => total + polygonArea(polygon),
+    0,
+  );
+}
+
+function demoteOnce(category: ArtifactRiskCategory): ArtifactRiskCategory {
+  if (category === 'HIGH') return 'MDT';
+  if (category === 'MOD' || category === 'MDT') return 'ENH';
+  if (category === 'ENH') return 'SLGT';
+  return category;
+}
+
+function demoteSmallFeatures(collection: OutlookArtifactFeatureCollection): OutlookArtifactFeatureCollection {
+  return {
+    ...collection,
+    features: collection.features.map((feature) => {
+      const area = geometryArea(feature.geometry);
+      let category = feature.properties.category;
+      let safety = 0;
+      while (safety < 6) {
+        const min = MIN_FEATURE_AREA_DEG2[category];
+        if (min === undefined || area >= min) break;
+        const next = demoteOnce(category);
+        if (next === category) break;
+        category = next;
+        safety += 1;
+      }
+      if (category === feature.properties.category) return feature;
+      return { ...feature, properties: { ...feature.properties, category } };
+    }),
+  };
+}
 
 function normalizeCategory(category: ArtifactRiskCategory): Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'> {
   return category === 'MOD' ? 'MDT' : category === 'NONE' ? 'TSTM' : category;
@@ -96,9 +166,10 @@ function formatGeneratedAt(iso: string | undefined): string {
 
 function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollection | undefined): OutlookArtifactFeatureCollection | undefined {
   if (!collection) return undefined;
+  const demoted = demoteSmallFeatures(collection);
   return {
-    ...collection,
-    features: [...collection.features].sort((a, b) => CATEGORY_ORD[a.properties.category] - CATEGORY_ORD[b.properties.category]).map((feature) => {
+    ...demoted,
+    features: [...demoted.features].sort((a, b) => CATEGORY_ORD[a.properties.category] - CATEGORY_ORD[b.properties.category]).map((feature) => {
       if (feature.geometry.type === 'Polygon') {
         const coordinates = normalizePolygonRings(feature.geometry.coordinates as number[][][]);
         return { ...feature, geometry: { ...feature.geometry, coordinates } };
@@ -142,6 +213,37 @@ function signedRingArea(coords: number[][]): number {
 
 function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
   return Boolean(a && b && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1]);
+}
+
+// Polygons below this threshold render as a dot at typical map scale. Drawing
+// a broad separator stroke around them makes halo artifacts, so tiny features
+// keep only their thin category boundary.
+const MIN_SEPARATOR_FEATURE_AREA_DEG2 = 0.04;
+
+function lowerCategoryFor(category: ArtifactRiskCategory): Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'> | null {
+  const normalized = normalizeCategory(category);
+  const index = CATEGORY_RAMP.indexOf(normalized);
+  if (index <= 0) return null;
+  return CATEGORY_RAMP[index - 1];
+}
+
+// Build a sibling FeatureCollection of separator strokes sitting one risk-tier
+// below each higher band. These draw the lower category's color along each
+// inter-band edge without putting strokes directly on the fill layers.
+function buildSeparatorStrokeCollection(
+  collection: OutlookArtifactFeatureCollection,
+): OutlookArtifactFeatureCollection {
+  const features: OutlookArtifactFeatureCollection['features'] = [];
+  for (const feature of collection.features) {
+    const lower = lowerCategoryFor(feature.properties.category);
+    if (!lower) continue;
+    if (geometryArea(feature.geometry) < MIN_SEPARATOR_FEATURE_AREA_DEG2) continue;
+    features.push({
+      ...feature,
+      properties: { ...feature.properties, category: lower },
+    });
+  }
+  return { type: 'FeatureCollection', features };
 }
 
 function riskPolygonsForHour(
@@ -197,6 +299,11 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
     [renderedCollection],
   );
   const showRiskBandOutlines = hasGeneratedLayer && !usingTileRisk && riskBandOutlineCollection.features.length > 0;
+  const separatorStrokeCollection = useMemo(
+    () => buildSeparatorStrokeCollection(renderedCollection),
+    [renderedCollection],
+  );
+  const showSeparatorStrokes = hasGeneratedLayer && !usingTileRisk && separatorStrokeCollection.features.length > 0;
   const renderedMax = maxCategory(renderedCollection);
   const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
   const hasGeneratedArtifact = Boolean(selectedTile || artifactRiskCollection?.features.length || aggregateRiskCollection?.features.length);
@@ -302,6 +409,57 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             </Geographies>
           )}
 
+          {showSeparatorStrokes && (
+            <Geographies geography={separatorStrokeCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const rawCategory = separatorStrokeCollection.features[index]?.properties.category ?? 'TSTM';
+                  const category = normalizeCategory(rawCategory);
+                  const style = LEVEL_STYLE[category];
+                  return (
+                    <Geography
+                      key={`generated-risk-separator-${geo.rsmKey ?? index}-${rawCategory}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: {
+                          fill: 'none',
+                          stroke: style.fill,
+                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        hover: {
+                          fill: 'none',
+                          stroke: style.fill,
+                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        pressed: {
+                          fill: 'none',
+                          stroke: style.fill,
+                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
+                          strokeLinecap: 'round',
+                          strokeLinejoin: 'round',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
           {hasGeneratedLayer && (
             <Geographies geography={renderedCollection}>
               {({ geographies }) =>
@@ -309,33 +467,34 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                   const rawCategory = renderedCollection.features[index]?.properties.category ?? 'TSTM';
                   const category = normalizeCategory(rawCategory);
                   const style = LEVEL_STYLE[category];
+                  const featureKey = `${geo.rsmKey ?? index}-${rawCategory}`;
                   return (
                     <Geography
-                      key={`generated-risk-${geo.rsmKey ?? index}-${rawCategory}`}
+                      key={`generated-risk-${featureKey}`}
                       geography={geo}
                       tabIndex={-1}
                       style={{
                         default: {
                           fill: style.fill,
                           fillOpacity: usingTileRisk ? 0.58 : 0.48,
-                          stroke: usingTileRisk ? '#111111' : 'none',
-                          strokeWidth: usingTileRisk ? 0.08 : 0,
+                          stroke: 'none',
+                          strokeWidth: 0,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         hover: {
                           fill: style.fill,
                           fillOpacity: usingTileRisk ? 0.58 : 0.48,
-                          stroke: usingTileRisk ? '#111111' : 'none',
-                          strokeWidth: usingTileRisk ? 0.08 : 0,
+                          stroke: 'none',
+                          strokeWidth: 0,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         pressed: {
                           fill: style.fill,
                           fillOpacity: usingTileRisk ? 0.58 : 0.48,
-                          stroke: usingTileRisk ? '#111111' : 'none',
-                          strokeWidth: usingTileRisk ? 0.08 : 0,
+                          stroke: 'none',
+                          strokeWidth: 0,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -363,8 +522,8 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                         default: {
                           fill: 'none',
                           stroke: style.stroke,
-                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
-                          strokeOpacity: 0.92,
+                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
                           strokeLinecap: 'round',
                           strokeLinejoin: 'round',
                           outline: 'none',
@@ -373,8 +532,8 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                         hover: {
                           fill: 'none',
                           stroke: style.stroke,
-                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
-                          strokeOpacity: 0.92,
+                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
                           strokeLinecap: 'round',
                           strokeLinejoin: 'round',
                           outline: 'none',
@@ -383,8 +542,8 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                         pressed: {
                           fill: 'none',
                           stroke: style.stroke,
-                          strokeWidth: RISK_BAND_OUTLINE_WIDTH,
-                          strokeOpacity: 0.92,
+                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
+                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
                           strokeLinecap: 'round',
                           strokeLinejoin: 'round',
                           outline: 'none',

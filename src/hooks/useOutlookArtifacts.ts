@@ -30,7 +30,7 @@ const VALID_TIME_TOLERANCE_MS = 20 * 60 * 1000;
 const PREFETCH_RADIUS = 6;
 
 async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(apiUrl(url), { signal });
+  const response = await fetch(apiUrl(url), { signal, cache: 'no-store' });
   if (response.status === 404) {
     throw new Error('artifact_missing');
   }

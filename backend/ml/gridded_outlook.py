@@ -17,7 +17,8 @@ _PROBABILITY_VECTORIZATION_METHOD = "marching_squares_probability_contours"
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
 _THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
-_DISPLAY_BAND_GAP_METERS = 15_000.0
+_DISPLAY_BAND_GAP_METERS = 0.0
+_LOWER_OWNED_BOUNDARY_METERS = 5_000.0
 _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
 _DISPLAY_BAND_CRS = "EPSG:5070"
 _PROBABILITY_COLORS = {
@@ -1334,7 +1335,14 @@ def _display_gap_features(
             knockout = None
             applied_gap_m = 0.0
             applied_support_m = 0.0
-            if higher_display_union is not None and not higher_display_union.is_empty:
+            target_owned_boundary_m = (
+                _LOWER_OWNED_BOUNDARY_METERS
+                if position > 0
+                else 0.0
+            )
+            applied_owned_boundary_m = target_owned_boundary_m
+            if _DISPLAY_BAND_GAP_METERS > 0 and higher_display_union is not None and not higher_display_union.is_empty:
+                applied_owned_boundary_m = 0.0
                 display_geom, knockout, applied_gap_m, applied_support_m = _subtract_next_higher_display_gap(
                     display_geom,
                     higher_display_union,
@@ -1359,18 +1367,14 @@ def _display_gap_features(
             display_geom = _drop_small_projected_parts(display_geom, settings["minimumAreaKm2"] * 0.35 * 1_000_000.0)
             if display_geom.is_empty:
                 continue
-            lonlat_geom = shapely_transform(to_lonlat, display_geom)
-            geometry = _geojson_geometry_from_shapely(lonlat_geom, Polygon, MultiPolygon, GeometryCollection)
-            if geometry is None:
-                continue
             props = dict(feature.get("properties", {}))
-            props["componentCount"] = _projected_component_count(display_geom)
-            props["displayAreaKm2"] = round(float(display_geom.area) / 1_000_000.0, 1)
             vectorization = dict(props.get("vectorization") or {})
             vectorization.update({
-                "displayGeometry": "band_with_metric_gap",
+                "displayGeometry": "band_with_lower_owned_boundary" if applied_owned_boundary_m > 0 else "band_with_metric_gap",
                 "displayBandGapKm": round(applied_gap_m / 1000.0, 1),
                 "targetDisplayBandGapKm": round(_DISPLAY_BAND_GAP_METERS / 1000.0, 1),
+                "displayLowerOwnedBoundaryKm": round(applied_owned_boundary_m / 1000.0, 1),
+                "targetDisplayLowerOwnedBoundaryKm": round(target_owned_boundary_m / 1000.0, 1),
                 "displayMinimumSupportKm": round(applied_support_m / 1000.0, 1),
                 "targetDisplayMinimumSupportKm": round(settings["supportMeters"] / 1000.0, 1),
                 "displayProjection": _DISPLAY_BAND_CRS,
@@ -1379,16 +1383,23 @@ def _display_gap_features(
                 "displayMinimumAreaKm2": round(settings["minimumAreaKm2"], 1),
             })
             props["vectorization"] = vectorization
+            visible_display_geom = display_geom
+            lonlat_geom = shapely_transform(to_lonlat, visible_display_geom)
+            geometry = _geojson_geometry_from_shapely(lonlat_geom, Polygon, MultiPolygon, GeometryCollection)
+            if geometry is None:
+                continue
+            props["componentCount"] = _projected_component_count(visible_display_geom)
+            props["displayAreaKm2"] = round(float(visible_display_geom.area) / 1_000_000.0, 1)
             output_by_index[idx] = {
                 **feature,
                 "geometry": geometry,
                 "properties": props,
-                "_projectedDisplayGeometry": display_geom,
+                "_projectedDisplayGeometry": visible_display_geom,
             }
             higher_display_union = (
-                display_geom
+                visible_display_geom
                 if higher_display_union is None or higher_display_union.is_empty
-                else _clean_projected_geometry(unary_union([higher_display_union, display_geom]))
+                else _clean_projected_geometry(unary_union([higher_display_union, visible_display_geom]))
             )
 
     out: list[dict[str, Any]] = []
@@ -1409,6 +1420,9 @@ def _subtract_next_higher_display_gap(
     immediate_higher_display: Any,
     support_m: float,
 ) -> tuple[Any, Any | None, float, float]:
+    if _DISPLAY_BAND_GAP_METERS <= 0:
+        return base_geometry, None, 0.0, 0.0
+
     from shapely.ops import unary_union
 
     for factor in (1.0, 0.75, 0.50, 0.25, 0.10):

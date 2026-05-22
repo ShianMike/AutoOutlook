@@ -1083,7 +1083,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertLess(max_lon, -85.0)
         self.assertGreaterEqual(tstm["properties"]["vectorization"]["tendrilPruneIterations"], 2)
 
-    def test_risk_polygon_display_bands_have_metric_gaps(self) -> None:
+    def test_risk_polygon_display_bands_do_not_create_metric_gaps(self) -> None:
         lats = np.linspace(28.0, 40.0, 100)
         lons = np.linspace(-104.0, -86.0, 120)
         category = np.zeros((100, 120), dtype=np.int16)
@@ -1092,39 +1092,51 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         category[40:60, 45:75] = SPC_RISK_LABELS.index("SLGT")
 
         geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        self.assertEqual([feature["properties"]["category"] for feature in geojson["features"]], ["TSTM", "MRGL", "SLGT"])
         features = {feature["properties"]["category"]: feature for feature in geojson["features"]}
         tstm = projected_geojson_geometry(features["TSTM"]["geometry"])
         mrgl = projected_geojson_geometry(features["MRGL"]["geometry"])
         slgt = projected_geojson_geometry(features["SLGT"]["geometry"])
 
-        self.assertGreaterEqual(tstm.distance(mrgl), 12_000.0)
-        self.assertGreaterEqual(mrgl.distance(slgt), 12_000.0)
-        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["displayGeometry"], "band_with_metric_gap")
-        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
+        self.assertLess(tstm.distance(mrgl), 1_000.0)
+        self.assertLess(mrgl.distance(slgt), 1_000.0)
+        for feature in features.values():
+            vectorization = feature["properties"]["vectorization"]
+            self.assertEqual(vectorization["displayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["targetDisplayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["displayMinimumSupportKm"], 0.0)
+        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(features["TSTM"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(features["MRGL"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(features["SLGT"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(features["MRGL"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(features["SLGT"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 5.0)
 
-    def test_risk_polygon_display_bands_add_minimum_lower_support_width(self) -> None:
+    def test_risk_polygon_display_gap_zero_preserves_display_area_safeguards(self) -> None:
         lats = np.linspace(28.0, 40.0, 100)
         lons = np.linspace(-104.0, -86.0, 120)
         category = np.zeros((100, 120), dtype=np.int16)
         category[28:72, 34:86] = SPC_RISK_LABELS.index("ENH")
 
         geojson = risk_polygons_from_grid(lats, lons, category, 0, "2024-05-04T12:00:00Z", min_cells=10)
+        self.assertEqual([feature["properties"]["category"] for feature in geojson["features"]], ["TSTM", "MRGL", "SLGT", "ENH"])
         features = {feature["properties"]["category"]: feature for feature in geojson["features"]}
-        tstm = projected_geojson_geometry(features["TSTM"]["geometry"])
-        mrgl = projected_geojson_geometry(features["MRGL"]["geometry"])
-        slgt = projected_geojson_geometry(features["SLGT"]["geometry"])
-        enh = projected_geojson_geometry(features["ENH"]["geometry"])
+        display_areas = [features[category_name]["properties"]["displayAreaKm2"] for category_name in ["TSTM", "MRGL", "SLGT", "ENH"]]
 
-        mrgl_support = mrgl.buffer(50_000.0, quad_segs=8).difference(mrgl.buffer(20_000.0, quad_segs=8))
-        slgt_support = slgt.buffer(45_000.0, quad_segs=8).difference(slgt.buffer(20_000.0, quad_segs=8))
-        enh_support = enh.buffer(40_000.0, quad_segs=8).difference(enh.buffer(20_000.0, quad_segs=8))
-
-        self.assertGreater(area_coverage_fraction(tstm, mrgl_support), 0.40)
-        self.assertGreater(area_coverage_fraction(mrgl, slgt_support), 0.40)
-        self.assertGreater(area_coverage_fraction(slgt, enh_support), 0.40)
-        self.assertGreaterEqual(features["TSTM"]["properties"]["vectorization"]["displayMinimumSupportKm"], 45.0)
-        self.assertGreaterEqual(features["MRGL"]["properties"]["vectorization"]["displayMinimumSupportKm"], 40.0)
-        self.assertGreaterEqual(features["SLGT"]["properties"]["vectorization"]["displayMinimumSupportKm"], 35.0)
+        self.assertTrue(all(area > 0 for area in display_areas))
+        self.assertLess(max(display_areas) / min(display_areas), 2.5)
+        for feature in features.values():
+            vectorization = feature["properties"]["vectorization"]
+            self.assertEqual(vectorization["displayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["targetDisplayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["displayMinimumSupportKm"], 0.0)
+        tstm_vectorization = features["TSTM"]["properties"]["vectorization"]
+        self.assertEqual(tstm_vectorization["displayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(tstm_vectorization["targetDisplayLowerOwnedBoundaryKm"], 0.0)
+        for category_name in ["MRGL", "SLGT", "ENH"]:
+            vectorization = features[category_name]["properties"]["vectorization"]
+            self.assertEqual(vectorization["displayLowerOwnedBoundaryKm"], 5.0)
+            self.assertEqual(vectorization["targetDisplayLowerOwnedBoundaryKm"], 5.0)
 
     def test_risk_polygon_display_smoothing_removes_boxy_rectangles(self) -> None:
         lats = np.linspace(28.0, 40.0, 80)
@@ -1299,7 +1311,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertGreater(hail_5["properties"]["cellCount"], hail_5["properties"]["sourceCellCount"])
         self.assertTrue(hail_5["properties"]["vectorization"]["cartographicGeneralization"])
 
-    def test_hazard_probability_display_bands_have_metric_gaps(self) -> None:
+    def test_hazard_probability_display_bands_do_not_create_metric_gaps(self) -> None:
         lats = np.linspace(28.0, 40.0, 100)
         lons = np.linspace(-104.0, -86.0, 120)
         category = np.full((100, 120), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
@@ -1326,12 +1338,22 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         hail_15 = projected_geojson_geometry(hail["15%"]["geometry"])
         hail_30 = projected_geojson_geometry(hail["30%"]["geometry"])
 
-        self.assertGreaterEqual(hail_5.distance(hail_15), 12_000.0)
-        self.assertGreaterEqual(hail_15.distance(hail_30), 12_000.0)
+        self.assertLess(hail_5.distance(hail_15), 1_000.0)
+        self.assertLess(hail_15.distance(hail_30), 1_000.0)
         self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayGeometry"], "band_with_metric_gap")
-        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
+        for feature in hail.values():
+            vectorization = feature["properties"]["vectorization"]
+            self.assertEqual(vectorization["displayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["targetDisplayBandGapKm"], 0.0)
+            self.assertEqual(vectorization["displayMinimumSupportKm"], 0.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(hail["15%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(hail["30%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(hail["15%"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 5.0)
+        self.assertEqual(hail["30%"]["properties"]["vectorization"]["targetDisplayLowerOwnedBoundaryKm"], 5.0)
 
-    def test_hazard_probability_display_bands_add_minimum_lower_support_width(self) -> None:
+    def test_hazard_probability_display_gap_zero_preserves_smoothed_contours(self) -> None:
         lats = np.linspace(28.0, 40.0, 100)
         lons = np.linspace(-104.0, -86.0, 120)
         category = np.full((100, 120), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
@@ -1354,11 +1376,75 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         hail = {feature["properties"]["label"]: feature for feature in shapes["features"] if feature["properties"]["hazard"] == "hail"}
         hail_5 = projected_geojson_geometry(hail["5%"]["geometry"])
         hail_15 = projected_geojson_geometry(hail["15%"]["geometry"])
-        support = hail_15.buffer(50_000.0, quad_segs=8).difference(hail_15.buffer(20_000.0, quad_segs=8))
 
-        self.assertGreater(area_coverage_fraction(hail_5, support), 0.40)
-        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayBandGapKm"], 15.0)
-        self.assertGreaterEqual(hail["5%"]["properties"]["vectorization"]["displayMinimumSupportKm"], 45.0)
+        self.assertLess(hail_5.distance(hail_15), 1_000.0)
+        self.assertGreater(hail_5.area, 0.0)
+        self.assertGreater(hail_15.area, 0.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayBandGapKm"], 0.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayMinimumSupportKm"], 0.0)
+        self.assertEqual(hail["5%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 0.0)
+        self.assertEqual(hail["15%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 5.0)
+
+    def test_frontend_risk_fill_layers_are_stroke_free_with_separate_thin_boundaries(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        spc_source = (root / "src" / "components" / "SpcLevelOutlookMap.tsx").read_text(encoding="utf-8")
+        generated_source = (root / "src" / "components" / "GeneratedOutlookMap.tsx").read_text(encoding="utf-8")
+
+        spc_fill = spc_source[spc_source.index("key={`spc-level-${"):spc_source.index("key={`spc-level-boundary-")]
+        spc_separator = spc_source[spc_source.index("key={`spc-level-separator-"):spc_source.index("key={`spc-level-boundary-")]
+        spc_boundary = spc_source[spc_source.index("key={`spc-level-boundary-"):spc_source.index("key={`state-outline-")]
+        generated_fill = generated_source[generated_source.index("key={`generated-risk-${"):generated_source.index("key={`generated-risk-outline-")]
+        generated_separator = generated_source[generated_source.index("key={`generated-risk-separator-"):generated_source.index("key={`generated-risk-outline-")]
+        generated_boundary = generated_source[generated_source.index("key={`generated-risk-outline-"):generated_source.index("key={`generated-state-outline-")]
+
+        for fill_block in (spc_fill, generated_fill):
+            self.assertIn("stroke: 'none'", fill_block)
+            self.assertIn("strokeWidth: 0", fill_block)
+            self.assertNotIn("strokeWidth: 2.2", fill_block)
+
+        self.assertIn("RISK_BOUNDARY_STROKE_WIDTH = 1.05", spc_source)
+        self.assertIn("RISK_BAND_BOUNDARY_STROKE_WIDTH = 1.05", generated_source)
+        self.assertIn("RISK_SEPARATOR_STROKE_WIDTH = 5.25", spc_source)
+        self.assertIn("RISK_BAND_SEPARATOR_STROKE_WIDTH = 5.25", generated_source)
+        for separator_block in (spc_separator, generated_separator):
+            self.assertIn("fill: 'none'", separator_block)
+            self.assertIn("strokeWidth:", separator_block)
+            self.assertIn("strokeOpacity:", separator_block)
+            self.assertIn("strokeLinecap: 'round'", separator_block)
+            self.assertIn("strokeLinejoin: 'round'", separator_block)
+            self.assertIn("pointerEvents: 'none'", separator_block)
+        for boundary_block in (spc_boundary, generated_boundary):
+            self.assertIn("fill: 'none'", boundary_block)
+            self.assertIn("strokeWidth:", boundary_block)
+            self.assertIn("strokeOpacity:", boundary_block)
+            self.assertIn("strokeLinecap: 'round'", boundary_block)
+            self.assertIn("strokeLinejoin: 'round'", boundary_block)
+            self.assertIn("pointerEvents: 'none'", boundary_block)
+
+    def test_frontend_hazard_probability_fills_do_not_use_black_outlines(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
+        probability_fill = hazard_source[hazard_source.index("key={`artifact-prob-${"):hazard_source.index("key={`artifact-prob-boundary-")]
+        probability_separator = hazard_source[hazard_source.index("key={`artifact-prob-separator-"):hazard_source.index("key={`artifact-prob-${")]
+        probability_boundary = hazard_source[hazard_source.index("key={`artifact-prob-boundary-"):hazard_source.index("key={`artifact-sig-")]
+
+        self.assertIn("stroke: 'none'", probability_fill)
+        self.assertIn("strokeWidth: 0", probability_fill)
+        self.assertIn("strokeOpacity: 0", probability_fill)
+        self.assertNotIn("stroke: '#111111'", probability_fill)
+        self.assertIn("HAZARD_SEPARATOR_STROKE_WIDTH = 4.0", hazard_source)
+        self.assertIn("HAZARD_SEPARATOR_STROKE_OPACITY = 0.58", hazard_source)
+        self.assertIn("function darkenHexColor", hazard_source)
+        self.assertIn("const boundaryStroke = darkenHexColor(geo.properties.color)", hazard_source)
+        self.assertIn("HAZARD_BOUNDARY_STROKE_WIDTH = 0.45", hazard_source)
+        self.assertIn("HAZARD_BOUNDARY_STROKE_OPACITY = 0.64", hazard_source)
+        for overlay_block in (probability_separator, probability_boundary):
+            self.assertIn("fill: 'none'", overlay_block)
+            self.assertIn("strokeWidth:", overlay_block)
+            self.assertIn("strokeOpacity:", overlay_block)
+            self.assertIn("strokeLinecap: 'round'", overlay_block)
+            self.assertIn("strokeLinejoin: 'round'", overlay_block)
+            self.assertIn("pointerEvents: 'none'", overlay_block)
 
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)

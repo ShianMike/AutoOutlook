@@ -4,6 +4,7 @@ import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
+import { viewLinkHandler } from '../utils/navigateView';
 import RetroBadge from './retro/RetroBadge';
 
 interface CommandHeaderProps {
@@ -65,8 +66,14 @@ export default function CommandHeader({
     <header className="bg-ink text-paper border-b-[3px] border-paper/10 relative retro-scanline">
       <div className="px-4 py-2.5 xl:px-5 flex items-center gap-4">
         {/* Brand */}
-        <div className="flex items-center gap-3 min-w-fit">
-          <div className="bg-paper text-ink border-[3px] border-paper px-2 py-1 font-mono text-[10px] font-bold tracking-[0.3em]">
+        <a
+          href="#"
+          onClick={viewLinkHandler('')}
+          aria-label="AutoOutlook home"
+          title="Back to home"
+          className="group flex items-center gap-3 min-w-fit focus:outline-none"
+        >
+          <div className="bg-paper text-ink border-[3px] border-paper px-2 py-1 font-mono text-[10px] font-bold tracking-[0.3em] transition-transform group-hover:-translate-x-0.5 group-hover:-translate-y-0.5">
             AO/01
           </div>
           <div className="flex flex-col">
@@ -74,10 +81,10 @@ export default function CommandHeader({
               Auto<span className="text-signal-amber">Outlook</span>
             </h1>
             <span className="font-mono text-[9px] uppercase tracking-[0.25em] text-paper/60 mt-0.5">
-              Automated Convective Risk Intelligence
+              <span className="group-hover:text-paper">▸ Home</span> · Convective Risk Intelligence
             </span>
           </div>
-        </div>
+        </a>
 
         {/* Divider */}
         <div className="hidden md:block w-px self-stretch bg-paper/20 shrink-0" />

@@ -1,10 +1,22 @@
 # AutoOutlook — unified dev launcher
 # Opens two terminal windows: Flask backend (hot-reload) + Vite frontend (HMR).
 # Usage:  .\dev.ps1
+#         .\dev.ps1 -SyncArtifacts
+#         .\dev.ps1 -SkipArtifactSync
 # Stop:   close the two spawned windows, or Ctrl+C in each.
+
+param(
+    [switch]$SyncArtifacts,
+    [switch]$SkipArtifactSync
+)
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
+
+if ($SyncArtifacts -and $SkipArtifactSync) {
+    Write-Error "Choose only one artifact option: -SyncArtifacts or -SkipArtifactSync."
+    exit 1
+}
 
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
@@ -22,8 +34,18 @@ Write-Host ""
 $artifactBucket = "autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963"
 $artifactProject = "project-f47ca9d9-31bc-4a21-963"
 $artifactRoot = Join-Path $root "backend\artifacts"
+
+$shouldSyncArtifacts = $SyncArtifacts.IsPresent
+if (-not $SyncArtifacts -and -not $SkipArtifactSync) {
+    Write-Host "  Latest artifact generation" -ForegroundColor Yellow
+    Write-Host "  [Y] Download latest production artifacts before starting dev"
+    Write-Host "  [N] Use existing local backend\artifacts files"
+    $artifactChoice = Read-Host "  Sync latest artifacts now? (Y/N, default N)"
+    $shouldSyncArtifacts = $artifactChoice -match '^(?i:y(?:es)?)$'
+}
+
 $gcloud = Get-Command gcloud -ErrorAction SilentlyContinue
-if ($gcloud) {
+if ($shouldSyncArtifacts -and $gcloud) {
     Write-Host "  Syncing latest production artifacts from gs://$artifactBucket ..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
     foreach ($name in @("latest", "latest_incremental", "latest_incremental_complete")) {
@@ -31,8 +53,10 @@ if ($gcloud) {
         New-Item -ItemType Directory -Force -Path $target | Out-Null
         & gcloud storage rsync -r "gs://$artifactBucket/$name" $target --project $artifactProject | Out-Host
     }
-} else {
+} elseif ($shouldSyncArtifacts) {
     Write-Warning "gcloud was not found. Local dev will use any existing files under backend\artifacts."
+} else {
+    Write-Host "  Skipping artifact sync. Local dev will use existing backend\artifacts files." -ForegroundColor Gray
 }
 
 # Backend: FLASK_DEBUG=1 enables Werkzeug file-watcher; any .py save restarts Flask

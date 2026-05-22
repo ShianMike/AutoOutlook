@@ -104,7 +104,19 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-pulse-dot,
   .animate-scan,
-  .animate-ticker {
+  .animate-ticker,
+  .animate-overlay-in,
+  .animate-overlay-out,
+  .animate-panel-in,
+  .animate-load-bar,
+  .animate-radar-sweep,
+  .animate-corner-spin,
+  .animate-boot-line,
+  .animate-blink {
     animation: none !important;
+  }
+  /* Make the load-bar appear filled when motion is reduced. */
+  .animate-load-bar {
+    width: 100% !important;
   }
 }

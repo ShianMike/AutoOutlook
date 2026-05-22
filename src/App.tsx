@@ -18,13 +18,32 @@ import WatchReadinessPanel from './components/WatchReadinessPanel';
 import SystemStatusPanel from './components/SystemStatusPanel';
 import DocsSidebar from './components/docs/DocsSidebar';
 import DocumentationPage from './components/docs/DocumentationPage';
+import LandingPage from './components/landing/LandingPage';
+import ChangelogPage from './components/changelog/ChangelogPage';
+import ViewTransitionOverlay from './components/ViewTransitionOverlay';
 
-type AppView = 'dashboard' | 'docs';
+type AppView = 'landing' | 'dashboard' | 'docs' | 'changelog';
+
+const DASHBOARD_ANCHORS = new Set([
+  'dashboard',
+  'time-scrubber',
+  'outlook-map',
+  'primary-outlook',
+  'hazards',
+  'ingredients',
+  'timeline',
+  'discussion',
+  'readiness',
+  'system-status',
+]);
 
 function viewFromHash(): AppView {
-  if (typeof window === 'undefined') return 'dashboard';
+  if (typeof window === 'undefined') return 'landing';
   const id = window.location.hash.replace(/^#/, '');
-  return id === 'docs' || id.startsWith('docs-') ? 'docs' : 'dashboard';
+  if (id === 'docs' || id.startsWith('docs-')) return 'docs';
+  if (id === 'changelog' || id.startsWith('release-')) return 'changelog';
+  if (DASHBOARD_ANCHORS.has(id)) return 'dashboard';
+  return 'landing';
 }
 
 export default function App() {
@@ -65,7 +84,26 @@ export default function App() {
     return () => window.cancelAnimationFrame(raf);
   }, [view]);
 
+  if (view === 'landing') {
+    return (
+      <>
+        <LandingPage />
+        <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+      </>
+    );
+  }
+
+  if (view === 'changelog') {
+    return (
+      <>
+        <ChangelogPage />
+        <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+      </>
+    );
+  }
+
   return (
+    <>
     <div className="min-h-screen bg-paper text-ink lg:flex">
       {view === 'docs' ? <DocsSidebar /> : <DashboardSidebar />}
 
@@ -160,16 +198,18 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v0.1
+              AutoOutlook · Automated Convective Risk Intelligence · v0.2
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven
-                ? 'XGBoost hazard model · Provider chain: NOMADS → Open-Meteo → mock'
-                : 'Rule-based outlook engine · Provider chain: NOMADS → Open-Meteo → mock'}
+                ? 'Hazard-probability model · Provider chain: live → fallback → mock'
+                : 'Rule-based outlook engine · Provider chain: live → fallback → mock'}
             </span>
           </div>
         </footer>
       </div>
     </div>
+    <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+    </>
   );
 }
