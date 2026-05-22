@@ -59,15 +59,6 @@ const LEVEL_STYLE: Record<RiskCategory, { fill: string; stroke: string; label: s
 };
 
 const CATEGORY_RAMP: RiskCategory[] = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MOD', 'HIGH'];
-const RISK_BOUNDARY_STROKE_WIDTH = 1.05;
-const RISK_BOUNDARY_STROKE_OPACITY = 0.78;
-const RISK_SEPARATOR_STROKE_WIDTH = 5.25;
-const RISK_SEPARATOR_STROKE_OPACITY = 0.58;
-
-function lowerCategoryFor(category: RiskCategory): RiskCategory | null {
-  const index = CATEGORY_RAMP.indexOf(category);
-  return index > 0 ? CATEGORY_RAMP[index - 1] : null;
-}
 
 function interpAnchor(x: number, anchors: [number, number][]): number {
   for (let i = 0; i < anchors.length - 1; i++) {
@@ -858,9 +849,12 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
                       geography={geo}
                       tabIndex={-1}
                       style={{
+                        // Fill opacity raised to 0.80 so the band reads as
+                        // a solid color. Bands merge through color contrast
+                        // alone since all boundary strokes have been removed.
                         default: {
                           fill,
-                          fillOpacity: 0.48,
+                          fillOpacity: 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
                           outline: 'none',
@@ -868,7 +862,7 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
                         },
                         hover: {
                           fill,
-                          fillOpacity: 0.48,
+                          fillOpacity: 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
                           outline: 'none',
@@ -876,111 +870,9 @@ export default function SpcLevelOutlookMap({ snapshot }: SpcLevelOutlookMapProps
                         },
                         pressed: {
                           fill,
-                          fillOpacity: 0.48,
+                          fillOpacity: 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
-          {featureCollection.features.length > 0 && (
-            <Geographies geography={featureCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const featureProps = featureCollection.features[index]?.properties;
-                  const lowerCategory = featureProps ? lowerCategoryFor(featureProps.category) : null;
-                  if (!lowerCategory) return null;
-                  const stroke = LEVEL_STYLE[lowerCategory].fill;
-                  return (
-                    <Geography
-                      key={`spc-level-separator-${featureProps?.featureKey ?? geo.rsmKey ?? index}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        hover: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        pressed: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
-          {featureCollection.features.length > 0 && (
-            <Geographies geography={featureCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const featureProps = featureCollection.features[index]?.properties;
-                  const stroke = featureProps?.stroke ?? LEVEL_STYLE.TSTM.stroke;
-                  return (
-                    <Geography
-                      key={`spc-level-boundary-${featureProps?.featureKey ?? geo.rsmKey ?? index}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        hover: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        pressed: {
-                          fill: 'none',
-                          stroke,
-                          strokeWidth: RISK_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },

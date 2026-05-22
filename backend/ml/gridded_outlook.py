@@ -17,7 +17,7 @@ _PROBABILITY_VECTORIZATION_METHOD = "marching_squares_probability_contours"
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
 _THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
-_DISPLAY_BAND_GAP_METERS = 0.0
+_DISPLAY_BAND_GAP_METERS = 10_000.0
 _LOWER_OWNED_BOUNDARY_METERS = 5_000.0
 _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
 _DISPLAY_BAND_CRS = "EPSG:5070"
@@ -1326,14 +1326,15 @@ def _display_gap_features(
             projected = projected_by_index.get(idx)
             if projected is None or projected.is_empty:
                 continue
-            immediate_higher_display = (
-                output_by_index.get(ordered[position + 1][0], {}).get("_projectedDisplayGeometry")
-                if position + 1 < len(ordered)
+            immediate_lower_projected = (
+                projected_by_index.get(ordered[position - 1][0])
+                if position > 0
                 else None
             )
             display_geom = projected
             knockout = None
             applied_gap_m = 0.0
+            applied_higher_expansion_m = 0.0
             applied_support_m = 0.0
             target_owned_boundary_m = (
                 _LOWER_OWNED_BOUNDARY_METERS
@@ -1341,12 +1342,19 @@ def _display_gap_features(
                 else 0.0
             )
             applied_owned_boundary_m = target_owned_boundary_m
+            if _DISPLAY_BAND_GAP_METERS > 0 and position > 0:
+                applied_owned_boundary_m = 0.0
+                display_geom, applied_higher_expansion_m = _expand_display_geometry_into_lower_space(
+                    display_geom,
+                    immediate_lower_projected,
+                    _DISPLAY_BAND_GAP_METERS,
+                )
             if _DISPLAY_BAND_GAP_METERS > 0 and higher_display_union is not None and not higher_display_union.is_empty:
                 applied_owned_boundary_m = 0.0
-                display_geom, knockout, applied_gap_m, applied_support_m = _subtract_next_higher_display_gap(
+                applied_gap_m = _DISPLAY_BAND_GAP_METERS
+                display_geom, knockout, applied_support_m = _subtract_occupied_higher_display_space(
                     display_geom,
                     higher_display_union,
-                    immediate_higher_display,
                     support_m=settings_by_index[idx]["supportMeters"],
                 )
             settings = settings_by_index[idx]
@@ -1369,10 +1377,18 @@ def _display_gap_features(
                 continue
             props = dict(feature.get("properties", {}))
             vectorization = dict(props.get("vectorization") or {})
+            if _DISPLAY_BAND_GAP_METERS > 0 and (applied_gap_m > 0 or applied_higher_expansion_m > 0):
+                display_geometry_label = "band_with_higher_owned_gap"
+            elif applied_owned_boundary_m > 0:
+                display_geometry_label = "band_with_lower_owned_boundary"
+            else:
+                display_geometry_label = "smoothed_cumulative_band"
             vectorization.update({
-                "displayGeometry": "band_with_lower_owned_boundary" if applied_owned_boundary_m > 0 else "band_with_metric_gap",
+                "displayGeometry": display_geometry_label,
                 "displayBandGapKm": round(applied_gap_m / 1000.0, 1),
                 "targetDisplayBandGapKm": round(_DISPLAY_BAND_GAP_METERS / 1000.0, 1),
+                "displayHigherRiskExpansionKm": round(applied_higher_expansion_m / 1000.0, 1),
+                "targetDisplayHigherRiskExpansionKm": round((_DISPLAY_BAND_GAP_METERS if position > 0 else 0.0) / 1000.0, 1),
                 "displayLowerOwnedBoundaryKm": round(applied_owned_boundary_m / 1000.0, 1),
                 "targetDisplayLowerOwnedBoundaryKm": round(target_owned_boundary_m / 1000.0, 1),
                 "displayMinimumSupportKm": round(applied_support_m / 1000.0, 1),
@@ -1412,6 +1428,53 @@ def _display_gap_features(
         elif idx not in consumed_indices:
             out.append(feature)
     return out
+
+
+def _expand_display_geometry_into_lower_space(
+    display_geometry: Any,
+    lower_display_geometry: Any,
+    expansion_m: float,
+) -> tuple[Any, float]:
+    if expansion_m <= 0 or lower_display_geometry is None or lower_display_geometry.is_empty:
+        return display_geometry, 0.0
+
+    from shapely.ops import unary_union
+
+    expanded = _clean_projected_geometry(display_geometry.buffer(expansion_m, quad_segs=10, join_style=1))
+    if expanded.is_empty:
+        return display_geometry, 0.0
+    clipped_expansion = _clean_projected_geometry(expanded.intersection(lower_display_geometry))
+    if clipped_expansion.is_empty:
+        return display_geometry, 0.0
+    occupied = _clean_projected_geometry(unary_union([display_geometry, clipped_expansion]))
+    if occupied.is_empty:
+        return display_geometry, 0.0
+    return occupied, float(expansion_m)
+
+
+def _subtract_occupied_higher_display_space(
+    base_geometry: Any,
+    higher_occupied_union: Any,
+    support_m: float,
+) -> tuple[Any, Any | None, float]:
+    if higher_occupied_union is None or higher_occupied_union.is_empty:
+        return base_geometry, None, 0.0
+
+    from shapely.ops import unary_union
+
+    for factor in (1.0, 0.75, 0.50, 0.25, 0.10):
+        support_width_m = max(0.0, float(support_m)) * factor
+        supported_base = _clean_projected_geometry(
+            unary_union([
+                base_geometry,
+                higher_occupied_union.buffer(support_width_m, quad_segs=10, join_style=1),
+            ]),
+        )
+        candidate = _clean_projected_geometry(supported_base.difference(higher_occupied_union))
+        if not candidate.is_empty and float(candidate.area) >= max(1.0, float(base_geometry.area) * 0.005):
+            return candidate, higher_occupied_union, support_width_m
+    candidate = _clean_projected_geometry(base_geometry.difference(higher_occupied_union))
+    return candidate, higher_occupied_union, 0.0
 
 
 def _subtract_next_higher_display_gap(

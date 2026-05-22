@@ -58,10 +58,6 @@ const LEVEL_STYLE: Record<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>, { fill:
 };
 
 const CATEGORY_RAMP: Array<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>> = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'];
-const RISK_BAND_BOUNDARY_STROKE_WIDTH = 1.05;
-const RISK_BAND_BOUNDARY_STROKE_OPACITY = 0.78;
-const RISK_BAND_SEPARATOR_STROKE_WIDTH = 5.25;
-const RISK_BAND_SEPARATOR_STROKE_OPACITY = 0.58;
 const CATEGORY_ORD: Record<ArtifactRiskCategory, number> = {
   NONE: 0,
   TSTM: 1,
@@ -215,37 +211,6 @@ function samePoint(a: number[] | undefined, b: number[] | undefined): boolean {
   return Boolean(a && b && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1]);
 }
 
-// Polygons below this threshold render as a dot at typical map scale. Drawing
-// a broad separator stroke around them makes halo artifacts, so tiny features
-// keep only their thin category boundary.
-const MIN_SEPARATOR_FEATURE_AREA_DEG2 = 0.04;
-
-function lowerCategoryFor(category: ArtifactRiskCategory): Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'> | null {
-  const normalized = normalizeCategory(category);
-  const index = CATEGORY_RAMP.indexOf(normalized);
-  if (index <= 0) return null;
-  return CATEGORY_RAMP[index - 1];
-}
-
-// Build a sibling FeatureCollection of separator strokes sitting one risk-tier
-// below each higher band. These draw the lower category's color along each
-// inter-band edge without putting strokes directly on the fill layers.
-function buildSeparatorStrokeCollection(
-  collection: OutlookArtifactFeatureCollection,
-): OutlookArtifactFeatureCollection {
-  const features: OutlookArtifactFeatureCollection['features'] = [];
-  for (const feature of collection.features) {
-    const lower = lowerCategoryFor(feature.properties.category);
-    if (!lower) continue;
-    if (geometryArea(feature.geometry) < MIN_SEPARATOR_FEATURE_AREA_DEG2) continue;
-    features.push({
-      ...feature,
-      properties: { ...feature.properties, category: lower },
-    });
-  }
-  return { type: 'FeatureCollection', features };
-}
-
 function riskPolygonsForHour(
   collection: OutlookArtifactFeatureCollection | undefined,
   forecastHour: number | undefined,
@@ -291,19 +256,6 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
   const usingTileRisk = selectedCollection === tileRiskCollection;
   const renderedCollection = selectedCollection;
   const hasGeneratedLayer = renderedCollection.features.length > 0;
-  const riskBandOutlineCollection = useMemo(
-    () => ({
-      type: 'FeatureCollection' as const,
-      features: renderedCollection.features,
-    }),
-    [renderedCollection],
-  );
-  const showRiskBandOutlines = hasGeneratedLayer && !usingTileRisk && riskBandOutlineCollection.features.length > 0;
-  const separatorStrokeCollection = useMemo(
-    () => buildSeparatorStrokeCollection(renderedCollection),
-    [renderedCollection],
-  );
-  const showSeparatorStrokes = hasGeneratedLayer && !usingTileRisk && separatorStrokeCollection.features.length > 0;
   const renderedMax = maxCategory(renderedCollection);
   const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
   const hasGeneratedArtifact = Boolean(selectedTile || artifactRiskCollection?.features.length || aggregateRiskCollection?.features.length);
@@ -409,57 +361,6 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             </Geographies>
           )}
 
-          {showSeparatorStrokes && (
-            <Geographies geography={separatorStrokeCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const rawCategory = separatorStrokeCollection.features[index]?.properties.category ?? 'TSTM';
-                  const category = normalizeCategory(rawCategory);
-                  const style = LEVEL_STYLE[category];
-                  return (
-                    <Geography
-                      key={`generated-risk-separator-${geo.rsmKey ?? index}-${rawCategory}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: {
-                          fill: 'none',
-                          stroke: style.fill,
-                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        hover: {
-                          fill: 'none',
-                          stroke: style.fill,
-                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        pressed: {
-                          fill: 'none',
-                          stroke: style.fill,
-                          strokeWidth: RISK_BAND_SEPARATOR_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_SEPARATOR_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
           {hasGeneratedLayer && (
             <Geographies geography={renderedCollection}>
               {({ geographies }) =>
@@ -474,9 +375,12 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                       geography={geo}
                       tabIndex={-1}
                       style={{
+                        // Fill opacity raised to 0.80 / 0.88 so bands
+                        // read as solid colors. Bands merge through color
+                        // contrast alone since all boundary strokes removed.
                         default: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
                           outline: 'none',
@@ -484,7 +388,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                         },
                         hover: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
                           outline: 'none',
@@ -492,60 +396,9 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
                         },
                         pressed: {
                           fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.58 : 0.48,
+                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
                           stroke: 'none',
                           strokeWidth: 0,
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
-          {showRiskBandOutlines && (
-            <Geographies geography={riskBandOutlineCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const rawCategory = riskBandOutlineCollection.features[index]?.properties.category ?? 'TSTM';
-                  const category = normalizeCategory(rawCategory);
-                  const style = LEVEL_STYLE[category];
-                  return (
-                    <Geography
-                      key={`generated-risk-outline-${geo.rsmKey ?? index}-${rawCategory}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: {
-                          fill: 'none',
-                          stroke: style.stroke,
-                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        hover: {
-                          fill: 'none',
-                          stroke: style.stroke,
-                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
-                          outline: 'none',
-                          pointerEvents: 'none',
-                        },
-                        pressed: {
-                          fill: 'none',
-                          stroke: style.stroke,
-                          strokeWidth: RISK_BAND_BOUNDARY_STROKE_WIDTH,
-                          strokeOpacity: RISK_BAND_BOUNDARY_STROKE_OPACITY,
-                          strokeLinecap: 'round',
-                          strokeLinejoin: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
