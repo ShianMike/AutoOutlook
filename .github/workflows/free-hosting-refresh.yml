@@ -23,7 +23,7 @@ env:
   AUTOOUTLOOK_GRID_STRIDE: ${{ vars.AUTOOUTLOOK_GRID_STRIDE || '3' }}
   AUTOOUTLOOK_TILE_STRIDE: ${{ vars.AUTOOUTLOOK_TILE_STRIDE || '1' }}
   AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
-  CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook' }}
+  CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook-pages' }}
 
 jobs:
   refresh:

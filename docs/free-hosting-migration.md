@@ -18,7 +18,7 @@ This migration removes Google Cloud from the public serving path and from the sc
 
 ## Cloudflare Setup
 
-Create a Pages project named `autooutlook`, then add these GitHub repository secrets:
+Create a Pages project named `autooutlook-pages`, then add these GitHub repository secrets:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
@@ -28,7 +28,7 @@ CLOUDFLARE_API_TOKEN
 Optional repository variables:
 
 ```text
-CLOUDFLARE_PAGES_PROJECT=autooutlook
+CLOUDFLARE_PAGES_PROJECT=autooutlook-pages
 AUTOOUTLOOK_PRODUCTION_INDEX_URL=https://autooutlook.tech/api/outlook/incremental
 AUTOOUTLOOK_HOUR_WORKERS=2
 AUTOOUTLOOK_RANGE_WORKERS=2
