@@ -95,6 +95,7 @@ def write_bootstrap_models(models_dir: Path = MODEL_DIR) -> dict[str, Any]:
         "featureNames": list(FEATURE_NAMES),
         "hazards": list(HAZARD_KEYS),
         "trainingRows": 0,
+        "allowBootstrapRuntime": True,
         "note": "Local bootstrap term model. Replace with archive-trained XGBoost artifacts for production accuracy.",
     }
     (models_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

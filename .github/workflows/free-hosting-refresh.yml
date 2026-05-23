@@ -54,6 +54,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Bootstrap runtime hazard models
+        run: python -m backend.ml.bootstrap_models
+
       - name: Detect latest complete HRRR cycle
         id: cycle
         shell: bash
