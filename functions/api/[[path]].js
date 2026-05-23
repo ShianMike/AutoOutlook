@@ -57,6 +57,12 @@ async function fetchStaticAsset(context, staticPath) {
   return context.env.ASSETS.fetch(new Request(url.toString(), context.request));
 }
 
+function isMissingAssetResponse(response) {
+  if (response.status === 404) return true;
+  const contentType = response.headers.get('content-type') || '';
+  return response.ok && contentType.toLowerCase().includes('text/html');
+}
+
 function notReady(pathname, status = 404) {
   return Response.json(
     {
@@ -86,8 +92,9 @@ export async function onRequest(context) {
   if (!staticPath) return notReady(pathname);
 
   const assetResponse = await fetchStaticAsset(context, staticPath);
-  if (assetResponse.status === 404) {
-    return notReady(pathname, pathname === '/api/forecast' ? 503 : 404);
+  if (isMissingAssetResponse(assetResponse)) {
+    const status = pathname === '/api/forecast' || pathname === '/api/health' ? 503 : 404;
+    return notReady(pathname, status);
   }
 
   const headers = new Headers(assetResponse.headers);
