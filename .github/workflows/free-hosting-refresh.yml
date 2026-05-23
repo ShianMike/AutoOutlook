@@ -24,6 +24,7 @@ env:
   AUTOOUTLOOK_TILE_STRIDE: ${{ vars.AUTOOUTLOOK_TILE_STRIDE || '1' }}
   AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
   CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook-pages' }}
+  CLOUDFLARE_PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'master' }}
 
 jobs:
   refresh:
@@ -130,4 +131,4 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=main
+          command: pages deploy dist --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=${{ env.CLOUDFLARE_PAGES_BRANCH }}
