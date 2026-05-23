@@ -1,0 +1,133 @@
+name: Refresh static AutoOutlook artifacts
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Deploy even when the production index already reports the same cycle.'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: autooutlook-static-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AUTOOUTLOOK_HOUR_WORKERS: ${{ vars.AUTOOUTLOOK_HOUR_WORKERS || '2' }}
+  AUTOOUTLOOK_RANGE_WORKERS: ${{ vars.AUTOOUTLOOK_RANGE_WORKERS || '2' }}
+  AUTOOUTLOOK_GRID_STRIDE: ${{ vars.AUTOOUTLOOK_GRID_STRIDE || '3' }}
+  AUTOOUTLOOK_TILE_STRIDE: ${{ vars.AUTOOUTLOOK_TILE_STRIDE || '1' }}
+  AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
+  CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook' }}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install Python dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Detect latest complete HRRR cycle
+        id: cycle
+        shell: bash
+        run: |
+          python scripts/detect-hrrr-cycle.py --require-forecast-hour 48 > cycle.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          payload = json.load(open("cycle.json", encoding="utf-8"))
+          print(f"cycle={payload.get('cycle', '')}")
+          print(f"cycle_time_iso={payload.get('cycleTimeISO', '')}")
+          PY
+
+      - name: Check deployed cycle
+        id: deployed
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
+          expected = "${{ steps.cycle.outputs.cycle_time_iso }}"
+          force = "${{ github.event.inputs.force_deploy || 'false' }}".lower() == "true"
+          should_generate = True
+          reason = "production index unavailable"
+          if force:
+              reason = "manual force_deploy requested"
+          else:
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      payload = json.load(response)
+                  ready = payload.get("readyForecastHours") or []
+                  if payload.get("cycleTimeISO") == expected and payload.get("status") == "complete" and len(ready) >= 49:
+                      should_generate = False
+                      reason = "production already has this complete cycle"
+                  else:
+                      reason = f"production cycle is {payload.get('cycleTimeISO')!r}, expected {expected!r}"
+              except Exception as exc:
+                  reason = f"production index check failed: {exc}"
+          print(f"should_generate={'true' if should_generate else 'false'}")
+          print(f"reason={reason}")
+          PY
+
+      - name: Skip unchanged cycle
+        if: steps.deployed.outputs.should_generate == 'false'
+        run: echo "${{ steps.deployed.outputs.reason }}"
+
+      - name: Generate incremental artifacts
+        if: steps.deployed.outputs.should_generate == 'true'
+        run: |
+          python -m backend.ml.outlook_pipeline `
+            --incremental `
+            --all-hours `
+            --cycle-policy complete-requested `
+            --output-dir backend/artifacts/latest_incremental `
+            --cache-dir backend/cache/hrrr_selected `
+            --hour-workers "$env:AUTOOUTLOOK_HOUR_WORKERS" `
+            --range-workers "$env:AUTOOUTLOOK_RANGE_WORKERS" `
+            --grid-stride "$env:AUTOOUTLOOK_GRID_STRIDE" `
+            --tile-stride "$env:AUTOOUTLOOK_TILE_STRIDE"
+        shell: pwsh
+
+      - name: Build frontend
+        if: steps.deployed.outputs.should_generate == 'true'
+        run: npm run build
+
+      - name: Export static API
+        if: steps.deployed.outputs.should_generate == 'true'
+        run: python scripts/export-static-api.py
+
+      - name: Deploy to Cloudflare Pages
+        if: steps.deployed.outputs.should_generate == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=main
