@@ -25,10 +25,28 @@ CLOUDFLARE_API_TOKEN
 
 SSH into the new VM, then run:
 
+For a public repo:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ShianMike/AutoOutlook/master/scripts/oci/install-autooutlook-runner.sh -o install-autooutlook-runner.sh
 sudo bash install-autooutlook-runner.sh
 ```
+
+For a private repo, create a fine-grained GitHub token with read-only contents access to `ShianMike/AutoOutlook`, then run:
+
+```bash
+read -rsp "GitHub read token: " GITHUB_TOKEN
+echo
+curl \
+  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  -H "Accept: application/vnd.github.raw" \
+  -fsSL "https://api.github.com/repos/ShianMike/AutoOutlook/contents/scripts/oci/install-autooutlook-runner.sh?ref=master" \
+  -o install-autooutlook-runner.sh
+sudo GITHUB_TOKEN="${GITHUB_TOKEN}" bash install-autooutlook-runner.sh
+unset GITHUB_TOKEN
+```
+
+The private-repo path stores the read-only token in the managed checkout's Git remote URL so the hourly job can pull updates. Use a token scoped only to this repository's contents.
 
 The installer creates:
 

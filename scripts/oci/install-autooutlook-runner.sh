@@ -26,6 +26,10 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ -n "${GITHUB_TOKEN:-}" && "${REPO_URL}" == "https://github.com/ShianMike/AutoOutlook.git" ]]; then
+  REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/ShianMike/AutoOutlook.git"
+fi
+
 apt-get update
 apt-get install -y \
   bash \
