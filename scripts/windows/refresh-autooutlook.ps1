@@ -123,10 +123,11 @@ function Ensure-NodeDependencies {
 
 function Test-ProductionHasCycle {
     param(
-        [string]$CycleTimeIso
+        [string]$CycleTimeIso,
+        [switch]$IgnoreForce
     )
 
-    if ($Force) {
+    if ($Force -and -not $IgnoreForce) {
         Write-Host "Manual force requested."
         return $false
     }
@@ -198,6 +199,15 @@ function Remove-LocalDeployOutputs {
         -Path (Join-Path $script:RepoDir "dist") `
         -ExpectedPath (Join-Path $script:RepoDir "dist") `
         -Label "Cloudflare deploy bundle"
+}
+
+function Remove-LocalHrrrCache {
+    $expectedCacheDir = Join-Path $env:ProgramData "AutoOutlook\cache\hrrr_selected"
+    Remove-GeneratedDirectory `
+        -Path $hrrrCacheDir `
+        -ExpectedPath $expectedCacheDir `
+        -Label "selected HRRR cache"
+    New-Item -ItemType Directory -Force -Path $hrrrCacheDir | Out-Null
 }
 
 $envFile = [Environment]::GetEnvironmentVariable("AUTOOUTLOOK_ENV_FILE", "Process")
@@ -289,8 +299,15 @@ try {
         )
     }
 
-    if (Test-EnvFlag "AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY" $true) {
+    $productionConfirmed = Test-ProductionHasCycle -CycleTimeIso $cycle.cycleTimeISO -IgnoreForce
+    if (-not $productionConfirmed) {
+        Write-Host "[cleanup] skipped because production did not confirm the deployed cycle yet."
+    }
+    elseif (Test-EnvFlag "AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY" $true) {
         Invoke-Step "Clean local deploy outputs" { Remove-LocalDeployOutputs }
+        if (Test-EnvFlag "AUTOOUTLOOK_CLEANUP_CACHE_AFTER_DEPLOY" $true) {
+            Invoke-Step "Clean local HRRR cache" { Remove-LocalHrrrCache }
+        }
     }
 
     $maxAgeDays = if ($env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS) { [int]$env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS } else { 2 }

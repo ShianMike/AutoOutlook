@@ -42,9 +42,10 @@ After a successful Cloudflare Pages deploy, the runner removes the local generat
 backend/artifacts/latest_incremental/
 backend/artifacts/latest_incremental_complete/
 dist/
+C:\ProgramData\AutoOutlook\cache\hrrr_selected\
 ```
 
-This keeps the Windows checkout from accumulating the large per-cycle artifact files. Set `AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY=false` in `C:\ProgramData\AutoOutlook\refresh.env` if you need to keep a completed local deploy bundle for debugging.
+This keeps the Windows checkout from accumulating the large per-cycle artifact files and clears the HRRR selected-field cache once the deployed cycle is confirmed on production. Set `AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY=false` in `C:\ProgramData\AutoOutlook\refresh.env` if you need to keep a completed local deploy bundle for debugging, or `AUTOOUTLOOK_CLEANUP_CACHE_AFTER_DEPLOY=false` if you want to keep the HRRR cache for a same-cycle retry.
 
 Edit the env file and add the Cloudflare values:
 
