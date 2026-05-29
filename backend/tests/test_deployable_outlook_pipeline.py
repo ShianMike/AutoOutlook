@@ -23,10 +23,12 @@ from backend.hrrr_selected import (
     SelectedHrrrValidationError,
     _fetch_range,
     _request_with_backoff,
+    coalesced_fetch_ranges,
     descriptor_matches_selected,
     downsample_hrrr_grid,
     latest_available_hrrr_cycle_with_metadata,
     parse_idx,
+    selected_record_ranges,
     selected_ranges,
     selected_term_report,
     validate_decoded_hrrr_fields,
@@ -226,6 +228,22 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(descriptor_matches_selected(records[0][2]))
         self.assertFalse(descriptor_matches_selected(records[1][2]))
         self.assertEqual(selected_ranges(records, 500), [(0, 99), (200, 299), (400, 499)])
+
+    def test_selected_hrrr_ranges_coalesce_adjacent_and_tiny_gaps(self) -> None:
+        idx_text = "\n".join([
+            "1:0:d=2024050412:CAPE:surface:anl:",
+            "2:100:d=2024050412:CIN:surface:anl:",
+            "3:200:d=2024050412:REFC:entire atmosphere:anl:",
+            "4:260:d=2024050412:DPT:2 m above ground:anl:",
+            "5:360:d=2024050412:TMP:2 m above ground:anl:",
+            "6:900:d=2024050412:UGRD:10 m above ground:anl:",
+        ])
+        records = parse_idx(idx_text)
+        ranges = selected_record_ranges(records, 1000)
+
+        self.assertEqual(selected_ranges(records, 1000), [(0, 99), (100, 199), (260, 359), (360, 899), (900, 999)])
+        self.assertEqual(coalesced_fetch_ranges(ranges, max_gap_bytes=0), [(0, 199), (260, 999)])
+        self.assertEqual(coalesced_fetch_ranges(ranges, max_gap_bytes=64), [(0, 999)])
 
     def test_selected_term_report_separates_required_and_optional_missing_terms(self) -> None:
         records = parse_idx(required_idx_text())

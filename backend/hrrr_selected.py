@@ -33,7 +33,18 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_nonnegative_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return int(default)
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return int(default)
+
+
 DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
+DEFAULT_RANGE_COALESCE_GAP_BYTES = _env_nonnegative_int("AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES", 2 * 1024 * 1024)
 
 SELECTED_HRRR_TERMS = (
     ":CAPE:surface:",
@@ -233,6 +244,33 @@ def selected_ranges(
     return [(item.start, item.end) for item in selected_record_ranges(records, content_length, terms)]
 
 
+def coalesced_fetch_ranges(
+    ranges: Iterable[SelectedRange],
+    max_gap_bytes: int = DEFAULT_RANGE_COALESCE_GAP_BYTES,
+) -> list[tuple[int, int]]:
+    """Merge nearby selected records into fewer S3 byte-range requests."""
+    ordered = sorted(ranges, key=lambda item: (item.start, item.end))
+    if not ordered:
+        return []
+
+    max_gap_bytes = max(0, int(max_gap_bytes))
+    merged: list[tuple[int, int]] = []
+    current_start = ordered[0].start
+    current_end = ordered[0].end
+
+    for item in ordered[1:]:
+        gap = item.start - current_end - 1
+        if gap <= max_gap_bytes:
+            current_end = max(current_end, item.end)
+            continue
+        merged.append((current_start, current_end))
+        current_start = item.start
+        current_end = item.end
+
+    merged.append((current_start, current_end))
+    return merged
+
+
 def latest_available_hrrr_cycle(
     session: requests.Session | None = None,
     now: datetime | None = None,
@@ -317,6 +355,7 @@ def fetch_selected_hrrr_hour_with_metadata(
     cache_ttl_hours: float = DEFAULT_CACHE_TTL_HOURS,
     no_cache: bool = False,
     grid_stride: int = 1,
+    range_coalesce_gap_bytes: int | None = None,
 ) -> SelectedHrrrHour:
     """Download, decode, validate, downsample, and optionally cache one HRRR hour."""
     started = time.perf_counter()
@@ -366,16 +405,22 @@ def fetch_selected_hrrr_hour_with_metadata(
         ranges = [(item.start, item.end) for item in range_items]
         if not ranges:
             raise ValueError(f"No selected HRRR records found in {ref.idx_url}")
+        coalesce_gap = (
+            DEFAULT_RANGE_COALESCE_GAP_BYTES
+            if range_coalesce_gap_bytes is None
+            else max(0, int(range_coalesce_gap_bytes))
+        )
+        fetch_ranges = coalesced_fetch_ranges(range_items, max_gap_bytes=coalesce_gap)
 
         chunks_by_start: dict[int, bytes] = {}
-        worker_count = max(1, min(max_workers, len(ranges)))
+        worker_count = max(1, min(max_workers, len(fetch_ranges)))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {executor.submit(_fetch_range, session, ref.grib_url, start, end): (start, end) for start, end in ranges}
+            futures = {executor.submit(_fetch_range, session, ref.grib_url, start, end): (start, end) for start, end in fetch_ranges}
             for future in as_completed(futures):
                 start, chunk = future.result()
                 chunks_by_start[start] = chunk
 
-        chunks = [chunks_by_start[start] for start, _ in sorted(ranges)]
+        chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
         messages = decode_grib2(b"".join(chunks))
         lats, lons, fields = _messages_to_fields(messages)
         lats, lons, fields = downsample_hrrr_grid(lats, lons, fields, grid_stride)
@@ -386,7 +431,10 @@ def fetch_selected_hrrr_hour_with_metadata(
             **term_report,
             "contentLength": content_length,
             "selectedRangeCount": len(ranges),
+            "fetchRangeCount": len(fetch_ranges),
+            "rangeCoalesceGapBytes": coalesce_gap,
             "selectedByteCount": int(sum(end - start + 1 for start, end in ranges)),
+            "fetchedByteCount": int(sum(end - start + 1 for start, end in fetch_ranges)),
             "decodedFieldNames": sorted(fields),
             "gridShape": list(_grid_shape(lats, lons, fields)),
             "fetchLatencyMs": int((time.perf_counter() - started) * 1000),

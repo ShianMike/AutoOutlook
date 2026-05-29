@@ -26,6 +26,16 @@ C:\ProgramData\AutoOutlook\state\
 C:\ProgramData\AutoOutlook\cache\hrrr_selected\
 ```
 
+The default local fetch profile is tuned for the Windows runner:
+
+```text
+AUTOOUTLOOK_HOUR_WORKERS=3
+AUTOOUTLOOK_RANGE_WORKERS=4
+AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES=2097152
+```
+
+That runs three forecast hours at a time, uses four parallel S3 byte-range downloads within each hour, and merges selected HRRR records separated by no more than 2 MiB so the runner makes fewer HTTP requests per hour.
+
 Edit the env file and add the Cloudflare values:
 
 ```powershell
