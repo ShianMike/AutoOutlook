@@ -6,13 +6,13 @@ This migration removes Google Cloud from the public serving path and from the sc
 
 - Cloudflare Pages serves the Vite build and the `autooutlook.tech` custom domain.
 - A Cloudflare Pages Function handles `/api/*` and maps those routes to static files generated under `dist/_api`.
-- GitHub Actions runs the HRRR/XGBoost artifact job on a schedule.
-- The action deploys only when a newer complete F00-F48 HRRR cycle is available, keeping Cloudflare Pages deploys below the Free plan's 500/month limit.
+- A scheduled runner runs the HRRR/XGBoost artifact job. GitHub Actions can do this, but an Oracle Always Free VM with `systemd` is the preferred no-GitHub-billing path.
+- The runner deploys only when a newer complete F00-F48 HRRR cycle is available, keeping Cloudflare Pages deploys below the Free plan's 500/month limit.
 - No public request triggers HRRR downloads, model inference, polygon generation, or preview generation.
 
 ## Required Accounts
 
-- GitHub repository with Actions enabled. Public repositories can use standard GitHub-hosted runners without Actions minute charges.
+- GitHub repository with Actions enabled, or an Oracle Always Free VM configured with `docs/oracle-always-free-runner.md`.
 - Cloudflare Free account with a Pages project.
 - Cloudflare API token with Pages deploy permission.
 
