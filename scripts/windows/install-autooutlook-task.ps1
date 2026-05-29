@@ -3,6 +3,7 @@ param(
     [string]$RepoDir = "",
     [string]$TaskName = "AutoOutlook Static Refresh",
     [string]$EnvFile = (Join-Path $env:ProgramData "AutoOutlook\refresh.env"),
+    [string[]]$UtcRunTimes = @("01:30", "07:30", "13:30", "19:30"),
     [switch]$RegisterWithoutCredentials
 )
 
@@ -37,6 +38,20 @@ function Read-EnvFile {
         $values[$key] = $value
     }
     return $values
+}
+
+function Convert-UtcRunTimeToLocalTriggerTime {
+    param([string]$UtcRunTime)
+
+    if ($UtcRunTime -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+        throw "Invalid UTC run time '$UtcRunTime'. Use HH:mm, for example 01:30."
+    }
+
+    $hour = [int]$matches[1]
+    $minute = [int]$matches[2]
+    $utcDate = [DateTime]::SpecifyKind([DateTime]::UtcNow.Date.AddHours($hour).AddMinutes($minute), [DateTimeKind]::Utc)
+    $localDate = [TimeZoneInfo]::ConvertTimeFromUtc($utcDate, [TimeZoneInfo]::Local)
+    return [DateTime]::Today.Add($localDate.TimeOfDay)
 }
 
 $programDataDir = Join-Path $env:ProgramData "AutoOutlook"
@@ -90,12 +105,38 @@ if (-not (Test-Path -LiteralPath $refreshScript)) {
     throw "Refresh script not found: $refreshScript"
 }
 
-$taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$refreshScript`""
-$result = & schtasks.exe /Create /TN $TaskName /TR $taskCommand /SC HOURLY /MO 1 /ST 00:30 /F 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw ($result -join [Environment]::NewLine)
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$refreshScript`""
+
+$localRunTimes = $UtcRunTimes |
+    ForEach-Object { Convert-UtcRunTimeToLocalTriggerTime -UtcRunTime $_ } |
+    Sort-Object TimeOfDay -Unique
+
+$triggers = $localRunTimes | ForEach-Object {
+    New-ScheduledTaskTrigger -Daily -At $_
 }
 
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 5) `
+    -MultipleInstances IgnoreNew
+
+$principal = New-ScheduledTaskPrincipal `
+    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive `
+    -RunLevel Limited
+
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $triggers `
+    -Settings $settings `
+    -Principal $principal `
+    -Description "Runs AutoOutlook refresh at 01:30Z, 07:30Z, 13:30Z, and 19:30Z." `
+    -Force | Out-Null
+
 Write-Host "Registered scheduled task '$TaskName'."
+Write-Host "UTC run times: $($UtcRunTimes -join ', ')"
+Write-Host "Local run times: $(($localRunTimes | ForEach-Object { $_.ToString('HH:mm') }) -join ', ')"
 Write-Host "Manual test:"
 Write-Host "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$refreshScript`""

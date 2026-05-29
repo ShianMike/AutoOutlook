@@ -1,6 +1,6 @@
 # Windows Task Scheduler Runner
 
-This is the temporary free runner for AutoOutlook on the local Windows machine. It replaces the hourly GitHub Actions scheduler with a Windows scheduled task that:
+This is the temporary free runner for AutoOutlook on the local Windows machine. It replaces the GitHub Actions scheduler with a Windows scheduled task that:
 
 1. Detects the latest complete HRRR cycle.
 2. Skips work when `https://autooutlook.tech/api/outlook/incremental` already has that complete cycle.
@@ -39,10 +39,18 @@ CLOUDFLARE_ACCOUNT_ID=...
 CLOUDFLARE_API_TOKEN=...
 ```
 
-Then rerun the installer to register the hourly task:
+Then rerun the installer to register the cycle-aligned task:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1
+```
+
+By default, the task runs at `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z`, which is one hour and thirty minutes after the `00Z`, `06Z`, `12Z`, and `18Z` HRRR cycles. On a UTC+8 Windows timezone, that appears in Task Scheduler as `09:30`, `15:30`, `21:30`, and `03:30` local time.
+
+To override the UTC run times:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1 -UtcRunTimes 01:30,07:30,13:30,19:30
 ```
 
 ## Manual Test
