@@ -118,6 +118,8 @@ $triggers = $localRunTimes | ForEach-Object {
 }
 
 $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Hours 5) `
     -MultipleInstances IgnoreNew
 

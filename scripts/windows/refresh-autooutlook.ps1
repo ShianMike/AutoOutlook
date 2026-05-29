@@ -43,6 +43,18 @@ function Invoke-Step {
     & $Script
 }
 
+function Invoke-NativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "$FilePath exited with code $LASTEXITCODE"
+    }
+}
+
 function Get-PythonExecutable {
     $configured = [Environment]::GetEnvironmentVariable("AUTOOUTLOOK_PYTHON", "Process")
     if (-not [string]::IsNullOrWhiteSpace($configured)) {
@@ -72,7 +84,7 @@ function Ensure-PythonEnvironment {
     $venvPython = Join-Path $script:VenvDir "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $venvPython)) {
         New-Item -ItemType Directory -Force -Path $script:VenvDir | Out-Null
-        & $basePython -m venv $script:VenvDir
+        Invoke-NativeCommand $basePython @("-m", "venv", $script:VenvDir)
     }
 
     $requirementsPath = Join-Path $script:RepoDir "backend\requirements.txt"
@@ -81,8 +93,8 @@ function Ensure-PythonEnvironment {
     $previousHash = if (Test-Path -LiteralPath $stateHashPath) { Get-Content -LiteralPath $stateHashPath -Raw } else { "" }
 
     if ($currentHash -ne $previousHash.Trim()) {
-        & $venvPython -m pip install --upgrade pip wheel setuptools
-        & $venvPython -m pip install -r $requirementsPath
+        Invoke-NativeCommand $venvPython @("-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools")
+        Invoke-NativeCommand $venvPython @("-m", "pip", "install", "-r", $requirementsPath)
         $currentHash | Set-Content -LiteralPath $stateHashPath -Encoding ASCII
     }
 
@@ -97,7 +109,7 @@ function Ensure-NodeDependencies {
     $previousHash = if (Test-Path -LiteralPath $stateHashPath) { Get-Content -LiteralPath $stateHashPath -Raw } else { "" }
 
     if ((-not (Test-Path -LiteralPath $nodeModulesPath)) -or $currentHash -ne $previousHash.Trim()) {
-        & npm ci
+        Invoke-NativeCommand "npm" @("ci")
         $currentHash | Set-Content -LiteralPath $stateHashPath -Encoding ASCII
     }
 }
@@ -170,11 +182,17 @@ try {
 
     $python = Invoke-Step "Prepare Python dependencies" { Ensure-PythonEnvironment }
     Invoke-Step "Prepare frontend dependencies" { Ensure-NodeDependencies }
-    Invoke-Step "Bootstrap runtime hazard models" { & $python -m backend.ml.bootstrap_models }
+    Invoke-Step "Bootstrap runtime hazard models" {
+        Invoke-NativeCommand $python @("-m", "backend.ml.bootstrap_models")
+    }
 
     $cyclePath = Join-Path $script:StateDir "cycle.json"
     Invoke-Step "Detect latest complete HRRR cycle" {
-        & $python scripts/detect-hrrr-cycle.py --require-forecast-hour 48 | Set-Content -LiteralPath $cyclePath -Encoding UTF8
+        $cycleOutput = & $python "scripts/detect-hrrr-cycle.py" "--require-forecast-hour" "48"
+        if ($LASTEXITCODE -ne 0) {
+            throw "$python scripts/detect-hrrr-cycle.py exited with code $LASTEXITCODE"
+        }
+        $cycleOutput | Set-Content -LiteralPath $cyclePath -Encoding UTF8
     }
 
     $cycle = Get-Content -LiteralPath $cyclePath -Raw | ConvertFrom-Json
@@ -183,22 +201,32 @@ try {
     }
 
     Invoke-Step "Generate incremental artifacts" {
-        & $python -m backend.ml.outlook_pipeline `
-            --incremental `
-            --all-hours `
-            --cycle-policy complete-requested `
-            --output-dir backend/artifacts/latest_incremental `
-            --cache-dir $hrrrCacheDir `
-            --hour-workers $env:AUTOOUTLOOK_HOUR_WORKERS `
-            --range-workers $env:AUTOOUTLOOK_RANGE_WORKERS `
-            --grid-stride $env:AUTOOUTLOOK_GRID_STRIDE `
-            --tile-stride $env:AUTOOUTLOOK_TILE_STRIDE
+        Invoke-NativeCommand $python @(
+            "-m", "backend.ml.outlook_pipeline",
+            "--incremental",
+            "--all-hours",
+            "--cycle-policy", "complete-requested",
+            "--output-dir", "backend/artifacts/latest_incremental",
+            "--cache-dir", $hrrrCacheDir,
+            "--hour-workers", $env:AUTOOUTLOOK_HOUR_WORKERS,
+            "--range-workers", $env:AUTOOUTLOOK_RANGE_WORKERS,
+            "--grid-stride", $env:AUTOOUTLOOK_GRID_STRIDE,
+            "--tile-stride", $env:AUTOOUTLOOK_TILE_STRIDE
+        )
     }
 
-    Invoke-Step "Build frontend" { & npm run build }
-    Invoke-Step "Export static API" { & $python scripts/export-static-api.py }
+    Invoke-Step "Build frontend" { Invoke-NativeCommand "npm" @("run", "build") }
+    Invoke-Step "Export static API" { Invoke-NativeCommand $python @("scripts/export-static-api.py") }
     Invoke-Step "Deploy to Cloudflare Pages" {
-        & npx --yes wrangler@latest pages deploy dist --project-name=$env:CLOUDFLARE_PAGES_PROJECT --branch=$env:CLOUDFLARE_PAGES_BRANCH
+        Invoke-NativeCommand "npx" @(
+            "--yes",
+            "wrangler@latest",
+            "pages",
+            "deploy",
+            "dist",
+            "--project-name=$env:CLOUDFLARE_PAGES_PROJECT",
+            "--branch=$env:CLOUDFLARE_PAGES_BRANCH"
+        )
     }
 
     $maxAgeDays = if ($env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS) { [int]$env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS } else { 2 }
