@@ -35,6 +35,7 @@ AUTOOUTLOOK_RANGE_WORKERS=4
 AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES=2097152
 AUTOOUTLOOK_GRID_STRIDE=3
 AUTOOUTLOOK_TILE_STRIDE=1
+AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY=true
 ```
 
 During staging, set `AUTOOUTLOOK_PRODUCTION_INDEX_URL` to the Pages preview URL so the hourly job can skip unchanged cycles before `autooutlook.tech` is moved.

@@ -147,6 +147,59 @@ function Test-ProductionHasCycle {
     }
 }
 
+function Test-EnvFlag {
+    param(
+        [string]$Name,
+        [bool]$Default = $false
+    )
+
+    $value = [Environment]::GetEnvironmentVariable($Name, "Process")
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $Default
+    }
+    return $value.Trim().ToLowerInvariant() -in @("1", "true", "yes", "on")
+}
+
+function Remove-GeneratedDirectory {
+    param(
+        [string]$Path,
+        [string]$ExpectedPath,
+        [string]$Label
+    )
+
+    $target = [System.IO.Path]::GetFullPath($Path)
+    $expected = [System.IO.Path]::GetFullPath($ExpectedPath)
+    if (-not $target.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean unexpected $Label path: $target"
+    }
+
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Host "[cleanup] $Label not present: $target"
+        return
+    }
+
+    $measure = Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum
+    $megabytes = [math]::Round(($measure.Sum / 1MB), 1)
+    Remove-Item -LiteralPath $target -Recurse -Force
+    Write-Host "[cleanup] removed $Label files=$($measure.Count) sizeMB=$megabytes path=$target"
+}
+
+function Remove-LocalDeployOutputs {
+    $artifactsRoot = Join-Path $script:RepoDir "backend\artifacts"
+    Remove-GeneratedDirectory `
+        -Path (Join-Path $artifactsRoot "latest_incremental") `
+        -ExpectedPath (Join-Path $script:RepoDir "backend\artifacts\latest_incremental") `
+        -Label "incremental artifacts"
+    Remove-GeneratedDirectory `
+        -Path (Join-Path $artifactsRoot "latest_incremental_complete") `
+        -ExpectedPath (Join-Path $script:RepoDir "backend\artifacts\latest_incremental_complete") `
+        -Label "complete incremental artifacts"
+    Remove-GeneratedDirectory `
+        -Path (Join-Path $script:RepoDir "dist") `
+        -ExpectedPath (Join-Path $script:RepoDir "dist") `
+        -Label "Cloudflare deploy bundle"
+}
+
 $envFile = [Environment]::GetEnvironmentVariable("AUTOOUTLOOK_ENV_FILE", "Process")
 if ([string]::IsNullOrWhiteSpace($envFile)) {
     $envFile = Join-Path $env:ProgramData "AutoOutlook\refresh.env"
@@ -234,6 +287,10 @@ try {
             "--project-name=$env:CLOUDFLARE_PAGES_PROJECT",
             "--branch=$env:CLOUDFLARE_PAGES_BRANCH"
         )
+    }
+
+    if (Test-EnvFlag "AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY" $true) {
+        Invoke-Step "Clean local deploy outputs" { Remove-LocalDeployOutputs }
     }
 
     $maxAgeDays = if ($env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS) { [int]$env:AUTOOUTLOOK_CACHE_MAX_AGE_DAYS } else { 2 }

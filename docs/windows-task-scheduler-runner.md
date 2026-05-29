@@ -36,6 +36,16 @@ AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES=2097152
 
 That runs three forecast hours at a time, uses four parallel S3 byte-range downloads within each hour, and merges selected HRRR records separated by no more than 2 MiB so the runner makes fewer HTTP requests per hour.
 
+After a successful Cloudflare Pages deploy, the runner removes the local generated outputs by default:
+
+```text
+backend/artifacts/latest_incremental/
+backend/artifacts/latest_incremental_complete/
+dist/
+```
+
+This keeps the Windows checkout from accumulating the large per-cycle artifact files. Set `AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY=false` in `C:\ProgramData\AutoOutlook\refresh.env` if you need to keep a completed local deploy bundle for debugging.
+
 Edit the env file and add the Cloudflare values:
 
 ```powershell
