@@ -21,6 +21,7 @@ interface HazardOutlookMapProps {
   hazard: OutlookHazardKey;
   title: string;
   sourceLabel?: string;
+  activeRegion?: 'conus' | 'philippines';
 }
 
 interface UpperAirFeature {
@@ -54,7 +55,19 @@ interface TriplePointFeature {
   geometry: { type: 'LineString'; coordinates: [number, number][] };
 }
 
-export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel }: HazardOutlookMapProps) {
+export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel, activeRegion = 'conus' }: HazardOutlookMapProps) {
+  const isPhil = activeRegion === 'philippines';
+  const geoUrl = isPhil ? '/world-110m.json' : STATES_URL;
+  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
+  const projectionConfig = isPhil
+    ? { center: [121.8, 12.5] as [number, number], scale: 2800 }
+    : {
+        rotate: [96, 0, 0] as [number, number, number],
+        center: [0, 38] as [number, number],
+        parallels: [29.5, 45.5] as [number, number],
+        scale: 1000,
+      };
+
   const cfg = HAZARD_CONFIGS[hazard];
   const contourHour = snapshot?.forecastHour ?? 0;
 
@@ -227,19 +240,14 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
           // every polygon's path, which combined with default nonzero
           // fill-rule made our small probability ellipses paint as if the
           // whole canvas were filled (with the ellipse acting as a hole).
-          projection="geoAlbers"
+          projection={projection}
           width={900}
           height={520}
-          projectionConfig={{
-            rotate: [96, 0, 0],   // center longitude on -96°W
-            center: [0, 38],       // tilt so CONUS sits in the middle
-            parallels: [29.5, 45.5],
-            scale: 1000,
-          }}
+          projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
           {/* Base CONUS states (AK/HI excluded - geoAlbers is CONUS-only) */}
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
@@ -346,7 +354,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel 
             );
           })}
 
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography

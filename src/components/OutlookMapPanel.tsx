@@ -246,6 +246,7 @@ export default function OutlookMapPanel({
   const [mode, setMode] = useState<OutlookMode>('levels');
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
+  const [activeRegion, setActiveRegion] = useState<'conus' | 'philippines'>('conus');
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingGif, setIsExportingGif] = useState(false);
   const [gifDialogOpen, setGifDialogOpen] = useState(false);
@@ -481,6 +482,21 @@ export default function OutlookMapPanel({
           </div>
         </div>
 
+        {/* Region selector row */}
+        <div className="flex flex-wrap items-center justify-between gap-2 p-2 border-t-[3px] border-ink bg-paper/45">
+          <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
+            Active Region
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <SubModeButton active={activeRegion === 'conus'} onClick={() => setActiveRegion('conus')} disabled={isAnyExporting}>
+              United States (CONUS)
+            </SubModeButton>
+            <SubModeButton active={activeRegion === 'philippines'} onClick={() => setActiveRegion('philippines')} disabled={isAnyExporting}>
+              Philippines (Global IFS)
+            </SubModeButton>
+          </div>
+        </div>
+
         {/* Hazard View sub-row */}
         {mode === 'hazards' && (
           <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-paper/40 border-t-[0px] transition-all">
@@ -707,6 +723,7 @@ export default function OutlookMapPanel({
               status={outlookArtifacts.status}
               artifacts={outlookArtifacts.artifacts}
               message={outlookArtifacts.message}
+              activeRegion={activeRegion}
             />
           </div>
         ) : (
@@ -728,6 +745,7 @@ export default function OutlookMapPanel({
                     title="Thunderstorm Outlook"
                     artifacts={outlookArtifacts.artifacts}
                     status={outlookArtifacts.status}
+                    activeRegion={activeRegion}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={snapshot}
@@ -735,6 +753,7 @@ export default function OutlookMapPanel({
                     title="Hail Outlook"
                     artifacts={outlookArtifacts.artifacts}
                     status={outlookArtifacts.status}
+                    activeRegion={activeRegion}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={snapshot}
@@ -742,6 +761,7 @@ export default function OutlookMapPanel({
                     title="Damaging Wind Outlook"
                     artifacts={outlookArtifacts.artifacts}
                     status={outlookArtifacts.status}
+                    activeRegion={activeRegion}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={snapshot}
@@ -749,6 +769,7 @@ export default function OutlookMapPanel({
                     title="Tornado Outlook"
                     artifacts={outlookArtifacts.artifacts}
                     status={outlookArtifacts.status}
+                    activeRegion={activeRegion}
                   />
                 </>
               ) : (
@@ -766,15 +787,16 @@ export default function OutlookMapPanel({
                   }
                   artifacts={outlookArtifacts.artifacts}
                   status={outlookArtifacts.status}
+                  activeRegion={activeRegion}
                 />
               )
             ) : useRuleHazardFallback ? (
               hazardLayout === 'all' ? (
                 <>
-                  <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule fallback" />
-                  <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" />
-                  <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" />
-                  <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" />
+                  <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
+                  <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
+                  <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
+                  <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
                 </>
               ) : (
                 <HazardOutlookMap
@@ -790,6 +812,7 @@ export default function OutlookMapPanel({
                           : 'Tornado Outlook'
                   }
                   sourceLabel="Rule fallback"
+                  activeRegion={activeRegion}
                 />
               )
             ) : (

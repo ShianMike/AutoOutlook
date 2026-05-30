@@ -30,6 +30,7 @@ interface GeneratedHazardProbabilityMapProps {
   title: string;
   artifacts: OutlookArtifacts | null;
   status: ArtifactStatus;
+  activeRegion?: 'conus' | 'philippines';
 }
 
 export function hasGeneratedHazardTile(
@@ -47,7 +48,20 @@ export default function GeneratedHazardProbabilityMap({
   title,
   artifacts,
   status,
+  activeRegion = 'conus',
 }: GeneratedHazardProbabilityMapProps) {
+  const isPhil = activeRegion === 'philippines';
+  const geoUrl = isPhil ? '/world-110m.json' : STATES_URL;
+  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
+  const projectionConfig = isPhil
+    ? { center: [121.8, 12.5] as [number, number], scale: 2800 }
+    : {
+        rotate: [96, 0, 0] as [number, number, number],
+        center: [0, 38] as [number, number],
+        parallels: [29.5, 45.5] as [number, number],
+        scale: 1000,
+      };
+
   const forecastHour = snapshot?.forecastHour;
   const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
   const displayForecastHour = tile?.forecastHour ?? forecastHour;
@@ -181,18 +195,13 @@ export default function GeneratedHazardProbabilityMap({
       </header>
       <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
-          projection="geoAlbers"
+          projection={projection}
           width={900}
           height={520}
-          projectionConfig={{
-            rotate: [96, 0, 0],
-            center: [0, 38],
-            parallels: [29.5, 45.5],
-            scale: 1000,
-          }}
+          projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
@@ -308,11 +317,11 @@ export default function GeneratedHazardProbabilityMap({
             </Geographies>
           )}
 
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
-                  key={`generated-hazard-state-outline-${geo.rsmKey}`}
+                  key={`generated-hazard-outline-${geo.rsmKey}`}
                   geography={geo}
                   style={{
                     default: { fill: 'none', stroke: '#777777', strokeWidth: 0.55, strokeOpacity: 0.75, outline: 'none' },

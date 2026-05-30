@@ -21,6 +21,7 @@ interface GeneratedOutlookMapProps {
   status: ArtifactState;
   artifacts: OutlookArtifacts | null;
   message: string | null;
+  activeRegion?: 'conus' | 'philippines';
 }
 
 interface UpperAirFeature {
@@ -221,7 +222,18 @@ function riskPolygonsForHour(
   return { ...collection, features };
 }
 
-export default function GeneratedOutlookMap({ snapshot, status, artifacts, message }: GeneratedOutlookMapProps) {
+export default function GeneratedOutlookMap({ snapshot, status, artifacts, message, activeRegion = 'conus' }: GeneratedOutlookMapProps) {
+  const isPhil = activeRegion === 'philippines';
+  const geoUrl = isPhil ? '/world-110m.json' : STATES_URL;
+  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
+  const projectionConfig = isPhil
+    ? { center: [121.8, 12.5] as [number, number], scale: 2800 }
+    : {
+        rotate: [96, 0, 0] as [number, number, number],
+        center: [0, 38] as [number, number],
+        parallels: [29.5, 45.5] as [number, number],
+        scale: 1000,
+      };
   const selectedForecastHour = snapshot?.forecastHour;
   const selectedTile = useMemo(
     () => getArtifactHourTile(artifacts, selectedForecastHour),
@@ -316,18 +328,13 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
 
       <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
-          projection="geoAlbers"
+          projection={projection}
           width={900}
           height={520}
-          projectionConfig={{
-            rotate: [96, 0, 0],
-            center: [0, 38],
-            parallels: [29.5, 45.5],
-            scale: 1000,
-          }}
+          projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
@@ -410,11 +417,11 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             </Geographies>
           )}
 
-          <Geographies geography={STATES_URL}>
+          <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
-                  key={`generated-state-outline-${geo.rsmKey}`}
+                  key={`generated-outline-${geo.rsmKey}`}
                   geography={geo}
                   style={{
                     default: { fill: 'none', stroke: '#8f8f8f', strokeWidth: 0.7, strokeOpacity: 0.85, outline: 'none' },
