@@ -210,74 +210,95 @@ def _parse_grid_lambert(data, pos):
     }
 
 
+_LAMBERT_CACHE = {}
+
+
 def _lambert_to_regular(grid, values_2d):
     """Regrid Lambert data onto a regular lat/lon grid."""
-    radius = 6371229.0
-    phi1 = np.radians(grid["Latin1"])
-    phi2 = np.radians(grid["Latin2"])
-    lov_deg = grid["LoV"]
-    lov_rad = np.radians(lov_deg)
-
-    if abs(grid["Latin1"] - grid["Latin2"]) < 1e-10:
-        n = np.sin(phi1)
+    cache_key = (
+        grid["Ni"],
+        grid["Nj"],
+        grid["la1"],
+        grid["lo1"],
+        grid["LaD"],
+        grid["LoV"],
+        grid["Dx"],
+        grid["Dy"],
+        grid["Latin1"],
+        grid["Latin2"]
+    )
+    
+    if cache_key in _LAMBERT_CACHE:
+        reg_lats, reg_lons, j0c, i0c, di, dj, valid = _LAMBERT_CACHE[cache_key]
     else:
-        n = (
-            (np.log(np.cos(phi1)) - np.log(np.cos(phi2)))
-            / (
-                np.log(np.tan(np.pi / 4 + phi2 / 2))
-                - np.log(np.tan(np.pi / 4 + phi1 / 2))
+        radius = 6371229.0
+        phi1 = np.radians(grid["Latin1"])
+        phi2 = np.radians(grid["Latin2"])
+        lov_deg = grid["LoV"]
+        lov_rad = np.radians(lov_deg)
+
+        if abs(grid["Latin1"] - grid["Latin2"]) < 1e-10:
+            n = np.sin(phi1)
+        else:
+            n = (
+                (np.log(np.cos(phi1)) - np.log(np.cos(phi2)))
+                / (
+                    np.log(np.tan(np.pi / 4 + phi2 / 2))
+                    - np.log(np.tan(np.pi / 4 + phi1 / 2))
+                )
             )
-        )
 
-    f = np.cos(phi1) * np.tan(np.pi / 4 + phi1 / 2) ** n / n
-    rho0 = radius * f / np.tan(np.pi / 4 + np.radians(grid["LaD"]) / 2) ** n
+        f = np.cos(phi1) * np.tan(np.pi / 4 + phi1 / 2) ** n / n
+        rho0 = radius * f / np.tan(np.pi / 4 + np.radians(grid["LaD"]) / 2) ** n
 
-    la1_rad = np.radians(grid["la1"])
-    lo1_rad = np.radians(grid["lo1"])
-    rho_1 = radius * f / np.tan(np.pi / 4 + la1_rad / 2) ** n
-    theta_1 = n * (lo1_rad - lov_rad)
-    x0 = rho_1 * np.sin(theta_1)
-    y0 = rho0 - rho_1 * np.cos(theta_1)
+        la1_rad = np.radians(grid["la1"])
+        lo1_rad = np.radians(grid["lo1"])
+        rho_1 = radius * f / np.tan(np.pi / 4 + la1_rad / 2) ** n
+        theta_1 = n * (lo1_rad - lov_rad)
+        x0 = rho_1 * np.sin(theta_1)
+        y0 = rho0 - rho_1 * np.cos(theta_1)
 
-    nx, ny = grid["Ni"], grid["Nj"]
-    dx, dy = grid["Dx"], grid["Dy"]
+        nx, ny = grid["Ni"], grid["Nj"]
+        dx, dy = grid["Dx"], grid["Dy"]
 
-    x_arr = x0 + np.arange(nx) * dx
-    y_arr = y0 + np.arange(ny) * dy
-    xx, yy = np.meshgrid(x_arr, y_arr)
+        x_arr = x0 + np.arange(nx) * dx
+        y_arr = y0 + np.arange(ny) * dy
+        xx, yy = np.meshgrid(x_arr, y_arr)
 
-    rho = np.sign(n) * np.sqrt(xx**2 + (rho0 - yy) ** 2)
-    theta = np.arctan2(xx * np.sign(n), (rho0 - yy) * np.sign(n))
-    lats_2d = np.degrees(2 * np.arctan((radius * f / rho) ** (1 / n)) - np.pi / 2)
-    lons_2d = np.degrees(theta / n) + lov_deg
-    lons_2d = ((lons_2d + 180) % 360) - 180
+        rho = np.sign(n) * np.sqrt(xx**2 + (rho0 - yy) ** 2)
+        theta = np.arctan2(xx * np.sign(n), (rho0 - yy) * np.sign(n))
+        lats_2d = np.degrees(2 * np.arctan((radius * f / rho) ** (1 / n)) - np.pi / 2)
+        lons_2d = np.degrees(theta / n) + lov_deg
+        lons_2d = ((lons_2d + 180) % 360) - 180
 
-    res = max(0.05, min(0.25, dx / 111_000.0))
-    lat_min, lat_max = float(np.nanmin(lats_2d)), float(np.nanmax(lats_2d))
-    lon_min, lon_max = float(np.nanmin(lons_2d)), float(np.nanmax(lons_2d))
-    reg_lats = np.arange(lat_min, lat_max + res / 2, res)
-    reg_lons = np.arange(lon_min, lon_max + res / 2, res)
+        res = max(0.05, min(0.25, dx / 111_000.0))
+        lat_min, lat_max = float(np.nanmin(lats_2d)), float(np.nanmax(lats_2d))
+        lon_min, lon_max = float(np.nanmin(lons_2d)), float(np.nanmax(lons_2d))
+        reg_lats = np.arange(lat_min, lat_max + res / 2, res)
+        reg_lons = np.arange(lon_min, lon_max + res / 2, res)
 
-    reg_lon_2d, reg_lat_2d = np.meshgrid(reg_lons, reg_lats)
-    lat_rad = np.radians(reg_lat_2d)
-    lon_360 = np.where(reg_lon_2d < 0, reg_lon_2d + 360, reg_lon_2d)
-    lon_rad = np.radians(lon_360)
+        reg_lon_2d, reg_lat_2d = np.meshgrid(reg_lons, reg_lats)
+        lat_rad = np.radians(reg_lat_2d)
+        lon_360 = np.where(reg_lon_2d < 0, reg_lon_2d + 360, reg_lon_2d)
+        lon_rad = np.radians(lon_360)
 
-    rho_r = radius * f / np.tan(np.pi / 4 + lat_rad / 2) ** n
-    theta_r = n * (lon_rad - lov_rad)
-    x_r = rho_r * np.sin(theta_r)
-    y_r = rho0 - rho_r * np.cos(theta_r)
+        rho_r = radius * f / np.tan(np.pi / 4 + lat_rad / 2) ** n
+        theta_r = n * (lon_rad - lov_rad)
+        x_r = rho_r * np.sin(theta_r)
+        y_r = rho0 - rho_r * np.cos(theta_r)
 
-    fi = (x_r - x0) / dx
-    fj = (y_r - y0) / dy
+        fi = (x_r - x0) / dx
+        fj = (y_r - y0) / dy
 
-    i0 = np.floor(fi).astype(int)
-    j0 = np.floor(fj).astype(int)
-    di = fi - i0
-    dj = fj - j0
-    valid = (i0 >= 0) & (i0 < nx - 1) & (j0 >= 0) & (j0 < ny - 1)
-    i0c = np.clip(i0, 0, nx - 2)
-    j0c = np.clip(j0, 0, ny - 2)
+        i0 = np.floor(fi).astype(int)
+        j0 = np.floor(fj).astype(int)
+        di = fi - i0
+        dj = fj - j0
+        valid = (i0 >= 0) & (i0 < nx - 1) & (j0 >= 0) & (j0 < ny - 1)
+        i0c = np.clip(i0, 0, nx - 2)
+        j0c = np.clip(j0, 0, ny - 2)
+        
+        _LAMBERT_CACHE[cache_key] = (reg_lats, reg_lons, j0c, i0c, di, dj, valid)
 
     result = (
         values_2d[j0c, i0c] * (1 - di) * (1 - dj)
@@ -287,6 +308,7 @@ def _lambert_to_regular(grid, values_2d):
     )
     result[~valid] = np.nan
     return reg_lats, reg_lons, result
+
 
 
 def _parse_product(data, pos):
@@ -416,17 +438,109 @@ def _unpack_ccsds(packed_data, nvals, nbits, packing):
     return arr[:nvals].astype(np.int64)
 
 
-def _extract_n_bits(all_bits, bit_offset, n_values, n_bits):
+@njit(cache=True)
+def _from_bytes_big(data, offset, length):
+    val = 0
+    for i in range(length):
+        val = (val << 8) | int(data[offset + i])
+    return val
+
+
+@njit(cache=True)
+def _extract_n_bits_from_bytes(data, bit_offset, n_values, n_bits):
+    result = np.zeros(n_values, dtype=np.int64)
     if n_bits == 0 or n_values == 0:
-        return np.zeros(n_values, dtype=np.int64), bit_offset
-    end = bit_offset + n_values * n_bits
-    segment = all_bits[bit_offset:end]
-    if len(segment) < n_values * n_bits:
-        segment = np.pad(segment, (0, n_values * n_bits - len(segment)))
-    bits = segment.reshape(n_values, n_bits)
-    powers = np.int64(1) << np.arange(n_bits - 1, -1, -1, dtype=np.int64)
-    values = (bits.astype(np.int64) * powers).sum(axis=1)
-    return values, end
+        return result, bit_offset
+    
+    idx = bit_offset
+    n_bytes = len(data)
+    for i in range(n_values):
+        val = 0
+        for j in range(n_bits):
+            byte_idx = idx >> 3
+            bit_idx = 7 - (idx & 7)
+            if byte_idx < n_bytes:
+                bit = (data[byte_idx] >> bit_idx) & 1
+                val = (val << 1) | bit
+            else:
+                val = val << 1
+            idx += 1
+        result[i] = val
+    return result, idx
+
+
+@njit(cache=True)
+def _unpack_complex_numba(
+    data,
+    nvals,
+    ng,
+    nbits_ref,
+    ref_widths,
+    nbits_widths,
+    ref_lengths,
+    length_incr,
+    last_group_len,
+    nbits_lengths,
+    spatial_order,
+    extra_octets
+):
+    offset = 0
+    ival1 = 0
+    ival2 = 0
+    overall_min = 0
+    if spatial_order > 0 and extra_octets > 0:
+        if spatial_order >= 1:
+            ival1 = _from_bytes_big(data, offset, extra_octets)
+            offset += extra_octets
+        if spatial_order >= 2:
+            ival2 = _from_bytes_big(data, offset, extra_octets)
+            offset += extra_octets
+        
+        raw_min = _from_bytes_big(data, offset, extra_octets)
+        offset += extra_octets
+        
+        sign_bit = 1 << (extra_octets * 8 - 1)
+        if raw_min & sign_bit:
+            overall_min = -(raw_min & (sign_bit - 1))
+        else:
+            overall_min = raw_min
+
+    bit_pos = 0
+    remaining_data = data[offset:]
+
+    group_refs, bit_pos = _extract_n_bits_from_bytes(remaining_data, bit_pos, ng, nbits_ref)
+    bit_pos = ((bit_pos + 7) // 8) * 8
+
+    group_widths, bit_pos = _extract_n_bits_from_bytes(remaining_data, bit_pos, ng, nbits_widths)
+    bit_pos = ((bit_pos + 7) // 8) * 8
+    group_widths = group_widths + ref_widths
+
+    group_lengths, bit_pos = _extract_n_bits_from_bytes(remaining_data, bit_pos, ng, nbits_lengths)
+    bit_pos = ((bit_pos + 7) // 8) * 8
+    group_lengths = group_lengths * length_incr + ref_lengths
+    group_lengths[-1] = last_group_len
+
+    result = np.zeros(nvals, dtype=np.int64)
+    val_idx = 0
+    for g in range(ng):
+        gw = int(group_widths[g])
+        gl = int(group_lengths[g])
+        if gl == 0:
+            continue
+        if gw == 0:
+            result[val_idx:val_idx + gl] = group_refs[g]
+        else:
+            vals, bit_pos = _extract_n_bits_from_bytes(remaining_data, bit_pos, gl, gw)
+            result[val_idx:val_idx + gl] = vals + group_refs[g]
+        val_idx += gl
+
+    result[:val_idx] += overall_min
+    if spatial_order == 1 and val_idx > 0:
+        _spatial_diff_order1(result, val_idx, ival1)
+    elif spatial_order == 2 and val_idx > 1:
+        _spatial_diff_order2(result, val_idx, ival1, ival2)
+
+    return result[:nvals]
 
 
 def _unpack_complex(packed_data, packing):
@@ -442,61 +556,22 @@ def _unpack_complex(packed_data, packing):
     spatial_order = packing.get("spatial_order", 0)
     extra_octets = packing.get("extra_octets", 0)
 
-    data = packed_data
-    offset = 0
-    ival1 = ival2 = 0
-    overall_min = 0
-    if spatial_order > 0 and extra_octets > 0:
-        if spatial_order >= 1:
-            ival1 = int.from_bytes(data[offset:offset + extra_octets], "big")
-            offset += extra_octets
-        if spatial_order >= 2:
-            ival2 = int.from_bytes(data[offset:offset + extra_octets], "big")
-            offset += extra_octets
-        raw_min = int.from_bytes(data[offset:offset + extra_octets], "big")
-        offset += extra_octets
-        sign_bit = 1 << (extra_octets * 8 - 1)
-        if raw_min & sign_bit:
-            overall_min = -(raw_min & (sign_bit - 1))
-        else:
-            overall_min = raw_min
+    data_arr = np.frombuffer(packed_data, dtype=np.uint8)
+    return _unpack_complex_numba(
+        data_arr,
+        nvals,
+        ng,
+        nbits_ref,
+        ref_widths,
+        nbits_widths,
+        ref_lengths,
+        length_incr,
+        last_group_len,
+        nbits_lengths,
+        spatial_order,
+        extra_octets
+    )
 
-    all_bits = np.unpackbits(np.frombuffer(data[offset:], dtype=np.uint8))
-    bit_pos = 0
-
-    group_refs, bit_pos = _extract_n_bits(all_bits, bit_pos, ng, nbits_ref)
-    bit_pos = ((bit_pos + 7) // 8) * 8
-
-    group_widths, bit_pos = _extract_n_bits(all_bits, bit_pos, ng, nbits_widths)
-    bit_pos = ((bit_pos + 7) // 8) * 8
-    group_widths = group_widths + ref_widths
-
-    group_lengths, bit_pos = _extract_n_bits(all_bits, bit_pos, ng, nbits_lengths)
-    bit_pos = ((bit_pos + 7) // 8) * 8
-    group_lengths = group_lengths * length_incr + ref_lengths
-    group_lengths[-1] = last_group_len
-
-    result = np.zeros(nvals, dtype=np.int64)
-    val_idx = 0
-    for g in range(ng):
-        gw = int(group_widths[g])
-        gl = int(group_lengths[g])
-        if gl == 0:
-            continue
-        if gw == 0:
-            result[val_idx:val_idx + gl] = group_refs[g]
-        else:
-            vals, bit_pos = _extract_n_bits(all_bits, bit_pos, gl, gw)
-            result[val_idx:val_idx + gl] = vals + group_refs[g]
-        val_idx += gl
-
-    result[:val_idx] += overall_min
-    if spatial_order == 1 and val_idx > 0:
-        _spatial_diff_order1(result, val_idx, ival1)
-    elif spatial_order == 2 and val_idx > 1:
-        _spatial_diff_order2(result, val_idx, ival1, ival2)
-
-    return result[:nvals]
 
 
 def _apply_scaling(raw_values, packing):

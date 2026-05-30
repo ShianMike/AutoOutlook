@@ -5,6 +5,7 @@ siphon>=0.10
 metpy>=1.7
 xarray>=2024.1
 numpy>=1.26
+numba>=0.59
 scipy>=1.11
 netCDF4>=1.6
 xgboost>=2.0

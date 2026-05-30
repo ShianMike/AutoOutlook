@@ -5,7 +5,18 @@ from dataclasses import dataclass
 import threading
 from typing import Any, Mapping
 
+try:
+    from numba import njit
+except ImportError:
+    def njit(*args, **kwargs):
+        def _passthrough(fn):
+            return fn
+        if args and callable(args[0]):
+            return args[0]
+        return _passthrough
+
 import numpy as np
+
 
 from .features import FEATURE_NAMES
 from .inference import predict_ml_hazard_matrix
@@ -794,6 +805,73 @@ def probability_tile(
     }
 
 
+@njit(cache=True)
+def _block_probability_tile_arrays_numba_helper(
+    lat_grid,
+    lon_grid,
+    category_grid,
+    prob_stacked,
+    stride
+):
+    H, W = category_grid.shape
+    num_hazards = prob_stacked.shape[0]
+    
+    out_h = (H + stride - 1) // stride
+    out_w = (W + stride - 1) // stride
+    
+    cats = np.zeros((out_h, out_w), dtype=np.int16)
+    tile_lats = np.zeros((out_h, out_w), dtype=np.float64)
+    tile_lons = np.zeros((out_h, out_w), dtype=np.float64)
+    tile_prob = np.zeros((num_hazards, out_h, out_w), dtype=np.float64)
+    
+    for r in range(out_h):
+        r_start = r * stride
+        r_end = min(H, r_start + stride)
+        for c in range(out_w):
+            c_start = c * stride
+            c_end = min(W, c_start + stride)
+            
+            c_max = category_grid[r_start, c_start]
+            lat_sum = 0.0
+            lon_sum = 0.0
+            count = 0
+            
+            h_maxes = np.zeros(num_hazards)
+            for h in range(num_hazards):
+                h_maxes[h] = prob_stacked[h, r_start, c_start]
+                
+            for i in range(r_start, r_end):
+                for j in range(c_start, c_end):
+                    val = category_grid[i, j]
+                    if val > c_max:
+                        c_max = val
+                    
+                    lat_val = lat_grid[i, j]
+                    lon_val = lon_grid[i, j]
+                    if not np.isnan(lat_val):
+                        lat_sum += lat_val
+                        lon_sum += lon_val
+                        count += 1
+                        
+                    for h in range(num_hazards):
+                        h_val = prob_stacked[h, i, j]
+                        if not np.isnan(h_val) and h_val > h_maxes[h]:
+                            h_maxes[h] = h_val
+                            
+            cats[r, c] = c_max
+            if count > 0:
+                tile_lats[r, c] = lat_sum / count
+                tile_lons[r, c] = lon_sum / count
+            else:
+                tile_lats[r, c] = 0.0
+                tile_lons[r, c] = 0.0
+                
+            for h in range(num_hazards):
+                tile_prob[h, r, c] = h_maxes[h]
+                
+    return cats, tile_lats, tile_lons, tile_prob
+
+
 def _block_probability_tile_arrays(
     lat_grid: np.ndarray,
     lon_grid: np.ndarray,
@@ -801,31 +879,29 @@ def _block_probability_tile_arrays(
     probabilities: Mapping[str, np.ndarray],
     stride: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    rows = range(0, category_grid.shape[0], stride)
-    cols = range(0, category_grid.shape[1], stride)
-    out_shape = (len(list(rows)), len(list(cols)))
-    cats = np.zeros(out_shape, dtype=np.int16)
-    tile_lats = np.zeros(out_shape, dtype=float)
-    tile_lons = np.zeros(out_shape, dtype=float)
-    tile_probabilities = {
-        hazard: np.zeros(out_shape, dtype=float)
-        for hazard in probabilities
-    }
+    if stride == 1:
+        cats = category_grid.copy()
+        tile_lats = lat_grid.copy()
+        tile_lons = lon_grid.copy()
+        tile_probabilities = {hazard: grid.copy() for hazard, grid in probabilities.items()}
+        return cats, tile_lats, tile_lons, tile_probabilities
 
-    for out_row, row_start in enumerate(range(0, category_grid.shape[0], stride)):
-        row_end = min(category_grid.shape[0], row_start + stride)
-        for out_col, col_start in enumerate(range(0, category_grid.shape[1], stride)):
-            col_end = min(category_grid.shape[1], col_start + stride)
-            lat_block = np.asarray(lat_grid[row_start:row_end, col_start:col_end], dtype=float)
-            lon_block = np.asarray(lon_grid[row_start:row_end, col_start:col_end], dtype=float)
-            cat_block = np.asarray(category_grid[row_start:row_end, col_start:col_end], dtype=np.int16)
-            cats[out_row, out_col] = int(np.nanmax(cat_block)) if cat_block.size else 0
-            tile_lats[out_row, out_col] = float(np.nanmean(lat_block)) if lat_block.size else 0.0
-            tile_lons[out_row, out_col] = float(np.nanmean(lon_block)) if lon_block.size else 0.0
-            for hazard, grid in probabilities.items():
-                block = np.asarray(grid, dtype=float)[row_start:row_end, col_start:col_end]
-                tile_probabilities[hazard][out_row, out_col] = float(np.nanmax(block)) if block.size else 0.0
+    hazards = list(probabilities.keys())
+    prob_stacked = np.stack([probabilities[h] for h in hazards], axis=0)
+    
+    cats, tile_lats, tile_lons, tile_prob = _block_probability_tile_arrays_numba_helper(
+        lat_grid,
+        lon_grid,
+        category_grid,
+        prob_stacked,
+        stride
+    )
+    
+    tile_probabilities = {
+        hazards[i]: tile_prob[i] for i in range(len(hazards))
+    }
     return cats, tile_lats, tile_lons, tile_probabilities
+
 
 
 def feature_stats(features: GriddedFeatures) -> dict[str, dict[str, float]]:
