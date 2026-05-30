@@ -896,6 +896,16 @@ def _selected_incremental_artifact_dir() -> Path:
     fallback = _read_incremental_index_from_dir(complete_dir)
     if _incremental_index_has_full_coverage(fallback):
         return complete_dir
+
+    # Local fallbacks to custom generated directories if latest_incremental is missing/empty
+    if not current:
+        custom_dir = INCREMENTAL_ARTIFACT_DIR.parent / "custom_latest_incremental"
+        if _read_incremental_index_from_dir(custom_dir) is not None:
+            return custom_dir
+        custom_complete_dir = INCREMENTAL_ARTIFACT_DIR.parent / "custom_latest_incremental_complete"
+        if _read_incremental_index_from_dir(custom_complete_dir) is not None:
+            return custom_complete_dir
+
     return INCREMENTAL_ARTIFACT_DIR
 
 

@@ -460,7 +460,7 @@ def _extract_n_bits_from_bytes(data, bit_offset, n_values, n_bits):
             byte_idx = idx >> 3
             bit_idx = 7 - (idx & 7)
             if byte_idx < n_bytes:
-                bit = (data[byte_idx] >> bit_idx) & 1
+                bit = (int(data[byte_idx]) >> bit_idx) & 1
                 val = (val << 1) | bit
             else:
                 val = val << 1

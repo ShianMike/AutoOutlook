@@ -110,6 +110,9 @@ def gridded_features_from_fields(
         "sbcape": np.clip(cape, 0.0, None),
         "cin": np.minimum(cin, 0.0),
         "sfcDewpointF": td_f,
+        "sfcTempF": (t2m - 273.15) * 9.0 / 5.0 + 32.0,
+        "u10": u10,
+        "v10": v10,
         "pwatIn": pwat_in,
         "lclM": lcl_m,
         "moistureDepthM": np.maximum(800.0, pwat_in * 1500.0),
@@ -135,10 +138,560 @@ def predict_hazard_grids(features: GriddedFeatures) -> dict[str, np.ndarray] | N
     }
 
 
+def _marine_stability_penalty(
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    cin: np.ndarray,
+    lcl: np.ndarray,
+    dewpoint: np.ndarray,
+) -> np.ndarray:
+    # Stable marine-layer modification: CAPE collapse, theta-e loss, CIN increase, higher LCL.
+    penalty = np.ones_like(sbcape, dtype=float)
+
+    # 1. CAPE collapse (undercutting inflow): sbcape is collapsed relative to mucape
+    cape_ratio = np.where(mucape > 100.0, sbcape / np.maximum(100.0, mucape), 1.0)
+    cape_collapse = (cape_ratio < 0.4) & (sbcape < 300.0)
+    penalty = np.where(cape_collapse, penalty * 0.75, penalty)
+
+    # 2. CIN increase (strong cap):
+    strong_cap = cin < -100.0
+    penalty = np.where(strong_cap, penalty * 0.85, penalty)
+
+    # 3. Higher LCL (dry/cool near-surface inflow / theta-e loss):
+    high_lcl = lcl > 1600.0
+    penalty = np.where(high_lcl, penalty * 0.85, penalty)
+
+    # 4. Theta-e loss / cool surface:
+    cool_surface = dewpoint < 54.0
+    penalty = np.where(cool_surface, penalty * 0.90, penalty)
+
+    return np.clip(penalty, 0.65, 1.0)
+
+
+def _lake_boundary_bonus(
+    sbcape: np.ndarray,
+    lcl: np.ndarray,
+    srh01: np.ndarray,
+    dewpoint: np.ndarray,
+) -> np.ndarray:
+    # Lake-breeze boundary vorticity / low-level shear convergence bonus
+    # applies when low-level shear/helicity is enhanced, but boundary layer remains favorable.
+    bonus = np.ones_like(sbcape, dtype=float)
+
+    enhanced_vorticity = srh01 >= 175.0
+    favorable_lcl = lcl < 1000.0
+    strong_instability = sbcape >= 1000.0
+    rich_moisture = dewpoint >= 60.0
+
+    bonus_mask = enhanced_vorticity & favorable_lcl & strong_instability & rich_moisture
+    bonus = np.where(bonus_mask, bonus * 1.15, bonus)
+    return np.clip(bonus, 1.0, 1.15)
+
+
+def _great_lakes_tornado_modifier(
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    cin: np.ndarray,
+    lcl: np.ndarray,
+    dewpoint: np.ndarray,
+    srh01: np.ndarray,
+) -> np.ndarray:
+    # Great Lakes / Lake Michigan geographic bounding box
+    gl_mask = (lon_grid >= -93.0) & (lon_grid <= -75.0) & (lat_grid >= 41.0) & (lat_grid <= 49.0)
+    if not np.any(gl_mask):
+        return np.ones_like(sbcape, dtype=float)
+
+    penalty = _marine_stability_penalty(sbcape, mucape, cin, lcl, dewpoint)
+    bonus = _lake_boundary_bonus(sbcape, lcl, srh01, dewpoint)
+
+    combined = penalty * bonus
+    bounded = np.clip(combined, 0.65, 1.15)
+    return np.where(gl_mask, bounded, 1.0)
+
+
+def _detect_plains_regimes(
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    mlcape: np.ndarray,
+    cin: np.ndarray,
+    dewpoint: np.ndarray,
+    t2m_f: np.ndarray,
+    u10: np.ndarray,
+    v10: np.ndarray,
+    srh01: np.ndarray,
+    srh03: np.ndarray,
+    shear: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Detect boundary-focused, EML, and severe convective regimes on the Plains grid."""
+    shape = sbcape.shape
+    if lats is None or lons is None:
+        false_grid = np.zeros(shape, dtype=bool)
+        return {
+            "plains_mask": false_grid,
+            "dryline": false_grid,
+            "triple_point": false_grid,
+            "warm_front": false_grid,
+            "conditional_discrete": false_grid,
+            "linear_forcing": false_grid,
+            "eml_cap_regime": false_grid,
+            "large_hail_setup": false_grid,
+        }
+
+    # Southern/Central Plains bounding box (TX/OK/KS/NE)
+    plains_mask = (lats >= 25.0) & (lats <= 43.5) & (lons >= -105.0) & (lons <= -93.0)
+
+    # Zonal and horizontal gradients of dewpoint and surface temperature
+    if dewpoint.ndim == 2:
+        dew_dy, dew_dx = np.gradient(dewpoint)
+        grad_dew = np.hypot(dew_dy, dew_dx)
+        temp_dy, temp_dx = np.gradient(t2m_f)
+        grad_temp = np.hypot(temp_dy, temp_dx)
+    else:
+        grad_dew = np.zeros(shape, dtype=float)
+        grad_temp = np.zeros(shape, dtype=float)
+
+    # 1. Dryline Detection:
+    # Significant horizontal dewpoint gradient, dewpoint in transitional range, decent sbcape
+    dryline = plains_mask & (grad_dew >= 1.0) & (dewpoint >= 48.0) & (dewpoint <= 68.0) & (sbcape >= 100.0)
+
+    # 2. Triple Point Detection:
+    # Intersection of dryline dewpoint gradient and frontal temperature gradient, with moderate low-level helicity
+    triple_point = plains_mask & dryline & (grad_temp >= 1.0) & (srh03 >= 100.0)
+
+    # 3. Warm Front Detection:
+    # Strong temperature gradient, backed surface winds (easterly component u10 < 0), high low-level SRH, warm moist side
+    warm_front = plains_mask & (grad_temp >= 0.8) & (u10 < 0.0) & (srh01 >= 100.0) & (dewpoint >= 55.0)
+
+    # 4. Conditional Discrete Supercell Flag:
+    # Upgrades trigger ONLY when ingredients support it:
+    # Strong MLCAPE (>=1000 J/kg), deep shear >= 35 kt, strong SRH (>=150), backed winds (u10 < 0), and boundary forcing.
+    boundary_forcing = dryline | triple_point | warm_front
+    ingredients_ok = (mlcape >= 1000.0) & (shear >= 35.0) & (srh03 >= 150.0) & (u10 < 0.0)
+    conditional_discrete = plains_mask & ingredients_ok & boundary_forcing
+
+    # 5. Linear / Cold-Front Dominant forcing regime:
+    # Strong temperature gradient, unbacked surface winds (u10 >= 0), moderate MLCAPE and shear
+    linear_forcing = plains_mask & (grad_temp >= 1.5) & (u10 >= 0.0) & (mlcape >= 800.0) & (shear >= 30.0)
+
+    # 6. EML Cap Regime:
+    # Strong instability and shear with moderate CIN (EML capping inversion)
+    eml_cap_regime = plains_mask & (mlcape >= 1500.0) & (shear >= 35.0) & (cin <= -50.0) & (cin >= -250.0)
+
+    # 7. Large Hail supercell setups:
+    # Steep midlevel lapse rate proxy (high MLCAPE >= 2000 J/kg) and strong deep-layer shear (>=40 Kt)
+    large_hail_setup = plains_mask & (mlcape >= 2000.0) & (shear >= 40.0)
+
+    return {
+        "plains_mask": plains_mask,
+        "dryline": dryline,
+        "triple_point": triple_point,
+        "warm_front": warm_front,
+        "conditional_discrete": conditional_discrete,
+        "linear_forcing": linear_forcing,
+        "eml_cap_regime": eml_cap_regime,
+        "large_hail_setup": large_hail_setup,
+    }
+
+
+def _detect_dixie_se_regimes(
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    mlcape: np.ndarray,
+    cin: np.ndarray,
+    dewpoint: np.ndarray,
+    t2m_f: np.ndarray,
+    u10: np.ndarray,
+    v10: np.ndarray,
+    srh01: np.ndarray,
+    srh03: np.ndarray,
+    shear: np.ndarray,
+    storm_modes: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Detect HSLC nocturnal, warm-sector discrete, QLCS embedded, and sea-breeze pulse/supercell regimes in Dixie/Southeast."""
+    shape = sbcape.shape
+    if lats is None or lons is None:
+        false_grid = np.zeros(shape, dtype=bool)
+        return {
+            "dixie_se_mask": false_grid,
+            "hslc": false_grid,
+            "warm_sector_discrete": false_grid,
+            "embedded_qlcs": false_grid,
+            "sea_breeze_pulse": false_grid,
+            "sea_breeze_supercell": false_grid,
+        }
+
+    # Dixie Alley & Southeast Bounding Box
+    dixie_se_mask = (lats >= 24.0) & (lats <= 37.0) & (lons >= -95.0) & (lons <= -75.0)
+
+    # Gradients of temperature and dewpoint for boundary detection
+    if dewpoint.ndim == 2:
+        dew_dy, dew_dx = np.gradient(dewpoint)
+        grad_dew = np.hypot(dew_dy, dew_dx)
+        temp_dy, temp_dx = np.gradient(t2m_f)
+        grad_temp = np.hypot(temp_dy, temp_dx)
+    else:
+        grad_dew = np.zeros(shape, dtype=float)
+        grad_temp = np.zeros(shape, dtype=float)
+
+    # 1. HSLC (High-Shear/Low-CAPE): Dixie Alley specialty
+    # Low CAPE but very high wind shear & helicity, rich boundary layer moisture
+    hslc = (
+        dixie_se_mask
+        & (mlcape >= 100.0)
+        & (mlcape <= 1000.0)
+        & (dewpoint >= 55.0)
+        & (shear >= 35.0)
+        & ((srh01 >= 150.0) | (srh03 >= 200.0))
+    )
+
+    # 2. Warm-Sector Discrete Supercell ahead of QLCS:
+    # High shear/helicity warm sector, discrete cells, backed surface winds (easterly component u10 < 0), rich moisture
+    warm_sector_discrete = (
+        dixie_se_mask
+        & storm_modes["discrete_supercell"]
+        & (u10 < 0.0)
+        & (srh01 >= 150.0)
+        & (dewpoint >= 60.0)
+    )
+
+    # 3. Embedded QLCS: linear QLCS storms with very strong low-level shear/helicity
+    embedded_qlcs = dixie_se_mask & storm_modes["qlcs"] & (srh01 >= 150.0)
+
+    # Florida / Southeast sea-breeze or outflow boundary active:
+    boundary_active = dixie_se_mask & ((grad_temp >= 0.8) | (grad_dew >= 0.8))
+
+    # 4. Sea-Breeze/Outflow Pulse Mode:
+    # Active boundary, but background kinematics are weak
+    sea_breeze_pulse = boundary_active & (shear < 25.0) & (srh01 < 75.0)
+
+    # 5. Sea-Breeze/Outflow Supercellular Mode:
+    # Active boundary with strong background kinematics supporting storm organization
+    sea_breeze_supercell = boundary_active & (shear >= 30.0) & (srh01 >= 100.0)
+
+    return {
+        "dixie_se_mask": dixie_se_mask,
+        "hslc": hslc,
+        "warm_sector_discrete": warm_sector_discrete,
+        "embedded_qlcs": embedded_qlcs,
+        "sea_breeze_pulse": sea_breeze_pulse,
+        "sea_breeze_supercell": sea_breeze_supercell,
+    }
+
+
+def _detect_northern_regimes(
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    mlcape: np.ndarray,
+    cin: np.ndarray,
+    dewpoint: np.ndarray,
+    lcl: np.ndarray,
+    t2m_f: np.ndarray,
+    pwat: np.ndarray,
+    u10: np.ndarray,
+    srh01: np.ndarray,
+    srh03: np.ndarray,
+    shear: np.ndarray,
+    storm_modes: dict[str, np.ndarray],
+    forecast_hour: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Detect stabilized prior-convection, boundary tornado bonus, High Plains dry high-based, landspout convergence, and Northern elevated/nocturnal MCS modes."""
+    shape = sbcape.shape
+    if lats is None or lons is None:
+        false_grid = np.zeros(shape, dtype=bool)
+        return {
+            "midwest_mask": false_grid,
+            "high_plains_mask": false_grid,
+            "northern_plains_mask": false_grid,
+            "midwest_stabilized": false_grid,
+            "midwest_boundary_enhanced": false_grid,
+            "high_plains_high_based": false_grid,
+            "steep_lapse_rate_landspout": false_grid,
+            "northern_elevated_hail": false_grid,
+            "northern_nocturnal_mcs": false_grid,
+        }
+
+    # Bounding Boxes
+    midwest_mask = (lats >= 38.0) & (lats <= 49.0) & (lons >= -98.0) & (lons <= -80.0)
+    high_plains_mask = (lats >= 35.0) & (lats <= 49.0) & (lons >= -108.0) & (lons <= -100.0)
+    northern_plains_mask = (lats >= 40.0) & (lats <= 49.0) & (lons >= -115.0) & (lons <= -96.0)
+
+    # Gradients of temperature and dewpoint for boundary detection
+    if dewpoint.ndim == 2:
+        dew_dy, dew_dx = np.gradient(dewpoint)
+        grad_dew = np.hypot(dew_dy, dew_dx)
+        temp_dy, temp_dx = np.gradient(t2m_f)
+        grad_temp = np.hypot(temp_dy, temp_dx)
+    else:
+        grad_dew = np.zeros(shape, dtype=float)
+        grad_temp = np.zeros(shape, dtype=float)
+
+    # 1. Midwest Prior Convection Stabilization Penalty:
+    # collapsed sbcape relative to mucape (sbcape/mucape < 0.3) OR highly capped (cin <= -100), combined with high moisture (indicative of prior storms)
+    # Exclude the Great Lakes region which has its own dedicated stability modifier
+    gl_mask = (lats >= 41.0) & (lats <= 49.0) & (lons >= -93.0) & (lons <= -75.0)
+    stable_cape = sbcape / np.maximum(100.0, mucape) < 0.3
+    stable_cap = cin <= -100.0
+    moist_convection = (pwat >= 1.2) | (pwat * 1500.0 >= 1500.0)
+    midwest_stabilized = midwest_mask & ~gl_mask & (stable_cape | stable_cap) & moist_convection
+
+    # 2. Midwest Boundary-Enhanced Tornado Bonus:
+    # Active warm front/outflow boundary, surface based inflow intact (sbcape >= 1000, cin >= -50, lcl <= 1200), strong helicity
+    boundary_active = (grad_temp >= 0.8) | (grad_dew >= 0.8)
+    inflow_ok = (sbcape >= 1000.0) & (cin >= -50.0) & (lcl <= 1200.0)
+    midwest_boundary_enhanced = midwest_mask & boundary_active & inflow_ok & (srh01 >= 150.0)
+
+    # 3. High Plains High-Based storm mode:
+    # LCL >= 1800m, subcloud dryness (lcl - moistureDepth >= 300 or dewpoint < 55)
+    moisture_depth = np.maximum(800.0, pwat * 1500.0)
+    hp_subcloud_dry = (lcl - moisture_depth >= 300.0) | (dewpoint < 55.0)
+    high_plains_high_based = high_plains_mask & (lcl >= 1800.0) & hp_subcloud_dry
+
+    # 4. Steep Lapse-Rate Landspout Mode:
+    # Weak deep-layer shear, strong convergence (gradient >= 1.0), strong instability (sbcape >= 800), low LCL (<=1000), minimal cap (cin >= -20)
+    steep_lapse_rate_landspout = (
+        (shear < 20.0)
+        & ((grad_temp >= 1.0) | (grad_dew >= 1.0))
+        & (sbcape >= 800.0)
+        & (lcl <= 1000.0)
+        & (cin >= -20.0)
+    )
+
+    # 5. Northern Plains Elevated Hail:
+    # Elevated convection, strong deep shear
+    northern_elevated_hail = northern_plains_mask & storm_modes["elevated"] & (shear >= 35.0)
+
+    # 6. Northern Plains Nocturnal MCS Wind Mode:
+    # MCS mode, timing is nocturnal (forecastHour >= 12 or night cycles), decent MLCAPE, moist profile
+    nocturnal_timing = forecast_hour >= 12.0
+    northern_nocturnal_mcs = northern_plains_mask & storm_modes["mcs"] & nocturnal_timing & (mlcape >= 500.0) & (pwat >= 1.2)
+
+    return {
+        "midwest_mask": midwest_mask,
+        "high_plains_mask": high_plains_mask,
+        "northern_plains_mask": northern_plains_mask,
+        "midwest_stabilized": midwest_stabilized,
+        "midwest_boundary_enhanced": midwest_boundary_enhanced,
+        "high_plains_high_based": high_plains_high_based,
+        "steep_lapse_rate_landspout": steep_lapse_rate_landspout,
+        "northern_elevated_hail": northern_elevated_hail,
+        "northern_nocturnal_mcs": northern_nocturnal_mcs,
+    }
+
+
+def _detect_northeast_west_southwest_regimes(
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    mlcape: np.ndarray,
+    cin: np.ndarray,
+    dewpoint: np.ndarray,
+    lcl: np.ndarray,
+    t2m_f: np.ndarray,
+    pwat: np.ndarray,
+    u10: np.ndarray,
+    v10: np.ndarray,
+    srh01: np.ndarray,
+    srh03: np.ndarray,
+    shear: np.ndarray,
+    hgt500: np.ndarray,
+    storm_modes: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Detect low-CAPE/high-shear, CAD stable wedges, wedge front boundaries, dry microbursts, monsoon flash flood suppressors, and cold-core low-topped convection modes."""
+    shape = sbcape.shape
+    if lats is None or lons is None:
+        false_grid = np.zeros(shape, dtype=bool)
+        return {
+            "ne_ma_app_mask": false_grid,
+            "dsw_imw_mask": false_grid,
+            "pnw_ca_gb_mask": false_grid,
+            "ne_low_cape_high_shear": false_grid,
+            "ne_cad_stable": false_grid,
+            "ne_wedge_front": false_grid,
+            "dsw_dry_microburst": false_grid,
+            "dsw_monsoon_suppressed": false_grid,
+            "pnw_cold_core": false_grid,
+            "pnw_terrain_forced_clip": false_grid,
+        }
+
+    # Bounding Boxes
+    ne_ma_app_mask = (lats >= 37.0) & (lats <= 47.5) & (lons >= -83.0) & (lons <= -67.0)
+    dsw_imw_mask = (lats >= 31.0) & (lats <= 42.0) & (lons >= -115.0) & (lons <= -103.0)
+    pnw_ca_gb_mask = (lats >= 32.0) & (lats <= 49.0) & (lons >= -125.0) & (lons <= -114.0)
+
+    # Gradients of temperature and dewpoint for boundary detection
+    if dewpoint.ndim == 2:
+        dew_dy, dew_dx = np.gradient(dewpoint)
+        grad_dew = np.hypot(dew_dy, dew_dx)
+        temp_dy, temp_dx = np.gradient(t2m_f)
+        grad_temp = np.hypot(temp_dy, temp_dx)
+    else:
+        grad_dew = np.zeros(shape, dtype=float)
+        grad_temp = np.zeros(shape, dtype=float)
+
+    # 1. Northeast Low-CAPE / High-Shear Severe Mode:
+    # Low CAPE but strong shear and helicity, and sufficient moisture
+    ne_low_cape_high_shear = (
+        ne_ma_app_mask
+        & (mlcape >= 100.0)
+        & (mlcape <= 800.0)
+        & (shear >= 35.0)
+        & ((srh01 >= 125.0) | (srh03 >= 180.0))
+        & (dewpoint >= 55.0)
+    )
+
+    # 2. Northeast Cold-Air Damming (CAD) Stable Wedge:
+    # Cool surface temp, easterly wedge component (u10 < 0, v10 < 0), collapsed surface instability relative to elevated
+    ne_cad_stable = (
+        ne_ma_app_mask
+        & (t2m_f <= 65.0)
+        & (u10 < 0.0)
+        & (v10 < 0.0)
+        & (sbcape < 100.0)
+        & (mucape >= 300.0)
+    )
+
+    # 3. Northeast Wedge Front Boundary Bonus:
+    # Strong local gradient near a wedge front boundary, backed winds, strong low-level shear, but surface-based inflow intact
+    ne_wedge_front = (
+        ne_ma_app_mask
+        & ((grad_temp >= 0.8) | (grad_dew >= 0.8))
+        & (u10 < 0.0)
+        & (srh01 >= 150.0)
+        & (sbcape >= 800.0)
+        & (cin >= -40.0)
+    )
+
+    # 4. Desert Southwest Dry Microburst & Outflow Mode:
+    # Extremely high bases, dry subcloud layer, with minimal elevated instability
+    moisture_depth = np.maximum(800.0, pwat * 1500.0)
+    dsw_dry_subcloud = (lcl - moisture_depth >= 500.0) | (dewpoint <= 52.0)
+    dsw_dry_microburst = (
+        dsw_imw_mask
+        & (lcl >= 2000.0)
+        & dsw_dry_subcloud
+        & (mucape >= 200.0)
+    )
+
+    # 5. Desert Southwest Monsoon Heavy-Rain (Non-Severe Suppressor):
+    # Deep monsoonal moisture (high dewpoint, high PWAT) but weak kinematics -> favor TSTM/MRGL, suppress high-end severe
+    dsw_monsoon_suppressed = (
+        dsw_imw_mask
+        & (pwat >= 1.4)
+        & (dewpoint >= 60.0)
+        & (shear < 20.0)
+        & (srh01 < 50.0)
+    )
+
+    # 6. Pacific Northwest Cold-Core Low-Topped Convection Mode:
+    # Low 500mb heights, cool surface dewpoint, low cloud bases, modest instability, decent low-level helicity/shear
+    pnw_cold_core = (
+        pnw_ca_gb_mask
+        & (hgt500 <= 5550.0)
+        & (dewpoint >= 45.0)
+        & (dewpoint <= 55.0)
+        & (lcl <= 1000.0)
+        & (sbcape >= 100.0)
+        & (sbcape <= 1000.0)
+        & ((srh01 >= 75.0) | (shear >= 25.0))
+    )
+
+    # 7. Western Terrain-Forced / Weak Convection Guardrail:
+    # Bounded to pnw_ca_gb_mask. Unless thermodynamic instability and vertical wind shear strongly overlap, we cap all hazards.
+    pnw_terrain_forced_clip = (
+        pnw_ca_gb_mask
+        & ~((mlcape >= 500.0) & (shear >= 30.0))
+        & ~pnw_cold_core
+    )
+
+
+    return {
+        "ne_ma_app_mask": ne_ma_app_mask,
+        "dsw_imw_mask": dsw_imw_mask,
+        "pnw_ca_gb_mask": pnw_ca_gb_mask,
+        "ne_low_cape_high_shear": ne_low_cape_high_shear,
+        "ne_cad_stable": ne_cad_stable,
+        "ne_wedge_front": ne_wedge_front,
+        "dsw_dry_microburst": dsw_dry_microburst,
+        "dsw_monsoon_suppressed": dsw_monsoon_suppressed,
+        "pnw_cold_core": pnw_cold_core,
+        "pnw_terrain_forced_clip": pnw_terrain_forced_clip,
+    }
+
+
+def _classify_storm_modes(
+    sbcape: np.ndarray,
+    mucape: np.ndarray,
+    mlcape: np.ndarray,
+    cin: np.ndarray,
+    dewpoint: np.ndarray,
+    lcl: np.ndarray,
+    srh01: np.ndarray,
+    srh03: np.ndarray,
+    shear: np.ndarray,
+    storm_rel: np.ndarray,
+    hgt500: np.ndarray,
+    pwat: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Diagnose storm modes / environments dynamically from grid features."""
+    # 1. Discrete Supercell: strong deep shear, clean mlcape, strong storm relative inflow
+    discrete_supercell = (shear >= 35.0) & (mlcape >= 800.0) & (storm_rel >= 20.0)
+
+    # 2. Mixed Mode: intermediate shear and instability with moderate inflow
+    mixed_mode = (shear >= 25.0) & (shear < 35.0) & (mlcape >= 500.0) & (storm_rel >= 15.0)
+
+    # 3. QLCS: strong low-level shear/helicity, linear deep shear, moderate instability (excluding clean discrete)
+    qlcs = (shear >= 30.0) & (srh01 >= 125.0) & (mlcape >= 500.0) & (~discrete_supercell)
+
+    # 4. MCS: highly moist, moderate low-level and deep shear, elevated instability
+    mcs = (pwat >= 1.4) & (mucape >= 1000.0) & (shear >= 25.0) & (srh01 >= 50.0)
+
+    # 5. Pulse / Multicell: high instability but weak shear
+    pulse = (mucape >= 1000.0) & (shear < 20.0)
+
+    # 6. Elevated Convection: strong instability aloft but stable/capping at surface
+    elevated = (mucape >= 500.0) & ((sbcape < 100.0) | (np.where(mucape > 100.0, sbcape / np.maximum(100.0, mucape), 1.0) < 0.2))
+
+    # 7. High-Based Convection: warm-cloud base is very high (LCL >= 1600m)
+    high_based = lcl >= 1600.0
+
+    # 8. Landspout (Non-Supercell Tornado): high surface CAPE, low LCL, weak kinematics, minimal capping
+    landspout = (sbcape >= 500.0) & (lcl <= 1000.0) & (shear < 25.0) & (srh01 < 75.0) & (cin > -30.0)
+
+    # 9. Tropical Mini-Supercell: extremely moist tropical storm environment with modest CAPE, strong low-level shear & inflow
+    tropical = (pwat >= 1.8) & (mlcape >= 100.0) & (mlcape < 1000.0) & (srh01 >= 100.0) & (storm_rel >= 15.0)
+
+    # 10. Cold-Core Convection: low 500mb heights, cool surface, low LCL, modest CAPE
+    cold_core = (hgt500 <= 5500.0) & (dewpoint < 55.0) & (lcl <= 800.0) & (mucape >= 100.0) & (mucape < 800.0)
+
+    return {
+        "discrete_supercell": discrete_supercell,
+        "mixed_mode": mixed_mode,
+        "qlcs": qlcs,
+        "mcs": mcs,
+        "pulse": pulse,
+        "elevated": elevated,
+        "high_based": high_based,
+        "landspout": landspout,
+        "tropical": tropical,
+        "cold_core": cold_core,
+    }
+
+
 def apply_environmental_probability_caps(
     probabilities: Mapping[str, np.ndarray],
     features: GriddedFeatures,
     model_metadata: Mapping[str, Any] | None = None,
+    lats: np.ndarray | None = None,
+    lons: np.ndarray | None = None,
 ) -> ProbabilityCapResult:
     """Cap ML probabilities that are unsupported by the local environment.
 
@@ -205,9 +758,301 @@ def apply_environmental_probability_caps(
     )
     wind_cap = _cap_where(wind_cap, (dewpoint < 52.0) | (cin <= -225.0), 0.14, reason_counts, "strongCapOrDryAir")
 
+    # Set up coordinates for Plains and Great Lakes logic
+    if lats is not None and lons is not None:
+        lat_grid, lon_grid = _lat_lon_grid(lats, lons, shape)
+    else:
+        lat_grid, lon_grid = None, None
+
+    # Diagnose Plains severe weather regimes
+    plains = _detect_plains_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=features.raw["sbcape"],
+        mucape=mucape,
+        mlcape=mlcape,
+        cin=cin,
+        dewpoint=dewpoint,
+        t2m_f=features.raw["sfcTempF"],
+        u10=features.raw["u10"],
+        v10=features.raw["v10"],
+        srh01=srh01,
+        srh03=srh03,
+        shear=shear,
+    )
+
+    # Diagnose storm modes
+    modes = _classify_storm_modes(
+        sbcape=features.raw["sbcape"],
+        mucape=mucape,
+        mlcape=mlcape,
+        cin=cin,
+        dewpoint=dewpoint,
+        lcl=lcl,
+        srh01=srh01,
+        srh03=srh03,
+        shear=shear,
+        storm_rel=storm_rel,
+        hgt500=features.raw["hgt500"],
+        pwat=features.raw["pwatIn"],
+    )
+
+    # Diagnose Dixie Alley & Southeast severe weather regimes
+    dixie_se = _detect_dixie_se_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=features.raw["sbcape"],
+        mucape=mucape,
+        mlcape=mlcape,
+        cin=cin,
+        dewpoint=dewpoint,
+        t2m_f=features.raw["sfcTempF"],
+        u10=features.raw["u10"],
+        v10=features.raw["v10"],
+        srh01=srh01,
+        srh03=srh03,
+        shear=shear,
+        storm_modes=modes,
+    )
+
+    # Diagnose Northern severe weather regimes
+    northern = _detect_northern_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=features.raw["sbcape"],
+        mucape=mucape,
+        mlcape=mlcape,
+        cin=cin,
+        dewpoint=dewpoint,
+        lcl=lcl,
+        t2m_f=features.raw["sfcTempF"],
+        pwat=features.raw["pwatIn"],
+        u10=features.raw["u10"],
+        srh01=srh01,
+        srh03=srh03,
+        shear=shear,
+        storm_modes=modes,
+        forecast_hour=features.raw["forecastHour"],
+    )
+
+    # Diagnose Northeast, West, and Desert Southwest severe weather regimes
+    new_regions = _detect_northeast_west_southwest_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=features.raw["sbcape"],
+        mucape=mucape,
+        mlcape=mlcape,
+        cin=cin,
+        dewpoint=dewpoint,
+        lcl=lcl,
+        t2m_f=features.raw["sfcTempF"],
+        pwat=features.raw["pwatIn"],
+        u10=features.raw["u10"],
+        v10=features.raw["v10"],
+        srh01=srh01,
+        srh03=srh03,
+        shear=shear,
+        hgt500=features.raw["hgt500"],
+        storm_modes=modes,
+    )
+
+
+    # Apply storm-mode-aware cap adjustments
+    # Landspout: relax tornado cap to 0.049 if active
+    tornado_cap = np.where(modes["landspout"] & (tornado_cap < 0.049), 0.049, tornado_cap)
+
+    # Tropical Mini-Supercell: bypass standard instability caps and allow up to 0.099
+    tornado_cap = np.where(modes["tropical"] & (tornado_cap < 0.099), 0.099, tornado_cap)
+
+    # Cold-Core Convection: allow up to 0.049 tornado cap, relax wind/hail caps to 0.14
+    tornado_cap = np.where(modes["cold_core"] & (tornado_cap < 0.049), 0.049, tornado_cap)
+    hail_cap = np.where(modes["cold_core"] & (hail_cap < 0.14), 0.14, hail_cap)
+    wind_cap = np.where(modes["cold_core"] & (wind_cap < 0.14), 0.14, wind_cap)
+
+    # Pulse Convection: relax weak-kinematic caps for wind/hail to 0.14, cap tornado to 0.019
+    hail_cap = np.where(modes["pulse"] & (hail_cap < 0.14), 0.14, hail_cap)
+    wind_cap = np.where(modes["pulse"] & (wind_cap < 0.14), 0.14, wind_cap)
+    tornado_cap = np.where(modes["pulse"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    hail_cap = np.where(modes["pulse"], np.minimum(hail_cap, 0.14), hail_cap)
+    wind_cap = np.where(modes["pulse"], np.minimum(wind_cap, 0.14), wind_cap)
+
+    # Elevated Convection: cap tornado to 0.019 (hail untouched)
+    tornado_cap = np.where(modes["elevated"], np.minimum(tornado_cap, 0.019), tornado_cap)
+
+    # High-Based Convection: cap tornado to 0.019
+    tornado_cap = np.where(modes["high_based"], np.minimum(tornado_cap, 0.019), tornado_cap)
+
+    # Cold-Core high-end conservation: cap severe hazards to conservative levels
+    tornado_cap = np.where(modes["cold_core"], np.minimum(tornado_cap, 0.049), tornado_cap)
+    hail_cap = np.where(modes["cold_core"], np.minimum(hail_cap, 0.14), hail_cap)
+    wind_cap = np.where(modes["cold_core"], np.minimum(wind_cap, 0.14), wind_cap)
+
+    # Plains Cap Relaxations: EML and moderate CIN boundary setups are not over-penalized
+    hail_cap = np.where(plains["conditional_discrete"] & (cin >= -250.0), np.maximum(hail_cap, 0.44), hail_cap)
+    tornado_cap = np.where(plains["conditional_discrete"] & (cin >= -250.0) & (mlcape >= 1000.0) & (srh01 >= 125.0), np.maximum(tornado_cap, 0.099), tornado_cap)
+    wind_cap = np.where(plains["conditional_discrete"] & (cin >= -250.0), np.maximum(wind_cap, 0.29), wind_cap)
+
+    # Plains Large Hail Setup cap relaxation
+    hail_cap = np.where(plains["large_hail_setup"], np.maximum(hail_cap, 0.59), hail_cap)
+
+    # Plains Linear / Cold-Front Dominant forcing cap handling
+    tornado_cap = np.where(plains["linear_forcing"], np.minimum(tornado_cap, 0.049), tornado_cap)
+    hail_cap = np.where(plains["linear_forcing"] & (hail_cap < 0.29), 0.29, hail_cap)
+    wind_cap = np.where(plains["linear_forcing"] & (wind_cap < 0.29), 0.29, wind_cap)
+
+    # Dixie Alley HSLC Cap Relaxation (allow up to 0.099 max tornado in HSLC environments)
+    tornado_cap = np.where(dixie_se["hslc"] & (tornado_cap < 0.099), 0.099, tornado_cap)
+
+    # Warm-Sector Discrete Supercell ahead of QLCS cap relaxation (allow up to 0.14 max tornado)
+    tornado_cap = np.where(dixie_se["warm_sector_discrete"] & (tornado_cap < 0.14), 0.14, tornado_cap)
+
+    # Florida / Southeast Sea-Breeze Pulse Cap (cap supercellular to 0.019, landspout/waterspout up to 0.049, wind/hail to 0.14)
+    sea_breeze_spout = dixie_se["sea_breeze_pulse"] & (features.raw["sbcape"] >= 500.0) & (lcl <= 1000.0) & (cin > -30.0)
+    tornado_cap = np.where(dixie_se["sea_breeze_pulse"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    tornado_cap = np.where(sea_breeze_spout, np.maximum(tornado_cap, 0.049), tornado_cap)
+    hail_cap = np.where(dixie_se["sea_breeze_pulse"], np.minimum(hail_cap, 0.14), hail_cap)
+    wind_cap = np.where(dixie_se["sea_breeze_pulse"], np.minimum(wind_cap, 0.14), wind_cap)
+
+    # Midwest Prior Convection Stabilization Cap (cap tornado to 0.019)
+    tornado_cap = np.where(northern["midwest_stabilized"], np.minimum(tornado_cap, 0.019), tornado_cap)
+
+    # Midwest Boundary Tornado Bonus (relax tornado cap to 0.14)
+    tornado_cap = np.where(northern["midwest_boundary_enhanced"] & (tornado_cap < 0.14), 0.14, tornado_cap)
+
+    # High Plains High-Based Storms Cap (cap tornado to 0.019, relax wind to 0.29, hail to 0.44 if MLCAPE/shear support)
+    tornado_cap = np.where(northern["high_plains_high_based"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    hp_relax = northern["high_plains_high_based"] & (mlcape >= 1000.0) & (shear >= 30.0)
+    hail_cap = np.where(hp_relax & (hail_cap < 0.44), 0.44, hail_cap)
+    wind_cap = np.where(hp_relax & (wind_cap < 0.29), 0.29, wind_cap)
+
+    # Steep Lapse-Rate Landspout Mode Cap (relax tornado cap to 0.049)
+    tornado_cap = np.where(northern["steep_lapse_rate_landspout"] & (tornado_cap < 0.049), 0.049, tornado_cap)
+
+    # Northern Elevated Convective Hail Cap (relax hail cap to 0.29)
+    hail_cap = np.where(northern["northern_elevated_hail"] & (hail_cap < 0.29), 0.29, hail_cap)
+
+    # Northern Nocturnal MCS Wind Cap (relax wind cap to 0.29)
+    wind_cap = np.where(northern["northern_nocturnal_mcs"] & (wind_cap < 0.29), 0.29, wind_cap)
+
+    # Northeast Low-CAPE/High-Shear Cap Relaxation
+    tornado_cap = np.where(new_regions["ne_low_cape_high_shear"] & (tornado_cap < 0.049), 0.049, tornado_cap)
+    favorable_ne_discrete = new_regions["ne_low_cape_high_shear"] & modes["discrete_supercell"]
+    tornado_cap = np.where(favorable_ne_discrete & (tornado_cap < 0.099), 0.099, tornado_cap)
+    hail_cap = np.where(new_regions["ne_low_cape_high_shear"] & (hail_cap < 0.14), 0.14, hail_cap)
+    wind_cap = np.where(new_regions["ne_low_cape_high_shear"] & (wind_cap < 0.29), 0.29, wind_cap)
+
+    # Northeast Cold-Air Damming Stable Wedge Cap (strictly cap tornado, relax elevated hail under strong shear)
+    tornado_cap = np.where(new_regions["ne_cad_stable"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    hail_cap = np.where(new_regions["ne_cad_stable"] & (shear >= 35.0) & (hail_cap < 0.29), 0.29, hail_cap)
+
+    # Northeast Wedge Front Boundary Bonus (relax tornado cap)
+    tornado_cap = np.where(new_regions["ne_wedge_front"] & (tornado_cap < 0.099), 0.099, tornado_cap)
+
+    # Desert Southwest Dry Microburst Cap (cap tornado, relax wind cap)
+    tornado_cap = np.where(new_regions["dsw_dry_microburst"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    wind_cap = np.where(new_regions["dsw_dry_microburst"] & (wind_cap < 0.29), 0.29, wind_cap)
+
+    # Desert Southwest Monsoon Heavy-Rain Suppressor (strictly cap all severe hazards to prevent moisture false alarms)
+    tornado_cap = np.where(new_regions["dsw_monsoon_suppressed"], np.minimum(tornado_cap, 0.01), tornado_cap)
+    wind_cap = np.where(new_regions["dsw_monsoon_suppressed"], np.minimum(wind_cap, 0.04), wind_cap)
+    hail_cap = np.where(new_regions["dsw_monsoon_suppressed"], np.minimum(hail_cap, 0.04), hail_cap)
+
+    # Pacific Northwest Cold-Core Mode Cap Relaxation
+    tornado_cap = np.where(new_regions["pnw_cold_core"] & (tornado_cap < 0.049), 0.049, tornado_cap)
+    hail_cap = np.where(new_regions["pnw_cold_core"] & (hail_cap < 0.14), 0.14, hail_cap)
+    wind_cap = np.where(new_regions["pnw_cold_core"] & (wind_cap < 0.14), 0.14, wind_cap)
+
+    # Western Terrain-Forced Convection Clip (strictly cap hazards to TSTM/MRGL unless organized)
+    tornado_cap = np.where(new_regions["pnw_terrain_forced_clip"], np.minimum(tornado_cap, 0.019), tornado_cap)
+    hail_cap = np.where(new_regions["pnw_terrain_forced_clip"], np.minimum(hail_cap, 0.14), hail_cap)
+    wind_cap = np.where(new_regions["pnw_terrain_forced_clip"], np.minimum(wind_cap, 0.14), wind_cap)
+
+    # Enforce caps on raw probabilities
     capped["hail"] = np.minimum(capped["hail"], hail_cap)
     capped["tornado"] = np.minimum(capped["tornado"], tornado_cap)
     capped["wind"] = np.minimum(capped["wind"], wind_cap)
+
+    # Apply continuous hazard upgrades directly to calibrated probabilities
+    # Discrete Supercell: enhance tornado by +15% if environment is highly sheared and unstable
+    favorable_supercell = modes["discrete_supercell"] & (srh01 >= 150.0) & (lcl <= 1200.0) & (features.raw["sbcape"] >= 1000.0)
+    capped["tornado"] = np.where(favorable_supercell, np.clip(capped["tornado"] * 1.15, 0.0, 1.0), capped["tornado"])
+
+    # QLCS: enhance wind by +10%, enhance tornado by +5% (with hard ceiling at 0.099)
+    capped["wind"] = np.where(modes["qlcs"], np.clip(capped["wind"] * 1.10, 0.0, 1.0), capped["wind"])
+    capped["tornado"] = np.where(modes["qlcs"], np.minimum(np.clip(capped["tornado"] * 1.05, 0.0, 1.0), 0.099), capped["tornado"])
+
+    # MCS: enhance wind by +10%
+    capped["wind"] = np.where(modes["mcs"], np.clip(capped["wind"] * 1.10, 0.0, 1.0), capped["wind"])
+
+    # Elevated: reduce wind by scale 0.70
+    capped["wind"] = np.where(modes["elevated"], np.clip(capped["wind"] * 0.70, 0.0, 1.0), capped["wind"])
+
+    # High-based dry microburst wind enhancement
+    dry_microburst = modes["high_based"] & (dewpoint < 58.0)
+    capped["wind"] = np.where(dry_microburst, np.clip(capped["wind"] * 1.05, 0.0, 1.0), capped["wind"])
+
+    # Plains Conditional Discrete Supercell Upgrades (+15% tornado, +15% hail)
+    capped["tornado"] = np.where(plains["conditional_discrete"], np.clip(capped["tornado"] * 1.15, 0.0, 1.0), capped["tornado"])
+    capped["hail"] = np.where(plains["conditional_discrete"], np.clip(capped["hail"] * 1.15, 0.0, 1.0), capped["hail"])
+
+    # Plains Large Hail Setup Boost (+20% hail)
+    capped["hail"] = np.where(plains["large_hail_setup"], np.clip(capped["hail"] * 1.20, 0.0, 1.0), capped["hail"])
+
+    # Plains Linear / Cold-Front Dominant Wind & Hail Boost (+10% wind, +10% hail)
+    capped["wind"] = np.where(plains["linear_forcing"], np.clip(capped["wind"] * 1.10, 0.0, 1.0), capped["wind"])
+    capped["hail"] = np.where(plains["linear_forcing"], np.clip(capped["hail"] * 1.10, 0.0, 1.0), capped["hail"])
+
+    # Dixie Alley HSLC LLJ Boost (+15% tornado if srh01 >= 200)
+    capped["tornado"] = np.where(dixie_se["hslc"] & (srh01 >= 200.0), np.clip(capped["tornado"] * 1.15, 0.0, 1.0), capped["tornado"])
+
+    # Dixie Alley Warm-Sector Discrete Supercell Boost (+20% tornado)
+    capped["tornado"] = np.where(dixie_se["warm_sector_discrete"], np.clip(capped["tornado"] * 1.20, 0.0, 1.0), capped["tornado"])
+
+    # Midwest Prior Convection Stabilization Penalty (-30% all hazards)
+    capped["tornado"] = np.where(northern["midwest_stabilized"], np.clip(capped["tornado"] * 0.70, 0.0, 1.0), capped["tornado"])
+    capped["hail"] = np.where(northern["midwest_stabilized"], np.clip(capped["hail"] * 0.70, 0.0, 1.0), capped["hail"])
+    capped["wind"] = np.where(northern["midwest_stabilized"], np.clip(capped["wind"] * 0.70, 0.0, 1.0), capped["wind"])
+
+    # Midwest Boundary-Enhanced Tornado Bonus (+20% tornado)
+    capped["tornado"] = np.where(northern["midwest_boundary_enhanced"], np.clip(capped["tornado"] * 1.20, 0.0, 1.0), capped["tornado"])
+
+    # High Plains High-Based Wind & Hail Boost (+15% wind, +10% hail)
+    capped["wind"] = np.where(northern["high_plains_high_based"], np.clip(capped["wind"] * 1.15, 0.0, 1.0), capped["wind"])
+    capped["hail"] = np.where(northern["high_plains_high_based"], np.clip(capped["hail"] * 1.10, 0.0, 1.0), capped["hail"])
+
+    # Northern Nocturnal MCS Wind Boost (+10% wind)
+    capped["wind"] = np.where(northern["northern_nocturnal_mcs"], np.clip(capped["wind"] * 1.10, 0.0, 1.0), capped["wind"])
+
+    # Northeast CAD Stable Wedge Penalty (-30% wind and tornado)
+    capped["tornado"] = np.where(new_regions["ne_cad_stable"], np.clip(capped["tornado"] * 0.70, 0.0, 1.0), capped["tornado"])
+    capped["wind"] = np.where(new_regions["ne_cad_stable"], np.clip(capped["wind"] * 0.70, 0.0, 1.0), capped["wind"])
+
+    # Northeast Wedge Front Boundary Bonus (+20% tornado)
+    capped["tornado"] = np.where(new_regions["ne_wedge_front"], np.clip(capped["tornado"] * 1.20, 0.0, 1.0), capped["tornado"])
+
+    # Desert Southwest Dry Microburst / Outflow Wind Boost (+15% wind)
+    capped["wind"] = np.where(new_regions["dsw_dry_microburst"], np.clip(capped["wind"] * 1.15, 0.0, 1.0), capped["wind"])
+
+
+    # Great Lakes / Lake Michigan tornado modifier
+    if lat_grid is not None and lon_grid is not None:
+        sbcape_gl = features.raw["sbcape"]
+        gl_mod = _great_lakes_tornado_modifier(
+            lat_grid,
+            lon_grid,
+            sbcape_gl,
+            mucape,
+            cin,
+            lcl,
+            dewpoint,
+            srh01,
+        )
+        capped["tornado"] = np.clip(capped["tornado"] * gl_mod, 0.0, 1.0)
+        gl_penalized_cells = int(np.sum(gl_mod < 1.0))
+        gl_enhanced_cells = int(np.sum(gl_mod > 1.0))
+    else:
+        gl_penalized_cells = 0
+        gl_enhanced_cells = 0
 
     model_cap = _model_category_cap(model_metadata)
     model_probability_caps = _model_probability_caps(model_cap)
@@ -227,6 +1072,42 @@ def apply_environmental_probability_caps(
             for hazard in raw
         },
         "downgradedCells": reason_counts,
+        "greatLakesTornadoModifierApplied": lats is not None and lons is not None,
+        "greatLakesPenalizedCells": gl_penalized_cells,
+        "greatLakesEnhancedCells": gl_enhanced_cells,
+        "discreteSupercellCells": int(np.sum(modes["discrete_supercell"])),
+        "qlcsCells": int(np.sum(modes["qlcs"])),
+        "mcsCells": int(np.sum(modes["mcs"])),
+        "pulseCells": int(np.sum(modes["pulse"])),
+        "elevatedCells": int(np.sum(modes["elevated"])),
+        "highBasedCells": int(np.sum(modes["high_based"])),
+        "landspoutCells": int(np.sum(modes["landspout"])),
+        "tropicalMiniSupercellCells": int(np.sum(modes["tropical"])),
+        "coldCoreCells": int(np.sum(modes["cold_core"])),
+        "plainsDrylineCells": int(np.sum(plains["dryline"])),
+        "plainsTriplePointCells": int(np.sum(plains["triple_point"])),
+        "plainsWarmFrontCells": int(np.sum(plains["warm_front"])),
+        "plainsDiscreteSupercellCells": int(np.sum(plains["conditional_discrete"])),
+        "plainsLargeHailSetups": int(np.sum(plains["large_hail_setup"])),
+        "plainsLinearForcingCells": int(np.sum(plains["linear_forcing"])),
+        "dixieSeHslcCells": int(np.sum(dixie_se["hslc"])),
+        "dixieSeWarmSectorDiscreteCells": int(np.sum(dixie_se["warm_sector_discrete"])),
+        "dixieSeSeaBreezePulseCells": int(np.sum(dixie_se["sea_breeze_pulse"])),
+        "dixieSeSeaBreezeSupercellCells": int(np.sum(dixie_se["sea_breeze_supercell"])),
+        "dixieSeEmbeddedQlcsCells": int(np.sum(dixie_se["embedded_qlcs"])),
+        "midwestStabilizedCells": int(np.sum(northern["midwest_stabilized"])),
+        "midwestBoundaryEnhancedCells": int(np.sum(northern["midwest_boundary_enhanced"])),
+        "highPlainsHighBasedCells": int(np.sum(northern["high_plains_high_based"])),
+        "steepLapseRateLandspoutCells": int(np.sum(northern["steep_lapse_rate_landspout"])),
+        "northernElevatedHailCells": int(np.sum(northern["northern_elevated_hail"])),
+        "northernNocturnalMcsCells": int(np.sum(northern["northern_nocturnal_mcs"])),
+        "northeastLowCapeHighShearCells": int(np.sum(new_regions["ne_low_cape_high_shear"])),
+        "northeastCadStableCells": int(np.sum(new_regions["ne_cad_stable"])),
+        "northeastWedgeFrontCells": int(np.sum(new_regions["ne_wedge_front"])),
+        "desertSouthwestDryMicrobursts": int(np.sum(new_regions["dsw_dry_microburst"])),
+        "desertSouthwestMonsoonHeavyRainCells": int(np.sum(new_regions["dsw_monsoon_suppressed"])),
+        "pacificNorthwestColdCoreCells": int(np.sum(new_regions["pnw_cold_core"])),
+        "pacificNorthwestTerrainForcedClippedCells": int(np.sum(new_regions["pnw_terrain_forced_clip"])),
     }
     return ProbabilityCapResult(capped, report)
 
@@ -383,7 +1264,6 @@ def postprocess_category_grid(
         "gulfOfMexico": 0,
         "floridaGulf": 0,
         "atlanticOcean": 0,
-        "southTexasGulfCoast": 0,
         "texasMexicoBorder": 0,
         "missingCategoryBuffer": 0,
     }
@@ -397,7 +1277,6 @@ def postprocess_category_grid(
     gulf_offshore_mask = None
     florida_gulf_mask = None
     atlantic_offshore_mask = None
-    south_texas_gulf_mask = None
     texas_mexico_border_mask = None
     if lats is not None and lons is not None:
         lat_grid, lon_grid = _lat_lon_grid(lats, lons, grid.shape)
@@ -406,7 +1285,6 @@ def postprocess_category_grid(
         gulf_offshore_mask = offshore_masks["gulfOfMexico"]
         florida_gulf_mask = offshore_masks["floridaGulf"]
         atlantic_offshore_mask = offshore_masks["atlanticOcean"]
-        south_texas_gulf_mask = offshore_masks["southTexasGulfCoast"]
         texas_mexico_border_mask = _strict_category_cap_masks(lat_grid, lon_grid)["texasMexicoBorder"]
 
     if ndimage is not None:
@@ -490,9 +1368,6 @@ def postprocess_category_grid(
         if atlantic_offshore_mask is not None:
             _force_offshore_none(grid, atlantic_offshore_mask, downgraded, "atlanticOcean")
             max_category_grid[atlantic_offshore_mask] = 0
-        if south_texas_gulf_mask is not None:
-            _force_offshore_none(grid, south_texas_gulf_mask, downgraded, "southTexasGulfCoast")
-            max_category_grid[south_texas_gulf_mask] = 0
         if texas_mexico_border_mask is not None:
             _cap_category_at_most(
                 grid,
@@ -815,49 +1690,49 @@ def _block_probability_tile_arrays_numba_helper(
 ):
     H, W = category_grid.shape
     num_hazards = prob_stacked.shape[0]
-    
+
     out_h = (H + stride - 1) // stride
     out_w = (W + stride - 1) // stride
-    
+
     cats = np.zeros((out_h, out_w), dtype=np.int16)
     tile_lats = np.zeros((out_h, out_w), dtype=np.float64)
     tile_lons = np.zeros((out_h, out_w), dtype=np.float64)
     tile_prob = np.zeros((num_hazards, out_h, out_w), dtype=np.float64)
-    
+
     for r in range(out_h):
         r_start = r * stride
         r_end = min(H, r_start + stride)
         for c in range(out_w):
             c_start = c * stride
             c_end = min(W, c_start + stride)
-            
+
             c_max = category_grid[r_start, c_start]
             lat_sum = 0.0
             lon_sum = 0.0
             count = 0
-            
+
             h_maxes = np.zeros(num_hazards)
             for h in range(num_hazards):
                 h_maxes[h] = prob_stacked[h, r_start, c_start]
-                
+
             for i in range(r_start, r_end):
                 for j in range(c_start, c_end):
                     val = category_grid[i, j]
                     if val > c_max:
                         c_max = val
-                    
+
                     lat_val = lat_grid[i, j]
                     lon_val = lon_grid[i, j]
                     if not np.isnan(lat_val):
                         lat_sum += lat_val
                         lon_sum += lon_val
                         count += 1
-                        
+
                     for h in range(num_hazards):
                         h_val = prob_stacked[h, i, j]
                         if not np.isnan(h_val) and h_val > h_maxes[h]:
                             h_maxes[h] = h_val
-                            
+
             cats[r, c] = c_max
             if count > 0:
                 tile_lats[r, c] = lat_sum / count
@@ -865,10 +1740,10 @@ def _block_probability_tile_arrays_numba_helper(
             else:
                 tile_lats[r, c] = 0.0
                 tile_lons[r, c] = 0.0
-                
+
             for h in range(num_hazards):
                 tile_prob[h, r, c] = h_maxes[h]
-                
+
     return cats, tile_lats, tile_lons, tile_prob
 
 
@@ -888,7 +1763,7 @@ def _block_probability_tile_arrays(
 
     hazards = list(probabilities.keys())
     prob_stacked = np.stack([probabilities[h] for h in hazards], axis=0)
-    
+
     cats, tile_lats, tile_lons, tile_prob = _block_probability_tile_arrays_numba_helper(
         lat_grid,
         lon_grid,
@@ -896,7 +1771,7 @@ def _block_probability_tile_arrays(
         prob_stacked,
         stride
     )
-    
+
     tile_probabilities = {
         hazards[i]: tile_prob[i] for i in range(len(hazards))
     }
@@ -1804,6 +2679,9 @@ def _finite(values: np.ndarray, default: float) -> np.ndarray:
 def _default_for(name: str) -> float:
     defaults = {
         "sfcDewpointF": 50.0,
+        "sfcTempF": 58.0,
+        "u10": 0.0,
+        "v10": 0.0,
         "pwatIn": 0.8,
         "lclM": 1500.0,
         "moistureDepthM": 1500.0,
@@ -2072,29 +2950,28 @@ def _atlantic_ocean_offshore_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) ->
     return (atlantic_domain & (lon_grid > (_atlantic_max_land_lon(lat_grid) + 0.10))) | bahamas_south_florida_waters
 
 
-def _south_texas_gulf_coast_strict_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
-    domain = (
-        (lat_grid >= 25.0)
-        & (lat_grid <= 29.45)
-        & (lon_grid >= -98.8)
-        & (lon_grid <= -94.4)
-    )
-    gulf_edge = _gulf_min_land_lat(np.clip(lon_grid, -98.5, -81.0))
-    return domain & (lat_grid <= (gulf_edge + 1.55))
+def _southern_us_border_lat(lon_grid: np.ndarray) -> np.ndarray:
+    anchors = [
+        (-124.0, 32.5),
+        (-117.0, 32.5),
+        (-114.5, 32.0),
+        (-111.0, 31.3),
+        (-108.2, 31.3),
+        (-106.5, 31.8),
+        (-104.5, 29.6),
+        (-103.0, 29.0),
+        (-100.9, 29.3),
+        (-99.5, 27.5),
+        (-97.2, 26.0),
+    ]
+    return _interp_anchor(lon_grid, anchors)
 
 
 def _texas_mexico_border_mrgl_cap_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
-    corridor = [
-        (-106.70, 25.00),
-        (-106.70, 32.35),
-        (-99.00, 32.35),
-        (-96.15, 32.15),
-        (-95.55, 31.15),
-        (-96.25, 29.00),
-        (-97.20, 25.55),
-        (-106.70, 25.00),
-    ]
-    return _points_in_polygon(lon_grid, lat_grid, corridor)
+    # Cap to MRGL south of the US-Mexico border (in Mexico)
+    # and in a very narrow 0.05 degree border confidence degradation band.
+    border_lat = _southern_us_border_lat(lon_grid)
+    return lat_grid < (border_lat - 0.05)
 
 
 def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
@@ -2102,7 +2979,6 @@ def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[s
         "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid),
         "floridaGulf": _florida_gulf_offshore_mask(lat_grid, lon_grid),
         "atlanticOcean": _atlantic_ocean_offshore_mask(lat_grid, lon_grid),
-        "southTexasGulfCoast": _south_texas_gulf_coast_strict_mask(lat_grid, lon_grid),
     }
 
 

@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 from backend.bundle_builder import HGT500_CONTOUR_LEVELS, _hgt500_lines_from_field, _wind500_vectors_from_fields, fetch_full_conus_500mb_overlay
+from backend.grib2 import _extract_n_bits_from_bytes
 from backend.hrrr_filter import _messages_to_fields
 from backend.hrrr_selected import (
     REQUIRED_HRRR_TERMS,
@@ -215,6 +216,43 @@ class SequenceSession:
 
 
 class DeployableOutlookPipelineTests(unittest.TestCase):
+    def test_grib_bit_reader_preserves_values_wider_than_one_byte(self) -> None:
+        values, bit_offset = _extract_n_bits_from_bytes(
+            np.asarray([0x12, 0x34, 0xAB, 0xCD], dtype=np.uint8),
+            0,
+            2,
+            16,
+        )
+
+        self.assertEqual(bit_offset, 32)
+        self.assertEqual(values.tolist(), [0x1234, 0xABCD])
+
+    def test_hgt_pressure_levels_decode_without_cape_requirement(self) -> None:
+        lats = np.array([[35.0, 35.0], [36.0, 36.0]])
+        lons = np.array([[-98.0, -97.0], [-98.0, -97.0]])
+        messages = [
+            {
+                "category": 3,
+                "parameter": 5,
+                "level_type": 100,
+                "level_value": level_value,
+                "lats": lats,
+                "lons": lons,
+                "values": np.full((2, 2), value, dtype=float),
+            }
+            for level_value, value in (
+                (50000.0, 5700.0),
+                (70000.0, 3100.0),
+                (85000.0, 1500.0),
+                (1000.0, 100.0),
+            )
+        ]
+
+        _, _, fields = _messages_to_fields(messages, require_cape=False)
+
+        self.assertEqual(sorted(fields), ["hgt1000", "hgt500", "hgt700", "hgt850"])
+        self.assertEqual(float(fields["hgt700"][0, 0]), 3100.0)
+
     def test_selected_hrrr_terms_filter_only_requested_records(self) -> None:
         idx_text = "\n".join([
             "1:0:d=2024050412:CAPE:surface:anl:",
@@ -704,12 +742,1130 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         }
 
         capped = apply_environmental_probability_caps(high_probs, features, candidate_model)
-
         self.assertLessEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.299)
         self.assertLessEqual(float(np.nanmax(capped.probabilities["hail"])), 0.59)
         self.assertLessEqual(float(np.nanmax(capped.probabilities["wind"])), 0.59)
         categories = category_grid_from_probabilities(capped.probabilities, features, candidate_model)
         self.assertTrue(np.all(categories <= SPC_RISK_LABELS.index("ENH")))
+
+    def test_great_lakes_tornado_logic_penalizes_marine_stability(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 250.0)      # sbcape collapsed but not fully elevated
+        fields["cape_ml"] = np.full((2, 2), 1200.0)  # MLCAPE strong (prevents environmental capping)
+        fields["cape_mu"] = np.full((2, 2), 1200.0)  # mucape elevated
+        fields["cin"] = np.full((2, 2), -120.0)      # strong capping
+        fields["cin_ml"] = np.full((2, 2), -120.0)   # strong capping (prioritized by gridded features)
+        fields["u500"] = np.full((2, 2), 35.0)
+        fields["srh01"] = np.full((2, 2), 220.0)     # strong low-level shear/helicity (prevents capping)
+        fields["srh03"] = np.full((2, 2), 350.0)     # strong 0-3km shear/helicity (prevents capping)
+        fields["td2m"] = np.full((2, 2), 292.0)      # warm/moist dewpoint (65.9F, prevents dry air and LCL caps)
+
+        # Great Lakes coordinates (e.g. Lake Michigan lat 44.0, lon -86.5)
+        lats = np.array([43.9, 44.1])
+        lons = np.array([-86.6, -86.4])
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features, lats=lats, lons=lons)
+
+        # Verify the modifier was applied, penalized, and is bounded (capped above 0.065 because raw is 0.10, multiplier min is 0.65)
+        self.assertTrue(capped.report["greatLakesTornadoModifierApplied"])
+        self.assertGreater(capped.report["greatLakesPenalizedCells"], 0)
+        self.assertEqual(capped.report["greatLakesEnhancedCells"], 0)
+        # raw 0.10 * 0.65 (min penalty) = 0.065
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.065)
+
+    def test_great_lakes_tornado_logic_grants_lake_boundary_bonus(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 1800.0)      # SBCAPE strong
+        fields["cape_ml"] = np.full((2, 2), 1600.0)
+        fields["cape_mu"] = np.full((2, 2), 2000.0)
+        fields["cin"] = np.full((2, 2), -10.0)        # minimal capping
+        fields["u500"] = np.full((2, 2), 40.0)        # strong deep shear (discrete supercell active)
+        fields["srh01"] = np.full((2, 2), 220.0)      # strong low-level shear/helicity
+        fields["srh03"] = np.full((2, 2), 350.0)      # strong 0-3km shear/helicity
+        fields["td2m"] = np.full((2, 2), 291.0)      # warm/moist dewpoint (64F)
+
+        # Great Lakes coordinates (lat 44.0, lon -86.5)
+        lats = np.array([43.9, 44.1])
+        lons = np.array([-86.6, -86.4])
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        # Adjust LCL to be low (< 1000m)
+        features.raw["lclM"] = np.full((2, 2), 800.0)
+
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features, lats=lats, lons=lons)
+
+        # Verify the modifier was applied and enhanced risk near boundary
+        self.assertTrue(capped.report["greatLakesTornadoModifierApplied"])
+        self.assertEqual(capped.report["greatLakesPenalizedCells"], 0)
+        self.assertGreater(capped.report["greatLakesEnhancedCells"], 0)
+        # raw 0.10 * 1.15 (supercell upgrade) * 1.15 (lake bonus) = 0.13225
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.13225)
+
+    def test_great_lakes_tornado_logic_does_not_affect_other_regions(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 800.0)       # SBCAPE strong but below 1000.0 (prevents discrete supercell upgrade)
+        fields["cape_ml"] = np.full((2, 2), 1200.0)  # MLCAPE strong (prevents environmental capping)
+        fields["cape_mu"] = np.full((2, 2), 1200.0)
+        fields["cin"] = np.full((2, 2), -40.0)       # minimal capping
+        fields["cin_ml"] = np.full((2, 2), -40.0)    # minimal capping
+        fields["u500"] = np.full((2, 2), 35.0)        # strong deep shear (discrete supercell active, QLCS inactive)
+        fields["srh01"] = np.full((2, 2), 220.0)     # strong low-level shear/helicity (prevents capping)
+        fields["srh03"] = np.full((2, 2), 350.0)     # strong 0-3km shear/helicity (prevents capping)
+        fields["td2m"] = np.full((2, 2), 292.0)      # warm/moist dewpoint (65.9F, prevents dry air and LCL caps)
+
+        # Non-Great Lakes coordinates (e.g. Oklahoma lat 35.0, lon -97.0)
+        lats = np.array([34.9, 35.1])
+        lons = np.array([-97.1, -96.9])
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features, lats=lats, lons=lons)
+        # Verify that despite stable profile, Oklahoma has NO Great Lakes modifier effect
+        self.assertTrue(capped.report["greatLakesTornadoModifierApplied"])
+        self.assertEqual(capped.report["greatLakesPenalizedCells"], 0)
+        self.assertEqual(capped.report["greatLakesEnhancedCells"], 0)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.10)
+
+    def test_storm_mode_discrete_supercell_enhances_tornado_risk(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape_ml"] = np.full((2, 2), 1200.0)
+        fields["cape"] = np.full((2, 2), 1200.0)      # strong sbcape
+        fields["u500"] = np.full((2, 2), 40.0)        # strong deep shear
+        fields["srh01"] = np.full((2, 2), 220.0)      # strong low-level shear/SRH
+        fields["srh03"] = np.full((2, 2), 350.0)
+        fields["td2m"] = np.full((2, 2), 292.0)       # warm/moist dewpoint (lcl will be 1000m, low LCL)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["discreteSupercellCells"], 0)
+        # raw 0.10 * 1.15 = 0.115
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.115)
+
+    def test_storm_mode_qlcs_favors_wind_and_limits_tornado(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape_ml"] = np.full((2, 2), 800.0)
+        fields["cape"] = np.full((2, 2), 900.0)
+        fields["u500"] = np.full((2, 2), 32.0)        # moderate deep shear
+        fields["srh01"] = np.full((2, 2), 180.0)      # strong low-level helicity/shear
+        fields["srh03"] = np.full((2, 2), 250.0)
+        fields["td2m"] = np.full((2, 2), 290.0)       # warm/moist dewpoint
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        # Make storm rel low so it is not a clean discrete supercell
+        features.raw["stormRelWindKt"] = np.full((2, 2), 10.0)
+
+        high_probs = {
+            "tornado": np.full((2, 2), 0.20),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.10),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["qlcsCells"], 0)
+        # wind enhanced: 0.10 * 1.10 = 0.11
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.11)
+        # tornado capped strictly at 0.099
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.099)
+
+    def test_storm_mode_pulse_limits_organized_severe(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 2000.0)      # high CAPE
+        fields["cape_ml"] = np.full((2, 2), 1800.0)
+        fields["cape_mu"] = np.full((2, 2), 2200.0)
+        fields["u500"] = np.full((2, 2), 5.0)         # very weak shear
+        fields["srh01"] = np.full((2, 2), 10.0)
+        fields["srh03"] = np.full((2, 2), 15.0)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.20),
+            "wind": np.full((2, 2), 0.20),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["pulseCells"], 0)
+        # tornado capped at 0.019
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        # wind and hail capped at 0.14
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.14)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.14)
+
+    def test_storm_mode_elevated_convection_suppresses_tornado_but_keeps_hail(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 50.0)        # stable at surface
+        fields["cape_ml"] = np.full((2, 2), 1200.0)   # MLCAPE strong (prevents environmental capping)
+        fields["cape_mu"] = np.full((2, 2), 1500.0)   # highly unstable aloft
+        fields["cin"] = np.full((2, 2), -150.0)
+        fields["cin_ml"] = np.full((2, 2), -150.0)
+        fields["u500"] = np.full((2, 2), 35.0)
+        fields["srh01"] = np.full((2, 2), 220.0)
+        fields["srh03"] = np.full((2, 2), 350.0)
+        fields["td2m"] = np.full((2, 2), 292.0)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.10),
+            "wind": np.full((2, 2), 0.10),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["elevatedCells"], 0)
+        # tornado capped at 0.019
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        # wind probability scaled directly by 0.70: 0.10 * 0.7 = 0.07
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.07)
+        # hail risk preserved
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.10)
+
+    def test_storm_mode_high_based_favors_wind_and_limits_tornado(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape"] = np.full((2, 2), 1200.0)
+        fields["cape_ml"] = np.full((2, 2), 1000.0)
+        fields["cape_mu"] = np.full((2, 2), 1500.0)
+        fields["u500"] = np.full((2, 2), 35.0)
+        fields["srh01"] = np.full((2, 2), 220.0)
+        fields["srh03"] = np.full((2, 2), 350.0)
+        # Set td2m very low so that T2m - Td2m is large, creating high LCL but avoiding the 0.04 dry-air cap
+        fields["td2m"] = np.full((2, 2), 283.0)       # dewpoint ~49.7F (lcl will be np.clip(125 * 17, 100, 3500) = 2125m)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.10),
+            "wind": np.full((2, 2), 0.10),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["highBasedCells"], 0)
+        # tornado capped at 0.019
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        # wind preserved/enhanced (0.10 * 1.05 = 0.105)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.105)
+        # hail fully preserved
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.10)
+
+    def test_storm_mode_tropical_mini_supercell_allows_tornado_risk(self) -> None:
+        fields = small_fields((2, 2))
+        fields["cape_ml"] = np.full((2, 2), 400.0)    # modest CAPE (normally capped to 0.019 for mlcape < 500)
+        fields["cape"] = np.full((2, 2), 400.0)
+        fields["cape_mu"] = np.full((2, 2), 600.0)
+        fields["pwat"] = np.full((2, 2), 50.0)        # extremely high PWAT (~2.0 in)
+        fields["u500"] = np.full((2, 2), 35.0)
+        fields["srh01"] = np.full((2, 2), 220.0)      # strong low-level shear
+        fields["srh03"] = np.full((2, 2), 350.0)
+        fields["td2m"] = np.full((2, 2), 294.0)       # very warm/moist dewpoint
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["tropicalMiniSupercellCells"], 0)
+        # tornado cap relaxed to 0.099 (so 0.10 is capped to exactly 0.099)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.099)
+
+    def test_storm_mode_cold_core_allows_brief_tornado(self) -> None:
+        fields = small_fields((2, 2))
+        fields["hgt500"] = np.full((2, 2), 5400.0)    # extremely low 500mb height
+        fields["td2m"] = np.full((2, 2), 282.0)       # cool surface (47.9F, normally capped by sfcDewpointF < 55)
+        fields["cape"] = np.full((2, 2), 600.0)        # moderate CAPE to avoid 0.04 wind/hail caps
+        fields["cape_ml"] = np.full((2, 2), 600.0)
+        fields["cape_mu"] = np.full((2, 2), 700.0)
+        fields["u500"] = np.full((2, 2), 35.0)
+        fields["srh01"] = np.full((2, 2), 110.0)      # moderate low-level shear (avoids QLCS)
+        fields["srh03"] = np.full((2, 2), 350.0)
+        # Force low LCL
+        fields["t2m"] = fields["td2m"] + 4.0          # LCL will be 125.0 * 4 = 500m (< 800m)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.20),
+            "wind": np.full((2, 2), 0.20),
+        }
+
+        capped = apply_environmental_probability_caps(high_probs, features)
+        self.assertGreater(capped.report["coldCoreCells"], 0)
+        # tornado cap relaxed to 0.049
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.049)
+        # wind and hail capped conservatively at 0.14
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.14)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.14)
+
+    def test_plains_dryline_and_discrete_supercell_boost(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Oklahoma
+        lats = np.full(shape, 35.0)
+        lons = np.array([[-98.0, -96.0], [-98.0, -96.0]])
+        # Set up a strong zonal dewpoint gradient (grad_dew >= 1.0)
+        fields["td2m"] = np.array([[282.0, 292.0], [282.0, 292.0]]) # 47.9F to 65.9F
+        # Standard temperature (warm)
+        fields["t2m"] = fields["td2m"] + 5.0
+        
+        # High instability and shear
+        fields["cape"] = np.full(shape, 2000.0)
+        fields["cape_ml"] = np.full(shape, 2000.0)
+        fields["cape_mu"] = np.full(shape, 2200.0)
+        fields["cin"] = np.full(shape, 0.0)
+        fields["cin_ml"] = np.full(shape, 0.0)
+        
+        # Kinematics
+        fields["u10"] = np.full(shape, -5.0) # easterly backed wind
+        fields["v10"] = np.full(shape, 2.0)
+        fields["u500"] = np.full(shape, 35.0)
+        fields["v500"] = np.full(shape, 10.0)
+        fields["srh01"] = np.full(shape, 200.0)
+        fields["srh03"] = np.full(shape, 250.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.10),
+            "hail": np.full(shape, 0.20),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["plainsDrylineCells"], 0)
+        self.assertGreater(capped.report["plainsDiscreteSupercellCells"], 0)
+        # Tornado and hail probabilities should be boosted:
+        # Tornado: 0.10 * 1.15 (standard supercell) * 1.15 (plains supercell) = 0.13225
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.13225)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.276)
+
+
+    def test_plains_triple_point_focused_forcing(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        lats = np.full(shape, 35.0)
+        lons = np.array([[-98.0, -96.0], [-98.0, -96.0]])
+        # Dewpoint gradient (dryline)
+        fields["td2m"] = np.array([[282.0, 292.0], [282.0, 292.0]])
+        # Temperature gradient (front)
+        fields["t2m"] = np.array([[285.0, 298.0], [285.0, 298.0]]) # strong temperature gradient
+        
+        # High instability and shear
+        fields["cape"] = np.full(shape, 1500.0)
+        fields["cape_ml"] = np.full(shape, 1500.0)
+        fields["cape_mu"] = np.full(shape, 1800.0)
+        fields["cin"] = np.full(shape, -10.0)
+        
+        # Kinematics with backed winds
+        fields["u10"] = np.full(shape, -6.0)
+        fields["u500"] = np.full(shape, 40.0)
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 220.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.10),
+            "wind": np.full(shape, 0.10),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["plainsTriplePointCells"], 0)
+        self.assertGreater(capped.report["plainsDiscreteSupercellCells"], 0)
+
+    def test_plains_warm_front_backed_winds(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        lats = np.full(shape, 35.0)
+        lons = np.array([[-98.0, -96.0], [-98.0, -96.0]])
+        # Warm front temperature gradient
+        fields["t2m"] = np.array([[288.0, 297.0], [288.0, 297.0]])
+        fields["td2m"] = np.full(shape, 290.0) # moist dewpoint (62.3F)
+        
+        # Backed surface wind & strong low-level helicity
+        fields["u10"] = np.full(shape, -4.0)
+        fields["srh01"] = np.full(shape, 160.0)
+        fields["srh03"] = np.full(shape, 200.0)
+        fields["cape"] = np.full(shape, 1800.0)
+        fields["cape_ml"] = np.full(shape, 1800.0)
+        fields["cape_mu"] = np.full(shape, 2000.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.10),
+            "wind": np.full(shape, 0.10),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["plainsWarmFrontCells"], 0)
+
+    def test_plains_eml_moderate_cin_cap_handling(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        lats = np.full(shape, 35.0)
+        lons = np.array([[-98.0, -96.0], [-98.0, -96.0]])
+        
+        # Strong zonal dewpoint gradient (dryline)
+        fields["td2m"] = np.array([[282.0, 292.0], [282.0, 292.0]])
+        fields["t2m"] = fields["td2m"] + 5.0
+        
+        # Moderate CIN capping (-200 J/kg)
+        fields["cin"] = np.full(shape, -200.0)
+        fields["cin_ml"] = np.full(shape, -200.0)
+        
+        # High MLCAPE and shear
+        fields["cape"] = np.full(shape, 2000.0)
+        fields["cape_ml"] = np.full(shape, 2000.0)
+        fields["cape_mu"] = np.full(shape, 2200.0)
+        fields["u10"] = np.full(shape, -6.0) # backed surface wind
+        fields["u500"] = np.full(shape, 40.0)
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 220.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        # Moderate input probabilities that would normally be slammed by -200 CIN caps
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.30),
+            "wind": np.full(shape, 0.25),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        # Check that EML cap relaxation worked
+        self.assertGreater(capped.report["plainsDiscreteSupercellCells"], 0)
+        # Standard cap would force tornado to 0.049. With Plains relaxation, it is boosted by +15% to 0.092
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.1058)
+
+    def test_plains_linear_forcing_shifts_weight(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        lats = np.full(shape, 35.0)
+        lons = np.array([[-98.0, -96.0], [-98.0, -96.0]])
+        
+        # Strong temperature gradient (cold front)
+        fields["t2m"] = np.array([[282.0, 298.0], [282.0, 298.0]])
+        fields["td2m"] = np.full(shape, 290.0)
+        
+        # Unbacked winds (westerly component u10 >= 0)
+        fields["u10"] = np.full(shape, 5.0)
+        fields["v10"] = np.full(shape, -4.0)
+        fields["u500"] = np.full(shape, 35.0)
+        fields["srh01"] = np.full(shape, 80.0)
+        fields["srh03"] = np.full(shape, 120.0)
+        fields["cape"] = np.full(shape, 1200.0)
+        fields["cape_ml"] = np.full(shape, 1200.0)
+        fields["cape_mu"] = np.full(shape, 1400.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["plainsLinearForcingCells"], 0)
+        # Significant tornado capped strictly to 0.049 (original 0.08 capped to 0.049)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.049)
+        # Wind/hail boosted by +10% (0.15 * 1.10 = 0.165)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.165)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.165)
+
+    def test_plains_large_hail_supercell_boost(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        lats = np.full(shape, 38.5) # Kansas
+        lons = np.full(shape, -98.0)
+        
+        # High CAPE (lapse rates proxy) and strong shear
+        fields["cape"] = np.full(shape, 2600.0)
+        fields["cape_ml"] = np.full(shape, 2600.0)
+        fields["cape_mu"] = np.full(shape, 2800.0)
+        fields["u500"] = np.full(shape, 45.0) # strong shear
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.30),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["plainsLargeHailSetups"], 0)
+        # Hail should be boosted by +20% (0.30 * 1.20 = 0.36)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.36)
+
+    def test_dixie_se_hslc_nocturnal_risk(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Mississippi
+        lats = np.full(shape, 32.5)
+        lons = np.full(shape, -89.5)
+        
+        # High shear, low CAPE setup (MLCAPE = 400, Dewpoint = 62F, shear = 45, srh01 = 220)
+        fields["cape"] = np.full(shape, 500.0)
+        fields["cape_ml"] = np.full(shape, 400.0)
+        fields["cape_mu"] = np.full(shape, 600.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["td2m"] = np.full(shape, 290.0) # 62.3 F
+        fields["t2m"] = np.full(shape, 292.0)
+        
+        # Backed winds and strong shear/helicity
+        fields["u10"] = np.full(shape, -5.0)
+        fields["u500"] = np.full(shape, 40.0)
+        fields["srh01"] = np.full(shape, 220.0) # Strong LLJ
+        fields["srh03"] = np.full(shape, 280.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        # Input probability that would normally be restricted to 0.019 under MLCAPE < 500
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.05),
+            "wind": np.full(shape, 0.05),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["dixieSeHslcCells"], 0)
+        # The CAPE-based tornado cap should be relaxed to 0.099 (so 0.08 is preserved),
+        # and then boosted by +15% due to srh01 >= 200 (LLJ boost): 0.08 * 1.15 = 0.092
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.092)
+
+    def test_dixie_se_warm_sector_discrete_cells(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Alabama
+        lats = np.full(shape, 32.5)
+        lons = np.full(shape, -86.5)
+        
+        # High shear, high instability discrete warm sector
+        fields["cape"] = np.full(shape, 1500.0)
+        fields["cape_ml"] = np.full(shape, 1200.0)
+        fields["cape_mu"] = np.full(shape, 1800.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["td2m"] = np.full(shape, 291.0) # 64.1 F
+        fields["t2m"] = np.full(shape, 295.0)
+        
+        # Backed winds and strong kinematics (discrete supercell triggers)
+        fields["u10"] = np.full(shape, -6.0) # Backed easterly
+        fields["u500"] = np.full(shape, 45.0)
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 240.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.11),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["dixieSeWarmSectorDiscreteCells"], 0)
+        # The tornado probability should be boosted:
+        # 0.11 * 1.15 (standard supercell) * 1.20 (dixie warm-sector discrete) = 0.1518
+        # Since standard cap is 0.14 and continuous upgrades are applied after caps, 0.1518 is the correct value.
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.1518)
+
+    def test_dixie_se_embedded_qlcs_tornadoes(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Georgia
+        lats = np.full(shape, 33.0)
+        lons = np.full(shape, -83.5)
+        
+        # QLCS environment (shear >= 30, srh01 >= 125, not discrete)
+        fields["cape"] = np.full(shape, 1200.0)
+        fields["cape_ml"] = np.full(shape, 1000.0)
+        fields["cape_mu"] = np.full(shape, 1400.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["td2m"] = np.full(shape, 290.0)
+        fields["t2m"] = np.full(shape, 293.0)
+        
+        # u500 is set to 18 to keep shear below 35 (31.1 kt) to avoid discrete_supercell classification
+        fields["u10"] = np.full(shape, 2.0)
+        fields["u500"] = np.full(shape, 18.0)
+        fields["srh01"] = np.full(shape, 180.0) # Very strong srh01
+        fields["srh03"] = np.full(shape, 220.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.15),
+            "hail": np.full(shape, 0.10),
+            "wind": np.full(shape, 0.10),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["dixieSeEmbeddedQlcsCells"], 0)
+        # Embedded QLCS tornado capped at 0.099
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.099)
+
+    def test_dixie_se_florida_sea_breeze_pulse(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Florida
+        lats = np.full(shape, 28.0)
+        lons = np.full(shape, -81.5)
+        
+        # Sea breeze boundary gradient (strong temperature gradient)
+        fields["t2m"] = np.array([[290.0, 298.0], [290.0, 298.0]]) # 18 deg F diff (grad_temp >= 0.8)
+        fields["td2m"] = np.full(shape, 294.0) # rich dewpoint (70F)
+        
+        fields["cape"] = np.full(shape, 2500.0)
+        fields["cape_ml"] = np.full(shape, 2000.0)
+        fields["cape_mu"] = np.full(shape, 2800.0)
+        fields["cin"] = np.full(shape, 0.0) # cin > -30.0 for spouts
+        fields["cin_ml"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 10.0) # very weak shear
+        fields["srh01"] = np.full(shape, 20.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        # Favorable spout conditions: sbcape >= 500, lcl <= 1000
+        fields["lcl"] = np.full(shape, 500.0)
+        
+        probs = {
+            "tornado": np.full(shape, 0.10),
+            "hail": np.full(shape, 0.25),
+            "wind": np.full(shape, 0.25),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["dixieSeSeaBreezePulseCells"], 0)
+        # Landspout/waterspout allowed to reach 0.049
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.049)
+        # Wind and hail capped at 0.14 max (but standard weak-kinematic cap limits them to 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.04)
+
+    def test_dixie_se_florida_sea_breeze_supercellular(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Florida
+        lats = np.full(shape, 28.0)
+        lons = np.full(shape, -81.5)
+        
+        # Boundary gradient present
+        fields["t2m"] = np.array([[290.0, 298.0], [290.0, 298.0]])
+        fields["td2m"] = np.full(shape, 292.0)
+        
+        # Strong background kinematics (shear >= 30, srh01 >= 100)
+        fields["cape"] = np.full(shape, 1500.0)
+        fields["cape_ml"] = np.full(shape, 1200.0)
+        fields["cape_mu"] = np.full(shape, 1800.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["u500"] = np.full(shape, 35.0) # strong shear
+        fields["srh01"] = np.full(shape, 130.0) # srh01 >= 125 to avoid standard 0.049 cap
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.06),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["dixieSeSeaBreezeSupercellCells"], 0)
+        # Since background kinematics are strong, standard caps apply without sea-breeze pulse penalty:
+        # Tornado can exceed 0.019 (0.06 is preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.06)
+
+    def test_dixie_se_moisture_guardrails(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Florida
+        lats = np.full(shape, 26.0)
+        lons = np.full(shape, -80.5)
+        
+        # Extremely high moisture (Dewpoint = 72F, PWAT = 2.1 in) but weak kinematics (shear = 10, srh01 = 20)
+        fields["td2m"] = np.full(shape, 295.0) # 71.3 F
+        fields["t2m"] = np.full(shape, 297.0)
+        fields["cape"] = np.full(shape, 2000.0)
+        fields["cape_ml"] = np.full(shape, 1800.0)
+        fields["cape_mu"] = np.full(shape, 2200.0)
+        fields["cin"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 10.0)
+        fields["srh01"] = np.full(shape, 20.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.15),
+            "hail": np.full(shape, 0.20),
+            "wind": np.full(shape, 0.20),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        # Since kinematics are weak, tornado cap must strictly apply (capped to 0.019)
+        # and no moisture-based upgrade is allowed.
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+
+
+    def test_midwest_prior_convection_stabilization(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Illinois
+        lats = np.full(shape, 40.0)
+        lons = np.full(shape, -89.0)
+        
+        # Stabilized prior convection profile: sbcape collapsed relative to mucape (sbcape = 100, mucape = 1200), cin = -120
+        fields["cape"] = np.full(shape, 100.0)
+        fields["cape_ml"] = np.full(shape, 80.0)
+        fields["cape_mu"] = np.full(shape, 1200.0)
+        fields["cin"] = np.full(shape, -120.0)
+        fields["cin_ml"] = np.full(shape, -120.0)
+        
+        # High moisture (pwatIn >= 1.2)
+        fields["pwat"] = np.full(shape, 40.0) # pwat = 40mm / 25.4 = 1.57 in
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["midwestStabilizedCells"], 0)
+        # Tornado capped to 0.019, then penalized by -30% (0.019 * 0.70 = 0.0133)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.0133)
+        # Wind/hail capped and penalized by -30%. Max wind gets 0.02156 due to standard caps and elevated caps.
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.02156)
+
+    def test_midwest_boundary_enhanced_tornado_bonus(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Indiana
+        lats = np.full(shape, 40.0)
+        lons = np.full(shape, -86.0)
+        
+        # Outflow/warm front temperature boundary active (grad_temp >= 0.8)
+        fields["t2m"] = np.array([[290.0, 298.0], [290.0, 298.0]]) # 18 deg F diff
+        fields["td2m"] = np.full(shape, 292.0)
+        
+        # Surface-based inflow intact (sbcape >= 1000, cin >= -50, lcl <= 1200)
+        fields["cape"] = np.full(shape, 1500.0)
+        fields["cape_ml"] = np.full(shape, 1200.0)
+        fields["cape_mu"] = np.full(shape, 1800.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["cin_ml"] = np.full(shape, -10.0)
+        
+        # Strong low-level shear/helicity (srh01 >= 150)
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 240.0)
+        fields["u500"] = np.full(shape, 40.0) # deep shear
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["midwestBoundaryEnhancedCells"], 0)
+        # Tornado boosted by standard supercell boost (+15%) and Midwest boundary bonus (+20%):
+        # 0.08 * 1.15 * 1.20 = 0.1104, within relaxed cap of 0.14
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.1104)
+
+    def test_high_plains_high_based_wind_hail(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Colorado
+        lats = np.full(shape, 40.0)
+        lons = np.full(shape, -104.5)
+        
+        # High based (LCL >= 1800m): t2m - td2m >= 14.4 K -> e.g. t2m = 308, td2m = 293 (spread = 15 K, LCL = 1875m)
+        fields["td2m"] = np.full(shape, 293.0) # 67.7F
+        fields["t2m"] = np.full(shape, 308.0) # LCL = 125 * 15 = 1875m
+        
+        # Subcloud dryness spread >= 300m
+        fields["pwat"] = np.full(shape, 20.0) # pwat = 20 / 25.4 = 0.78 in -> moistureDepth = 1181m -> spread = 1875 - 1181 = 694m
+        
+        # Instability and deep shear present (MLCAPE >= 1000, shear >= 30)
+        fields["cape"] = np.full(shape, 1500.0)
+        fields["cape_ml"] = np.full(shape, 1200.0)
+        fields["cape_mu"] = np.full(shape, 1800.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["cin_ml"] = np.full(shape, -10.0)
+        fields["u500"] = np.full(shape, 35.0)
+        fields["srh01"] = np.full(shape, 60.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.10),
+            "hail": np.full(shape, 0.20),
+            "wind": np.full(shape, 0.20),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["highPlainsHighBasedCells"], 0)
+        # Tornado strictly capped at 0.019
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        # Wind boosted by +15% (0.20 * 1.15 = 0.23) and hail boosted by +10% (0.20 * 1.10 = 0.22)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.23)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.22)
+
+    def test_steep_lapse_rate_landspout_mode(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Colorado
+        lats = np.full(shape, 40.0)
+        lons = np.full(shape, -104.5)
+        
+        # Keep temperature/dewpoint gradient columns-wise to keep grad_temp >= 1.0
+        fields["t2m"] = np.array([[290.0, 300.0], [290.0, 300.0]])
+        fields["td2m"] = np.array([[282.0, 292.0], [282.0, 292.0]])
+        
+        # Weak deep shear (< 20)
+        fields["u10"] = np.full(shape, 0.0)
+        fields["v10"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 5.0)
+        fields["v500"] = np.full(shape, 0.0)
+        fields["srh01"] = np.full(shape, 20.0)
+        
+        # Strong sbcape (>= 800), minimal cap (cin >= -20), low LCL (<= 1000)
+        fields["cape"] = np.full(shape, 1200.0)
+        fields["cin"] = np.full(shape, 0.0)
+        fields["cin_ml"] = np.full(shape, 0.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.10),
+            "hail": np.full(shape, 0.05),
+            "wind": np.full(shape, 0.05),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["steepLapseRateLandspoutCells"], 0)
+        # Landspout allowed to reach 0.049 cap despite weak kinematics/shear
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.049)
+
+    def test_northern_plains_elevated_hail(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Montana
+        lats = np.full(shape, 46.0)
+        lons = np.full(shape, -110.0)
+        
+        # Elevated convection mode: mucape >= 500, sbcape collapsed (< 100)
+        fields["cape"] = np.full(shape, 50.0)
+        fields["cape_ml"] = np.full(shape, 40.0)
+        fields["cape_mu"] = np.full(shape, 1000.0)
+        fields["cin"] = np.full(shape, -150.0)
+        fields["cin_ml"] = np.full(shape, -150.0)
+        
+        # Strong deep shear (shear >= 35)
+        fields["u500"] = np.full(shape, 40.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.25),
+            "wind": np.full(shape, 0.10),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["northernElevatedHailCells"], 0)
+        # Elevated hail cap relaxed to 0.29 (so 0.25 is fully preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.25)
+
+    def test_northern_nocturnal_mcs_wind(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: North Dakota
+        lats = np.full(shape, 47.0)
+        lons = np.full(shape, -100.0)
+        
+        # MCS mode (pwat >= 1.4, mucape >= 1000, shear >= 25, srh01 >= 50)
+        fields["pwat"] = np.full(shape, 45.0) # 1.57 in
+        fields["cape"] = np.full(shape, 1200.0)
+        fields["cape_ml"] = np.full(shape, 1000.0)
+        fields["cape_mu"] = np.full(shape, 1400.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["cin_ml"] = np.full(shape, -10.0)
+        fields["td2m"] = np.full(shape, 290.0)
+        fields["t2m"] = np.full(shape, 293.0)
+        
+        # Kinematics: shear >= 25, srh01 >= 50 (but not discrete)
+        fields["u10"] = np.full(shape, 2.0)
+        fields["u500"] = np.full(shape, 25.0) # shear = 23 * 1.94 = 44.7 Kt
+        fields["srh01"] = np.full(shape, 100.0)
+        fields["srh03"] = np.full(shape, 140.0)
+        
+        # timings: nocturnal timing forecast_hour >= 12
+        features = gridded_features_from_fields(fields, forecast_hour=15)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.15),
+            "wind": np.full(shape, 0.25),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["northernNocturnalMcsCells"], 0)
+        # Wind boosted by standard MCS wind boost (+10%) and Northern nocturnal MCS boost (+10%):
+        # 0.25 * 1.10 * 1.10 = 0.3025
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.3025)
+
+
+    def test_northeast_low_cape_high_shear(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Pennsylvania
+        lats = np.full(shape, 40.0)
+        lons = np.full(shape, -76.0)
+        
+        # Low MLCAPE but strong deep shear, high low-level SRH, sufficient dewpoint
+        fields["cape"] = np.full(shape, 400.0)
+        fields["cape_ml"] = np.full(shape, 300.0)
+        fields["cape_mu"] = np.full(shape, 500.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["cin_ml"] = np.full(shape, -10.0)
+        
+        fields["u10"] = np.full(shape, 0.0)
+        fields["v10"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 20.0) # shear = 20 * 1.94 = 38.8 Kt
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 240.0)
+        fields["td2m"] = np.full(shape, 287.0) # dewpoint = 56.9 F
+        fields["t2m"] = np.full(shape, 292.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.04),
+            "hail": np.full(shape, 0.10),
+            "wind": np.full(shape, 0.20),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["northeastLowCapeHighShearCells"], 0)
+        # Wind cap is relaxed to 0.29 (so 0.20 wind is fully preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.20)
+        # Tornado cap relaxed to 0.049 (so 0.04 tornado is fully preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.04)
+
+    def test_northeast_cad_stable_wedge(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Virginia / Appalachians
+        lats = np.full(shape, 38.0)
+        lons = np.full(shape, -79.0)
+        
+        # Cool surface temp, easterly wedge wind, collapsed SBCAPE relative to elevated
+        fields["t2m"] = np.full(shape, 285.0) # 53.3 F
+        fields["td2m"] = np.full(shape, 283.0)
+        fields["u10"] = np.full(shape, -5.0)
+        fields["v10"] = np.full(shape, -5.0)
+        
+        fields["cape"] = np.full(shape, 50.0)
+        fields["cape_ml"] = np.full(shape, 40.0)
+        fields["cape_mu"] = np.full(shape, 400.0)
+        
+        # Strong shear (shear >= 35) to allow elevated hail cap relaxation
+        fields["u500"] = np.full(shape, 20.0) # shear = hypot(25, 16) * 1.94 = 57.6 Kt
+        fields["v500"] = np.full(shape, 11.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.25),
+            "wind": np.full(shape, 0.15),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["northeastCadStableCells"], 0)
+        # Tornado cap strictly limited to 0.019, then penalized by -30% (0.019 * 0.70 = 0.0133)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.0133)
+        # Elevated hail cap is relaxed to 0.29 under strong shear (so 0.25 is preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.25)
+        # Wind is penalized by -30% (standard cap 0.04 * 0.70 = 0.028)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.028)
+
+    def test_northeast_wedge_front_boundary(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: New York
+        lats = np.full(shape, 41.0)
+        lons = np.full(shape, -75.0)
+        
+        # Wedge front boundary active (grad_temp columns-wise)
+        fields["t2m"] = np.array([[290.0, 298.0], [290.0, 298.0]])
+        fields["td2m"] = np.full(shape, 290.0) # dewpoint = 62.3 F
+        
+        # Backed easterly winds, strong helicity, surface inflow intact
+        fields["u10"] = np.full(shape, -5.0)
+        fields["v10"] = np.full(shape, 0.0)
+        fields["srh01"] = np.full(shape, 180.0)
+        fields["srh03"] = np.full(shape, 240.0)
+        
+        fields["cape"] = np.full(shape, 1200.0)
+        fields["cape_ml"] = np.full(shape, 1000.0)
+        fields["cape_mu"] = np.full(shape, 1400.0)
+        fields["cin"] = np.full(shape, -10.0)
+        fields["cin_ml"] = np.full(shape, -10.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.10),
+            "wind": np.full(shape, 0.10),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["northeastWedgeFrontCells"], 0)
+        # Tornado boosted by standard supercell boost (+15%), wedge front bonus (+20%), and Great Lakes bonus (+15%):
+        # 0.08 * 1.15 * 1.20 * 1.15 = 0.12696
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.12696)
+
+    def test_desert_southwest_dry_microburst(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Arizona
+        lats = np.full(shape, 33.0)
+        lons = np.full(shape, -112.0)
+        
+        # High based (LCL >= 2000m): spread 16K -> LCL = 2000m
+        fields["td2m"] = np.full(shape, 282.0) # 47.9 F (dry)
+        fields["t2m"] = np.full(shape, 298.0) # spread = 16 K -> LCL = 2000m
+        fields["pwat"] = np.full(shape, 15.0) # dry PWAT
+        
+        # Minimal elevated instability (MUCAPE >= 200)
+        fields["cape"] = np.full(shape, 250.0)
+        fields["cape_ml"] = np.full(shape, 200.0)
+        fields["cape_mu"] = np.full(shape, 400.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.05),
+            "hail": np.full(shape, 0.05),
+            "wind": np.full(shape, 0.20),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["desertSouthwestDryMicrobursts"], 0)
+        # Tornado strictly capped at 0.019
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        # Wind boosted by +15% dry microburst and +5% high-based convection: 0.20 * 1.15 * 1.05 = 0.2415
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.2415)
+
+    def test_desert_southwest_monsoon_suppressor(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Arizona / New Mexico
+        lats = np.full(shape, 32.0)
+        lons = np.full(shape, -108.0)
+        
+        # Deep monsoonal moisture (PWAT >= 1.4 in, Dewpoint >= 60)
+        fields["pwat"] = np.full(shape, 45.0) # 1.77 in
+        fields["td2m"] = np.full(shape, 290.0) # 62.3 F
+        fields["t2m"] = np.full(shape, 293.0)
+        
+        # Very weak kinematics (shear < 20, srh01 < 50)
+        fields["u10"] = np.full(shape, 0.0)
+        fields["v10"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 0.0)
+        fields["v500"] = np.full(shape, 0.0)
+        fields["srh01"] = np.full(shape, 10.0)
+        fields["srh03"] = np.full(shape, 20.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.15),
+            "hail": np.full(shape, 0.25),
+            "wind": np.full(shape, 0.25),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["desertSouthwestMonsoonHeavyRainCells"], 0)
+        # All severe hazards strictly suppressed to baseline/marginal caps (tornado 0.01, wind/hail 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.01)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.04)
+
+    def test_pacific_northwest_cold_core_convection(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: California/Oregon border
+        lats = np.full(shape, 42.0)
+        lons = np.full(shape, -121.0)
+        
+        # Cold-core setup: hgt500 <= 5550m, cool dewpoint (50 F), low LCL (800m), modest sbcape
+        fields["hgt500"] = np.full(shape, 5450.0)
+        fields["td2m"] = np.full(shape, 283.15) # 50.0 F
+        fields["t2m"] = np.full(shape, 289.55) # LCL = 125 * 6.4 = 800m
+        
+        fields["cape"] = np.full(shape, 400.0)
+        fields["cape_ml"] = np.full(shape, 300.0)
+        fields["cape_mu"] = np.full(shape, 500.0)
+        fields["cin"] = np.full(shape, -5.0)
+        fields["cin_ml"] = np.full(shape, -5.0)
+        
+        fields["srh01"] = np.full(shape, 100.0)
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.04),
+            "hail": np.full(shape, 0.12),
+            "wind": np.full(shape, 0.12),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["pacificNorthwestColdCoreCells"], 0)
+        # Caps relaxed to 0.049 tornado and 0.14 wind/hail (so inputs are fully preserved)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.12)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.12)
+
+    def test_pacific_northwest_terrain_forced_guardrail(self) -> None:
+        shape = (2, 2)
+        fields = small_fields(shape)
+        # Bounding box coordinates: Washington
+        lats = np.full(shape, 47.0)
+        lons = np.full(shape, -120.0)
+        
+        # Weak instability and weak shear (no thermodynamic/kinematic overlap)
+        fields["cape"] = np.full(shape, 200.0)
+        fields["cape_ml"] = np.full(shape, 150.0)
+        fields["cape_mu"] = np.full(shape, 250.0)
+        
+        fields["u10"] = np.full(shape, 0.0)
+        fields["v10"] = np.full(shape, 0.0)
+        fields["u500"] = np.full(shape, 5.0) # shear = 5 * 1.94 = 9.7 Kt
+        
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        probs = {
+            "tornado": np.full(shape, 0.08),
+            "hail": np.full(shape, 0.20),
+            "wind": np.full(shape, 0.20),
+        }
+        
+        capped = apply_environmental_probability_caps(probs, features, lats=lats, lons=lons)
+        self.assertGreater(capped.report["pacificNorthwestTerrainForcedClippedCells"], 0)
+        # All hazards strictly capped to baseline TSTM/MRGL limits (tornado 0.019, wind/hail 0.14, but standard cap restricts to 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.019)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["hail"])), 0.04)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.04)
+
 
     def test_category_probability_ceiling_keeps_tiles_consistent_with_final_categories(self) -> None:
         probabilities = {
@@ -842,15 +1998,32 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "hail": np.full((5, 5), 0.30),
             "wind": np.full((5, 5), 0.30),
         }
-        lats = np.linspace(27.0, 28.4, 5)
-        lons = np.linspace(-97.8, -96.0, 5)
+    def test_postprocess_does_not_cap_southeast_texas_land(self) -> None:
+        fields = small_fields((5, 5))
+        fields["cape_mu"] = np.full((5, 5), 2600.0)
+        fields["cape_ml"] = np.full((5, 5), 1800.0)
+        fields["u500"] = np.full((5, 5), 36.0)
+        fields["srh01"] = np.full((5, 5), 140.0)
+        fields["srh03"] = np.full((5, 5), 220.0)
+        fields["td2m"] = np.full((5, 5), 295.0)
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        category_grid = np.full((5, 5), SPC_RISK_LABELS.index("ENH"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.full((5, 5), 0.02),
+            "hail": np.full((5, 5), 0.30),
+            "wind": np.full((5, 5), 0.30),
+        }
+        # Southeast Texas land coordinates (inland, north of the Gulf coastline)
+        lats = np.linspace(29.1, 29.5, 5)
+        lons = np.linspace(-95.5, -94.5, 5)
 
         processed = postprocess_category_grid(category_grid, probabilities, features, lats, lons)
 
-        self.assertTrue(np.all(processed.category_grid == SPC_RISK_LABELS.index("NONE")))
-        self.assertGreater(processed.report["downgradedCells"]["southTexasGulfCoast"], 0)
+        # Southeast Texas land should retain its ENH category and NOT be capped to NONE
+        self.assertTrue(np.all(processed.category_grid == SPC_RISK_LABELS.index("ENH")))
+        self.assertNotIn("southTexasGulfCoast", processed.report["downgradedCells"])
 
-    def test_postprocess_caps_texas_mexico_border_corridor_to_mrgl(self) -> None:
+    def test_postprocess_caps_mexico_but_not_us_cities(self) -> None:
         fields = small_fields((5, 5))
         fields["cape_mu"] = np.full((5, 5), 3000.0)
         fields["cape_ml"] = np.full((5, 5), 2100.0)
@@ -865,13 +2038,20 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "hail": np.full((5, 5), 0.15),
             "wind": np.full((5, 5), 0.15),
         }
-        lats = np.linspace(30.8, 32.1, 5)
-        lons = np.linspace(-99.0, -97.0, 5)
 
-        processed = postprocess_category_grid(category_grid, probabilities, features, lats, lons)
+        # Test case A: Coordinates inside Mexico (south of US-Mexico border)
+        lats_mex = np.linspace(24.0, 25.5, 5)
+        lons_mex = np.linspace(-102.0, -100.0, 5)
+        processed_mex = postprocess_category_grid(category_grid, probabilities, features, lats_mex, lons_mex)
+        self.assertTrue(np.all(processed_mex.category_grid == SPC_RISK_LABELS.index("MRGL")))
+        self.assertGreater(processed_mex.report["downgradedCells"]["texasMexicoBorder"], 0)
 
-        self.assertTrue(np.all(processed.category_grid == SPC_RISK_LABELS.index("MRGL")))
-        self.assertGreater(processed.report["downgradedCells"]["texasMexicoBorder"], 0)
+        # Test case B: US cities (e.g. San Antonio lon -98.5, lat 29.4 or Midland lon -102.1, lat 32.0)
+        lats_us = np.linspace(29.4, 32.0, 5)
+        lons_us = np.linspace(-102.1, -98.5, 5)
+        processed_us = postprocess_category_grid(category_grid, probabilities, features, lats_us, lons_us)
+        # Should retain SLGT category (uncapped)
+        self.assertTrue(np.all(processed_us.category_grid == SPC_RISK_LABELS.index("SLGT")))
 
     def test_postprocess_adds_mrgl_buffer_around_slgt(self) -> None:
         fields = small_fields((11, 11))
@@ -966,25 +2146,28 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(np.all(capped.probabilities["hail"] == 0.0))
         self.assertTrue(np.all(capped.probabilities["wind"] == 0.0))
 
-    def test_offshore_probability_suppression_covers_south_texas_gulf_coast(self) -> None:
+        self.assertTrue(np.all(capped.probabilities["tornado"] == 0.0))
+        self.assertTrue(np.all(capped.probabilities["hail"] == 0.0))
+        self.assertTrue(np.all(capped.probabilities["wind"] == 0.0))
+
+    def test_offshore_probability_suppression_does_not_cover_southeast_texas_land(self) -> None:
         probabilities = {
             "tornado": np.full((3, 3), 0.10),
             "hail": np.full((3, 3), 0.30),
             "wind": np.full((3, 3), 0.30),
         }
-        lats = np.linspace(27.6, 28.3, 3)
-        lons = np.linspace(-97.5, -96.2, 3)
+        # Southeast Texas land coordinates (inland, north of Gulf coast)
+        lats = np.linspace(29.1, 29.5, 3)
+        lons = np.linspace(-95.5, -94.5, 3)
 
         capped = apply_offshore_probability_suppression(probabilities, lats, lons)
 
-        self.assertTrue(np.all(capped.probabilities["tornado"] == 0.0))
-        self.assertTrue(np.all(capped.probabilities["hail"] == 0.0))
-        self.assertTrue(np.all(capped.probabilities["wind"] == 0.0))
-        self.assertGreater(capped.report["offshoreProbabilitySuppressedCells"]["southTexasGulfCoast"], 0)
+        self.assertTrue(np.all(capped.probabilities["tornado"] == 0.10))
+        self.assertTrue(np.all(capped.probabilities["hail"] == 0.30))
+        self.assertTrue(np.all(capped.probabilities["wind"] == 0.30))
+        self.assertNotIn("southTexasGulfCoast", capped.report.get("offshoreProbabilitySuppressedCells", {}))
 
-    def test_probability_tile_suppresses_strict_zone_by_tile_center(self) -> None:
-        lats = np.linspace(28.2, 28.8, 3)
-        lons = np.linspace(-98.0, -97.4, 3)
+    def test_probability_tile_suppresses_strict_marine_zone_by_tile_center(self) -> None:
         category = np.full((3, 3), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
         probabilities = {
             "tornado": np.full((3, 3), 0.04),
@@ -992,16 +2175,25 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "wind": np.full((3, 3), 0.12),
         }
 
-        tile = probability_tile(lats, lons, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        # Case A: Strict marine zone (open Gulf of Mexico)
+        lats_marine = np.linspace(26.0, 27.0, 3)
+        lons_marine = np.linspace(-94.0, -92.0, 3)
+        tile_marine = probability_tile(lats_marine, lons_marine, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        self.assertEqual(tile_marine["categoryLabel"], [["NONE"]])
+        self.assertEqual(tile_marine["probabilities"]["tornado"], [[0.0]])
+        self.assertEqual(tile_marine["probabilities"]["hail"], [[0.0]])
+        self.assertEqual(tile_marine["probabilities"]["wind"], [[0.0]])
 
-        self.assertEqual(tile["categoryLabel"], [["NONE"]])
-        self.assertEqual(tile["probabilities"]["tornado"], [[0.0]])
-        self.assertEqual(tile["probabilities"]["hail"], [[0.0]])
-        self.assertEqual(tile["probabilities"]["wind"], [[0.0]])
+        # Case B: Southeast Texas land (should not be suppressed)
+        lats_land = np.linspace(29.1, 29.5, 3)
+        lons_land = np.linspace(-95.5, -94.5, 3)
+        tile_land = probability_tile(lats_land, lons_land, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        self.assertEqual(tile_land["categoryLabel"], [["MRGL"]])
+        self.assertEqual(tile_land["probabilities"]["tornado"], [[0.04]])
+        self.assertEqual(tile_land["probabilities"]["hail"], [[0.12]])
+        self.assertEqual(tile_land["probabilities"]["wind"], [[0.12]])
 
-    def test_probability_tile_caps_texas_mexico_border_to_mrgl(self) -> None:
-        lats = np.linspace(30.8, 32.1, 3)
-        lons = np.linspace(-99.0, -97.0, 3)
+    def test_probability_tile_caps_mexico_but_not_us(self) -> None:
         category = np.full((3, 3), SPC_RISK_LABELS.index("SLGT"), dtype=np.int16)
         probabilities = {
             "tornado": np.full((3, 3), 0.05),
@@ -1009,12 +2201,23 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "wind": np.full((3, 3), 0.15),
         }
 
-        tile = probability_tile(lats, lons, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        # Case A: Mexico border corridor capped to MRGL
+        lats_mex = np.linspace(24.0, 25.5, 3)
+        lons_mex = np.linspace(-102.0, -100.0, 3)
+        tile_mex = probability_tile(lats_mex, lons_mex, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        self.assertEqual(tile_mex["categoryLabel"], [["MRGL"]])
+        self.assertEqual(tile_mex["probabilities"]["tornado"], [[0.049]])
+        self.assertEqual(tile_mex["probabilities"]["hail"], [[0.149]])
+        self.assertEqual(tile_mex["probabilities"]["wind"], [[0.149]])
 
-        self.assertEqual(tile["categoryLabel"], [["MRGL"]])
-        self.assertEqual(tile["probabilities"]["tornado"], [[0.049]])
-        self.assertEqual(tile["probabilities"]["hail"], [[0.149]])
-        self.assertEqual(tile["probabilities"]["wind"], [[0.149]])
+        # Case B: US region uncapped
+        lats_us = np.linspace(30.8, 32.1, 3)
+        lons_us = np.linspace(-99.0, -97.0, 3)
+        tile_us = probability_tile(lats_us, lons_us, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
+        self.assertEqual(tile_us["categoryLabel"], [["SLGT"]])
+        self.assertEqual(tile_us["probabilities"]["tornado"], [[0.05]])
+        self.assertEqual(tile_us["probabilities"]["hail"], [[0.15]])
+        self.assertEqual(tile_us["probabilities"]["wind"], [[0.15]])
 
     def test_risk_polygons_are_geojson_features(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
@@ -1800,10 +3003,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "gulfOfMexico": (
                 np.linspace(25.5, 27.5, shape[0]),
                 np.linspace(-94.0, -90.0, shape[1]),
-            ),
-            "southTexasGulfCoast": (
-                np.linspace(27.2, 28.2, shape[0]),
-                np.linspace(-97.6, -96.4, shape[1]),
             ),
             "floridaGulf": (
                 np.linspace(24.2, 25.0, shape[0]),

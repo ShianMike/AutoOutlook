@@ -201,9 +201,14 @@ def selected_term_report(
     }
 
 
-def validate_idx_records(records: list[tuple[int, int, str]]) -> dict[str, Any]:
+def validate_idx_records(
+    records: list[tuple[int, int, str]],
+    selected_terms: Iterable[str] = SELECTED_HRRR_TERMS,
+    required_terms: Iterable[str] = REQUIRED_HRRR_TERMS,
+    optional_terms: Iterable[str] = OPTIONAL_HRRR_TERMS,
+) -> dict[str, Any]:
     """Validate that an HRRR .idx file contains all core fields before GRIB fetch."""
-    report = selected_term_report(records)
+    report = selected_term_report(records, selected_terms, required_terms, optional_terms)
     if report["missingRequiredTerms"]:
         raise SelectedHrrrFieldError(
             "HRRR .idx missing required selected fields: "
@@ -356,9 +361,17 @@ def fetch_selected_hrrr_hour_with_metadata(
     no_cache: bool = False,
     grid_stride: int = 1,
     range_coalesce_gap_bytes: int | None = None,
+    selected_terms: Iterable[str] = SELECTED_HRRR_TERMS,
+    required_terms: Iterable[str] = REQUIRED_HRRR_TERMS,
+    optional_terms: Iterable[str] = OPTIONAL_HRRR_TERMS,
+    required_field_keys: Iterable[str] = REQUIRED_FIELD_KEYS,
 ) -> SelectedHrrrHour:
     """Download, decode, validate, downsample, and optionally cache one HRRR hour."""
     started = time.perf_counter()
+    selected_terms_tuple = tuple(selected_terms)
+    required_terms_tuple = tuple(required_terms)
+    optional_terms_tuple = tuple(optional_terms)
+    required_field_keys_tuple = tuple(required_field_keys)
     cache_path = cache_path_for(ref, cache_dir) if cache_dir is not None else None
     base_metadata = {
         "forecastHour": ref.forecast_hour,
@@ -377,17 +390,21 @@ def fetch_selected_hrrr_hour_with_metadata(
         cached = _load_cache(cache_path, cache_ttl_hours)
         if cached is not None:
             lats, lons, fields, cache_metadata = cached
-            validate_decoded_hrrr_fields(lats, lons, fields)
-            metadata = {
-                **base_metadata,
-                **cache_metadata,
-                "cacheHit": True,
-                "cachePath": str(cache_path),
-                "decodedFieldNames": sorted(fields),
-                "gridShape": list(_grid_shape(lats, lons, fields)),
-                "fetchLatencyMs": int((time.perf_counter() - started) * 1000),
-            }
-            return SelectedHrrrHour(lats=lats, lons=lons, fields=fields, metadata=metadata)
+            try:
+                validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
+            except SelectedHrrrValidationError:
+                cached = None
+            else:
+                metadata = {
+                    **base_metadata,
+                    **cache_metadata,
+                    "cacheHit": True,
+                    "cachePath": str(cache_path),
+                    "decodedFieldNames": sorted(fields),
+                    "gridShape": list(_grid_shape(lats, lons, fields)),
+                    "fetchLatencyMs": int((time.perf_counter() - started) * 1000),
+                }
+                return SelectedHrrrHour(lats=lats, lons=lons, fields=fields, metadata=metadata)
 
     own_session = session is None
     session = session or requests.Session()
@@ -399,9 +416,14 @@ def fetch_selected_hrrr_hour_with_metadata(
         idx_response.raise_for_status()
 
         records = parse_idx(idx_response.text)
-        term_report = validate_idx_records(records)
+        term_report = validate_idx_records(
+            records,
+            selected_terms_tuple,
+            required_terms_tuple,
+            optional_terms_tuple,
+        )
         content_length = _content_length(session, ref.grib_url)
-        range_items = selected_record_ranges(records, content_length)
+        range_items = selected_record_ranges(records, content_length, selected_terms_tuple)
         ranges = [(item.start, item.end) for item in range_items]
         if not ranges:
             raise ValueError(f"No selected HRRR records found in {ref.idx_url}")
@@ -422,9 +444,9 @@ def fetch_selected_hrrr_hour_with_metadata(
 
         chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
         messages = decode_grib2(b"".join(chunks))
-        lats, lons, fields = _messages_to_fields(messages)
+        lats, lons, fields = _messages_to_fields(messages, require_cape="cape" in required_field_keys_tuple)
         lats, lons, fields = downsample_hrrr_grid(lats, lons, fields, grid_stride)
-        validate_decoded_hrrr_fields(lats, lons, fields)
+        validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
 
         metadata = {
             **base_metadata,
@@ -598,6 +620,9 @@ def _validate_plausibility(key: str, finite: np.ndarray) -> None:
         "u500": (-170.0, 170.0),
         "v500": (-170.0, 170.0),
         "hgt500": (3500.0, 7000.0),
+        "hgt700": (2000.0, 4500.0),
+        "hgt850": (500.0, 3000.0),
+        "hgt1000": (-500.0, 1200.0),
         "srh01": (0.0, 5000.0),
         "srh03": (0.0, 7000.0),
     }

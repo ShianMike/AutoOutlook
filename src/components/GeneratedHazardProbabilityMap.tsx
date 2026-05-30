@@ -126,7 +126,10 @@ export default function GeneratedHazardProbabilityMap({
   const peakProb = hazard === 'thunder'
     ? getArtifactThunderCoverage(tile) ?? 0
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
-  const peakPct = peakProb >= 0.005 ? `${Math.round(peakProb * 100)}%` : '--';
+  const peakPct = formatProbabilityMetric(
+    peakProb,
+    hazard === 'thunder' ? undefined : cfg.thresholds[0],
+  );
   const metricLabel = hazard === 'thunder' ? `COVER ${peakPct}` : `PEAK ${peakPct}`;
   const headerTitle = title.replace(/\s+Outlook$/i, '');
   const legendItems = cfg.thresholds.map((threshold, i) => ({ label: cfg.labels[i], color: cfg.colors[i], threshold }));
@@ -448,6 +451,18 @@ export default function GeneratedHazardProbabilityMap({
       </div>
     </div>
   );
+}
+
+function formatProbabilityMetric(probability: number, drawableThreshold?: number): string {
+  if (!Number.isFinite(probability) || probability < 0.0005) return '--';
+  if (drawableThreshold !== undefined && probability < drawableThreshold) {
+    return `<${Math.round(drawableThreshold * 100)}%`;
+  }
+  const percent = probability * 100;
+  if (percent < 10 && Math.abs(percent - Math.round(percent)) > 0.05) {
+    return `${percent.toFixed(1)}%`;
+  }
+  return `${Math.round(percent)}%`;
 }
 
 function WindBarb({ vector, top = false }: { vector: UpperAirVector; top?: boolean }) {

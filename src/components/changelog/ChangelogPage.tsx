@@ -84,10 +84,58 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.4',
+    codename: 'US regional severe logic expansion',
+    date: '2026-05-30',
+    status: 'CURRENT',
+    summary:
+      'Implements comprehensive regional severe convective risk logic across the United States. Adds tailored forecasting engines for the Southeast (Dixie Alley, Florida, Gulf Coast), Midwest/Corn Belt, High Plains/Front Range, Northern Plains, Northeast/Appalachians, Desert Southwest, Intermountain West, Pacific Northwest, Great Basin, and California. Refines convective environment assessments with terrain wedge features, stabilization penalties, custom landspout shear/vorticity scales, and low-CAPE/high-shear configurations.',
+    highlights: [
+      'Southeast & Dixie Alley: Tuned high-shear/low-CAPE nocturnal tornado logic, discrete vs. QLCS warm sector transitions, and sea-breeze waterspout/pulse modes',
+      'Midwest & Corn Belt: Integrated prior-convection stabilization penalties and warm-front boundary-enhanced tornado boosts',
+      'High Plains & Front Range: Developed high-based dryness checks for microbursts/hail and a specialized landspout vorticity mode',
+      'Northeast & Appalachians: Engineered cold-air damming wedge stability checks and terrain-locked fast low-level shear adjustments',
+      'Desert Southwest & Monsoon: Created dry microburst wind modes and heavy monsoon rain/flash-flood risk filters',
+      'West Coast & Northwest: Designed low-topped cold-core convective setups and low-CAPE winter terrain organization logic',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'Southeast, Florida, and Dixie Alley convective physics',
+        body: 'Added specific atmospheric calculations for Dixie Alley and the Gulf Coast, lifting nocturnal tornado penalties and adjusting low-level jet/SRH weights for discrete cells ahead of a squall line. Optimized Florida sea-breeze and outflow boundaries to favor pulse wind and waterspouts unless deep-layer shear overrides.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Midwest and High Plains regional convective engines',
+        body: 'Implemented morning prior-convection stabilization penalties to suppress false-positive upgrades. Enhanced warm-front and boundary-based tornado probabilities under low LCLs and intact surface-based inflow. Added high-based subcloud dryness hail/wind overrides and a landspout index scaling weak deep-layer shear setups.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Northeast wedge fronts and terrain-forced fast flow logic',
+        body: 'Modeled Cold-Air Damming (CAD) stability overrides to penalize surfaced-based risk under a locked wedge, while boosting fast shear flow overrides in high-shear, low-CAPE Appalachian environments.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Desert Southwest monsoon and dry microburst filters',
+        body: 'Engineered specialized dry microburst and dust/outflow wind modes for high sub-cloud dryness. Set up monsoon rain stabilizers that cap convective severity unless moisture profiles are matched by strong deep-layer dynamic shear.',
+      },
+      {
+        kind: 'NEW',
+        title: 'West Coast, Intermountain West, and Great Basin cold-core setups',
+        body: 'Constructed terrain-forced and low-topped cold-core low-CAPE/high-shear hazard modes, defaulting Pacific Northwest and California coastal systems to general thunderstorm (TSTM) or marginal (MRGL) risks in the absence of robust dynamic organization.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Region-specific thermodynamic and kinematic weighting',
+        body: 'Re-routed the central forecast evaluation pipelines to map geographic latitude/longitude coordinates to specific sub-regional risk profiles, providing precise multi-mode hazard outputs tailored to regional climatology.',
+      },
+    ],
+  },
+  {
     version: 'v0.3',
     codename: 'Unified controls and map zoom',
     date: '2026-05-30',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'Consolidates dashboard operator controls into a unified container and introduces nested sub-selectors with single-pane toggles. Standardizes hazard maps to the exact scale, aspect ratio, and zoom level of the primary risk map. Refactors the Risk Timeline and Environmental Ingredients with tactile navigators, LED VU meters, glowing green LCDs, and hover tooltips.',
     highlights: [
@@ -774,7 +822,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.3
+          AutoOutlook · Automated Convective Risk Intelligence · v0.4
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

@@ -978,7 +978,13 @@ def _build_hour_artifact(
     if raw_probabilities is None:
         raise RuntimeError("ML hazard model returned no gridded probabilities")
     category_before_caps = category_grid_from_probabilities(raw_probabilities, features, model)
-    cap_result = apply_environmental_probability_caps(raw_probabilities, features, model)
+    cap_result = apply_environmental_probability_caps(
+        raw_probabilities,
+        features,
+        model,
+        lats=fetched.lats,
+        lons=fetched.lons,
+    )
     category_after_caps = category_grid_from_probabilities(cap_result.probabilities, features, model)
     post_result = postprocess_category_grid(
         category_after_caps,

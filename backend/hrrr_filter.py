@@ -54,6 +54,7 @@ FOCUS_GRIB_PARAMS = ["var_CAPE", "var_CIN", "var_DPT", "var_UGRD", "var_VGRD"]
 FOCUS_LEVEL_PARAMS = ["lev_surface", "lev_2_m_above_ground", "lev_10_m_above_ground", "lev_500_mb"]
 OVERLAY_500_GRIB_PARAMS = ["var_HGT", "var_UGRD", "var_VGRD"]
 OVERLAY_500_LEVEL_PARAMS = ["lev_500_mb"]
+HGT_PRESSURE_LEVELS_MB = (500, 700, 850, 1000)
 
 MAX_CELLS = 90_000
 MAX_SIDE = 380
@@ -352,8 +353,10 @@ def _messages_to_fields(messages: list[dict[str, Any]], require_cape: bool = Tru
             fields["u500"] = vals
         elif cat == 2 and param == 3 and _is_pressure(msg, 50000.0):
             fields["v500"] = vals
-        elif cat == 3 and param == 5 and _is_pressure(msg, 50000.0):
-            fields["hgt500"] = vals
+        elif cat == 3 and param == 5:
+            pressure_mb = _pressure_mb(msg)
+            if pressure_mb in HGT_PRESSURE_LEVELS_MB:
+                fields[f"hgt{pressure_mb}"] = vals
         elif cat == 7 and param == 8 and _is_height_agl(msg, 1000.0):
             fields["srh01"] = np.clip(vals, 0.0, None)
         elif cat == 7 and param == 8 and _is_height_agl(msg, 3000.0):
@@ -389,6 +392,18 @@ def _is_pressure(msg: dict[str, Any], target_pa: float) -> bool:
         return False
     value = float(value)
     return abs(value - target_pa) <= 1000.0 or abs(value - target_pa / 100.0) <= 1.0
+
+
+def _pressure_mb(msg: dict[str, Any]) -> int | None:
+    if msg.get("level_type") != 100:
+        return None
+    value = msg.get("level_value")
+    if value is None:
+        return None
+    pressure = float(value)
+    pressure_mb = pressure / 100.0 if pressure > 2000.0 else pressure
+    rounded = int(round(pressure_mb))
+    return rounded if abs(pressure_mb - rounded) <= 1.0 else None
 
 
 def _is_pressure_depth_agl(msg: dict[str, Any], target_pa: float) -> bool:

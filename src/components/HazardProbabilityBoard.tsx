@@ -77,14 +77,14 @@ function HazardCard({
       && artifactStatus !== 'ready'
       && !displayArtifactTile,
   );
+  const isArtifact = artifactHazard && artifactPeak !== undefined;
   const probability = artifactPeak ?? (artifactUnavailable ? 0 : hz?.probability ?? 0);
-  const probPct = Math.round(probability * 100);
+  const probPct = formatHazardProbability(probability, isArtifact ? minimumArtifactHazardThreshold(artifactHazard) : undefined);
   const confPct = artifactUnavailable ? 0 : hz ? Math.round(hz.confidence * 100) : 0;
   const riskLevel = artifactHazard && artifactPeak !== undefined
     ? getArtifactHazardLevel(artifactHazard, artifactPeak)
     : artifactUnavailable ? 'TSTM' : hz?.level ?? 'TSTM';
   const riskMeta = RISK_META[riskLevel];
-  const isArtifact = artifactHazard && artifactPeak !== undefined;
   const location = artifactPeakLocation && artifactPeakLocation.probability > 0
     ? describePeakLocation(snapshot, artifactPeakLocation.lat, artifactPeakLocation.lon)
     : describeFallbackLocation(snapshot);
@@ -117,7 +117,7 @@ function HazardCard({
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 font-mono text-[10px] uppercase tracking-widest text-ink/60">
             <span className="min-w-0 truncate pr-1">Probability</span>
             <span className="min-w-[4.25rem] max-w-full overflow-hidden text-right">
-              <span className="block whitespace-nowrap font-display text-[clamp(1.25rem,1.8vw,1.5rem)] font-extrabold text-ink leading-none tabular-nums">{probPct}%</span>
+              <span className="block whitespace-nowrap font-display text-[clamp(1.25rem,1.8vw,1.5rem)] font-extrabold text-ink leading-none tabular-nums">{probPct}</span>
               <span className="mt-1 block max-w-[8.5rem] truncate font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-ink/65 sm:max-w-[9.5rem]">
                 {location}
               </span>
@@ -136,6 +136,24 @@ function HazardCard({
       </div>
     </div>
   );
+}
+
+function minimumArtifactHazardThreshold(hazard: ArtifactHazardKey | null): number | undefined {
+  if (hazard === 'tornado') return 0.02;
+  if (hazard === 'hail' || hazard === 'wind') return 0.05;
+  return undefined;
+}
+
+function formatHazardProbability(probability: number, drawableThreshold?: number): string {
+  if (!Number.isFinite(probability) || probability < 0.0005) return '--';
+  if (drawableThreshold !== undefined && probability < drawableThreshold) {
+    return `<${Math.round(drawableThreshold * 100)}%`;
+  }
+  const percent = probability * 100;
+  if (percent < 10 && Math.abs(percent - Math.round(percent)) > 0.05) {
+    return `${percent.toFixed(1)}%`;
+  }
+  return `${Math.round(percent)}%`;
 }
 
 function describePeakLocation(snapshot: HourSnapshot | null, lat: number, lon: number): string {
