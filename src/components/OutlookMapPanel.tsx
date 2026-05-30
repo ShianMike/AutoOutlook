@@ -244,6 +244,8 @@ export default function OutlookMapPanel({
   setPlaying,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
+  const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
+  const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingGif, setIsExportingGif] = useState(false);
   const [gifDialogOpen, setGifDialogOpen] = useState(false);
@@ -457,26 +459,57 @@ export default function OutlookMapPanel({
       size="sm"
       className="[&>div]:p-2"
     >
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-[3px] border-ink bg-paper p-2 shadow-retro-sm">
-        <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
-          Forecast type
+      <div className="mb-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
+        {/* Main selector row */}
+        <div className={`flex flex-wrap items-center justify-between gap-2 p-2 ${mode === 'hazards' ? 'border-b-[3px] border-ink' : ''}`}>
+          <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
+            Forecast type
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <ModeButton active={mode === 'levels'} onClick={() => setMode('levels')} disabled={isAnyExporting}>
+              Risk Levels
+            </ModeButton>
+            <ModeButton active={mode === 'hazards'} onClick={() => setMode('hazards')} disabled={isAnyExporting}>
+              Hazard Probs
+            </ModeButton>
+            <ModeButton active={false} onClick={saveCurrentMap} disabled={!snapshot || isAnyExporting}>
+              {isExporting ? 'Saving…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} PNG`}
+            </ModeButton>
+            <ModeButton active={false} onClick={openGifDialog} disabled={!snapshot || forecastStops.length === 0 || isAnyExporting}>
+              {isExportingGif ? 'Saving GIF…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} GIF`}
+            </ModeButton>
+          </div>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <ModeButton active={mode === 'levels'} onClick={() => setMode('levels')} disabled={isAnyExporting}>
-            Risk Levels
-          </ModeButton>
-          <ModeButton active={mode === 'hazards'} onClick={() => setMode('hazards')} disabled={isAnyExporting}>
-            Hazard Probs
-          </ModeButton>
-          <ModeButton active={false} onClick={saveCurrentMap} disabled={!snapshot || isAnyExporting}>
-            {isExporting ? 'Saving…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} PNG`}
-          </ModeButton>
-          <ModeButton active={false} onClick={openGifDialog} disabled={!snapshot || forecastStops.length === 0 || isAnyExporting}>
-            {isExportingGif ? 'Saving GIF…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} GIF`}
-          </ModeButton>
-        </div>
+
+        {/* Hazard View sub-row */}
+        {mode === 'hazards' && (
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-paper/40 border-t-[0px] transition-all">
+            <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
+              Hazard View
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <SubModeButton active={hazardLayout === 'all'} onClick={() => setHazardLayout('all')} disabled={isAnyExporting}>
+                All 4 Grid
+              </SubModeButton>
+              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'thunder'} onClick={() => { setHazardLayout('single'); setSelectedHazard('thunder'); }} disabled={isAnyExporting}>
+                Thunderstorm
+              </SubModeButton>
+              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'hail'} onClick={() => { setHazardLayout('single'); setSelectedHazard('hail'); }} disabled={isAnyExporting}>
+                Hail
+              </SubModeButton>
+              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'wind'} onClick={() => { setHazardLayout('single'); setSelectedHazard('wind'); }} disabled={isAnyExporting}>
+                Damaging Wind
+              </SubModeButton>
+              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'tornado'} onClick={() => { setHazardLayout('single'); setSelectedHazard('tornado'); }} disabled={isAnyExporting}>
+                Tornado
+              </SubModeButton>
+            </div>
+          </div>
+        )}
+
+        {/* Exporter Dialogs / Messages (cleanly separated inside the container) */}
         {gifProgress && (
-          <div className="basis-full flex flex-wrap items-center justify-between gap-2 border-[2px] border-ink bg-signal-amber px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-ink">
+          <div className="border-t-[3px] border-ink flex flex-wrap items-center justify-between gap-2 bg-signal-amber px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-ink">
             <span>
               {gifProgress.phase === 'capturing'
                 ? `GIF capture ${gifProgress.current}/${gifProgress.total}`
@@ -492,7 +525,7 @@ export default function OutlookMapPanel({
           </div>
         )}
         {gifDialogOpen && (
-          <div className="basis-full border-[3px] border-ink bg-paper p-3 shadow-retro-sm">
+          <div className="border-t-[3px] border-ink bg-paper p-3">
             <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
               Animated GIF export · {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
             </div>
@@ -573,7 +606,7 @@ export default function OutlookMapPanel({
           </div>
         )}
         {exportError && (
-          <div className="basis-full border-[2px] border-signal-red bg-paper px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-signal-red">
+          <div className="border-t-[3px] border-ink bg-paper px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-signal-red">
             {exportError}
           </div>
         )}
@@ -677,45 +710,88 @@ export default function OutlookMapPanel({
             />
           </div>
         ) : (
-          <div className="outlook-export-stage outlook-export-hazard-grid grid grid-cols-1 md:grid-cols-2 gap-2 border-[3px] border-ink bg-paper p-2">
+          <div
+            className={[
+              'outlook-export-stage',
+              hazardLayout === 'all'
+                ? 'outlook-export-hazard-grid grid grid-cols-1 md:grid-cols-2 gap-2'
+                : 'flex flex-col',
+              'border-[3px] border-ink bg-paper p-2',
+            ].join(' ')}
+          >
             {generatedHazardsReady ? (
-              <>
+              hazardLayout === 'all' ? (
+                <>
+                  <GeneratedHazardProbabilityMap
+                    snapshot={snapshot}
+                    hazard="thunder"
+                    title="Thunderstorm Outlook"
+                    artifacts={outlookArtifacts.artifacts}
+                    status={outlookArtifacts.status}
+                  />
+                  <GeneratedHazardProbabilityMap
+                    snapshot={snapshot}
+                    hazard="hail"
+                    title="Hail Outlook"
+                    artifacts={outlookArtifacts.artifacts}
+                    status={outlookArtifacts.status}
+                  />
+                  <GeneratedHazardProbabilityMap
+                    snapshot={snapshot}
+                    hazard="wind"
+                    title="Damaging Wind Outlook"
+                    artifacts={outlookArtifacts.artifacts}
+                    status={outlookArtifacts.status}
+                  />
+                  <GeneratedHazardProbabilityMap
+                    snapshot={snapshot}
+                    hazard="tornado"
+                    title="Tornado Outlook"
+                    artifacts={outlookArtifacts.artifacts}
+                    status={outlookArtifacts.status}
+                  />
+                </>
+              ) : (
                 <GeneratedHazardProbabilityMap
                   snapshot={snapshot}
-                  hazard="thunder"
-                  title="Thunderstorm Outlook"
+                  hazard={selectedHazard}
+                  title={
+                    selectedHazard === 'thunder'
+                      ? 'Thunderstorm Outlook'
+                      : selectedHazard === 'hail'
+                        ? 'Hail Outlook'
+                        : selectedHazard === 'wind'
+                          ? 'Damaging Wind Outlook'
+                          : 'Tornado Outlook'
+                  }
                   artifacts={outlookArtifacts.artifacts}
                   status={outlookArtifacts.status}
                 />
-                <GeneratedHazardProbabilityMap
-                  snapshot={snapshot}
-                  hazard="hail"
-                  title="Hail Outlook"
-                  artifacts={outlookArtifacts.artifacts}
-                  status={outlookArtifacts.status}
-                />
-                <GeneratedHazardProbabilityMap
-                  snapshot={snapshot}
-                  hazard="wind"
-                  title="Damaging Wind Outlook"
-                  artifacts={outlookArtifacts.artifacts}
-                  status={outlookArtifacts.status}
-                />
-                <GeneratedHazardProbabilityMap
-                  snapshot={snapshot}
-                  hazard="tornado"
-                  title="Tornado Outlook"
-                  artifacts={outlookArtifacts.artifacts}
-                  status={outlookArtifacts.status}
-                />
-              </>
+              )
             ) : useRuleHazardFallback ? (
-              <>
-                <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule fallback" />
-                <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" />
-                <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" />
-                <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" />
-              </>
+              hazardLayout === 'all' ? (
+                <>
+                  <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule fallback" />
+                  <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" />
+                  <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" />
+                  <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" />
+                </>
+              ) : (
+                <HazardOutlookMap
+                  snapshot={snapshot}
+                  hazard={selectedHazard}
+                  title={
+                    selectedHazard === 'thunder'
+                      ? 'Thunderstorm Outlook'
+                      : selectedHazard === 'hail'
+                        ? 'Hail Outlook'
+                        : selectedHazard === 'wind'
+                          ? 'Damaging Wind Outlook'
+                          : 'Tornado Outlook'
+                  }
+                  sourceLabel="Rule fallback"
+                />
+              )
             ) : (
               <GeneratedHazardsUnavailable message={outlookArtifacts.message} status={outlookArtifacts.status} />
             )}
@@ -784,3 +860,33 @@ function ModeButton({
     </button>
   );
 }
+
+function SubModeButton({
+  active,
+  children,
+  onClick,
+  disabled = false,
+}: {
+  active: boolean;
+  children: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        'retro-button min-h-7 px-2.5 py-1 text-[11px] leading-none transition-all',
+        disabled ? 'cursor-not-allowed opacity-50' : '',
+        active
+          ? 'bg-ink text-paper translate-x-[1.5px] translate-y-[1.5px] shadow-[0.5px_0.5px_0_0_#111111] hover:bg-ink hover:text-paper font-bold'
+          : 'bg-paper text-ink hover:bg-ink hover:text-paper',
+      ].join(' ')}
+    >
+      {children}
+    </button>
+  );
+}
+

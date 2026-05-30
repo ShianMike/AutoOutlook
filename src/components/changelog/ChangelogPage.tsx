@@ -84,10 +84,75 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.3',
+    codename: 'Unified controls and map zoom',
+    date: '2026-05-30',
+    status: 'CURRENT',
+    summary:
+      'Consolidates dashboard operator controls into a unified container and introduces nested sub-selectors with single-pane toggles. Standardizes hazard maps to the exact scale, aspect ratio, and zoom level of the primary risk map. Refactors the Risk Timeline and Environmental Ingredients with tactile navigators, LED VU meters, glowing green LCDs, and hover tooltips.',
+    highlights: [
+      'Unified dashboard control cards into a single cohesive container',
+      'Single-pane hazard view toggle to isolate wind, hail, tornado, or thunder',
+      'Synchronized map dimensions and canvas scale across risk and hazard layers',
+      'Tactile period jumps and 3D lift physics in the Risk Timeline cards',
+      'Analog LED VU meters and green-phosphor LCD displays for parameters',
+      'Descriptive hover tooltips for all 21 environmental ingredients and signals',
+      'Tuned layout readability with glowing amber borders on all dark modules',
+      'Local development server workflow documented for easy offline runs',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'Single-pane toggle for hazard outlook maps',
+        body: 'Introduced layout mode selectors allowing operators to swap between the default 4-grid multi-pane overview and a focused single-pane view showing only the selected hazard map.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Hierarchical sub-selectors for hazard navigation',
+        body: 'Added nested sub-mode option buttons within the control deck, utilizing high-contrast retro active states to navigate specific hazard details cleanly.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Unified dashboard controller container',
+        body: 'Merged separate control boxes and exporter configurations into a single, clean border-separated dashboard deck, reducing vertical footprint.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Unified map zoom, dimensions, and scales',
+        body: 'Rescaled the hazard probability maps from 760 to 1000 scale and expanded layout dimensions to 900x520 to perfectly align aspect ratios and zoom boundaries with the primary risk levels map.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Risk Timeline mechanical jumps and lift physics',
+        body: 'Enabled period cards to trigger fast-travel clicks that navigate directly to peak storm hours. Configured 3D brutalist lifts on hover alongside custom sliding deck transition footers.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Segmented LED VU meters and green-phosphor LCDs',
+        body: 'Installed 12-segment physical LED indicator strips showing colored gradients and dim unlit steps for coverage and ingredients. Upgraded stat metrics to pitch-black green-phosphor LCD readouts.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Contextual hover tooltips for all ingredients',
+        body: 'Embedded 21 detailed descriptions based on SPC glossary entries into tooltips styled with glowing amber borders and neon-lime text.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Tuned dashboard readability and yellow outline borders',
+        body: 'Boosted group titles to glowing amber and sub-labels to high-intensity neon-lime. Upgraded black card frames to yellow-amber borders on all bg-ink modules to separate shadows.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Local development server workflow',
+        body: 'Added instructions and requirements for initializing, running, and configuring the Flask backend server and Vite frontend server in local offline development environments.',
+      },
+    ],
+  },
+  {
     version: 'v0.2',
     codename: 'Cleaner band rendering',
     date: '2026-05-22',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'Risk-band rendering pass and a product-first landing rewrite. Closes the inter-tier gap with a colored separator, kills the SLGT glow, and stops tiny high-tier features from rendering as halo artifacts.',
     highlights: [
@@ -270,6 +335,7 @@ export default function ChangelogPage() {
 
 function ChangelogNav() {
   const time = useUtcClock();
+  const current = RELEASES[0];
   return (
     <header className="sticky top-0 z-40 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto flex max-w-[1400px] items-center gap-4 px-4 py-2.5 sm:px-6">
@@ -282,7 +348,7 @@ function ChangelogNav() {
               Auto<span className="text-signal-amber">Outlook</span>
             </span>
             <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.25em] text-ink/60">
-              Patch Notes · v0.2
+              Patch Notes · {current.version}
             </span>
           </div>
         </a>
@@ -358,16 +424,16 @@ function ChangelogHero() {
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
             <a
-              href="#release-v0-2"
+              href={`#release-${current.version.replace('.', '-')}`}
               className="retro-button retro-button-primary !px-5 !py-3 text-base"
             >
-              ▾ Read v0.2 in full
+              ▾ Read {current.version} in full
             </a>
             <a
-              href="#release-v0-1"
+              href={`#release-${previous.version.replace('.', '-')}`}
               className="retro-button !px-5 !py-3 text-base"
             >
-              See v0.1
+              See {previous.version}
             </a>
           </div>
 
@@ -395,7 +461,7 @@ function ChangelogHero() {
 
             <div className="px-4 py-3">
               <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/50">
-                v0.2 highlights
+                {current.version} highlights
               </span>
               <ul className="mt-3 flex flex-col gap-2">
                 {current.highlights.map((h) => (
@@ -409,7 +475,7 @@ function ChangelogHero() {
 
             <div className="border-t-[3px] border-paper/15 px-4 py-3">
               <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/50">
-                change breakdown · v0.2
+                change breakdown · {current.version}
               </span>
               <div className="mt-3 grid grid-cols-5 gap-px border-[2px] border-paper/30 bg-paper/20">
                 {CHANGE_KINDS.map((kind) => {
@@ -708,7 +774,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.2
+          AutoOutlook · Automated Convective Risk Intelligence · v0.3
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

@@ -445,7 +445,7 @@ function DocsHero() {
         </div>
         <div className="flex items-center gap-2">
           <RetroBadge tone="cyan">Static</RetroBadge>
-          <RetroBadge tone="ink">v0.2</RetroBadge>
+          <RetroBadge tone="ink">v0.3</RetroBadge>
         </div>
       </div>
       <div className="border-t-[2px] border-paper/20 bg-ink px-4 py-1.5 xl:px-5">

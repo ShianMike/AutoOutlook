@@ -176,16 +176,16 @@ export default function GeneratedHazardProbabilityMap({
           </span>
         </div>
       </header>
-      <div className="outlook-export-map-frame aspect-[5/3] relative overflow-hidden bg-paper md:aspect-[19/10] xl:aspect-[43/20]">
+      <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
           projection="geoAlbers"
-          width={500}
-          height={300}
+          width={900}
+          height={520}
           projectionConfig={{
             rotate: [96, 0, 0],
             center: [0, 38],
             parallels: [29.5, 45.5],
-            scale: 760,
+            scale: 1000,
           }}
           style={{ width: '100%', height: '100%' }}
         >
