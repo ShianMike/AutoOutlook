@@ -4116,6 +4116,106 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(len(payload["hours"][0]["upperAirLines"]), 1)
             self.assertEqual(len(payload["hours"][0]["upperAirVectors"]), 1)
 
+    def test_ecmwf_cycle_detection(self) -> None:
+        from backend.ecmwf_selected import EcmwfCycle, latest_available_ecmwf_cycle
+        cycle = latest_available_ecmwf_cycle()
+        self.assertIsInstance(cycle, EcmwfCycle)
+        self.assertTrue(len(cycle.run_date) == 8)
+        self.assertIn(cycle.run_cycle, (0, 6, 12, 18))
+        self.assertIn("ECMWF", cycle.label)
+
+    def test_ecmwf_grib2_conversion_and_units(self) -> None:
+        # Mock GRIB2 decoded message payload
+        messages = [
+            {
+                "category": 7,
+                "parameter": 6,
+                "level_type": 1,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[1500.0, 1600.0], [1700.0, 1800.0]]),
+            },
+            {
+                "category": 7,
+                "parameter": 7,
+                "level_type": 1,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[-10.0, -20.0], [-30.0, -40.0]]),
+            },
+            {
+                "category": 0,
+                "parameter": 0,
+                "level_type": 103,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[298.0, 299.0], [300.0, 301.0]]),
+            },
+            {
+                "category": 0,
+                "parameter": 6,
+                "level_type": 103,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[292.0, 293.0], [294.0, 295.0]]),
+            },
+            {
+                "category": 2,
+                "parameter": 2,
+                "level_type": 103,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[5.0, 6.0], [7.0, 8.0]]),
+            },
+            {
+                "category": 2,
+                "parameter": 3,
+                "level_type": 103,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[10.0, 11.0], [12.0, 13.0]]),
+            },
+            {
+                "category": 2,
+                "parameter": 2,
+                "level_type": 100,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[20.0, 21.0], [22.0, 23.0]]),
+            },
+            {
+                "category": 2,
+                "parameter": 3,
+                "level_type": 100,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[30.0, 31.0], [32.0, 33.0]]),
+            },
+            {
+                "category": 3,
+                "parameter": 4, # Geopotential (z)
+                "level_type": 100,
+                "lats": np.array([12.0, 13.0]),
+                "lons": np.array([120.0, 121.0]),
+                "values": np.array([[56000.0, 56200.0], [56400.0, 56600.0]]),
+            },
+        ]
+        from backend.ecmwf_selected import _ecmwf_messages_to_fields
+        lats, lons, fields = _ecmwf_messages_to_fields(messages)
+
+        self.assertEqual(len(lats), 2)
+        self.assertEqual(len(lons), 2)
+        self.assertEqual(fields["cape"][0, 0], 1500.0)
+        self.assertEqual(fields["cin"][0, 0], -10.0)
+        self.assertEqual(fields["t2m"][0, 0], 298.0)
+        self.assertEqual(fields["td2m"][0, 0], 292.0)
+        self.assertEqual(fields["u10"][0, 0], 5.0)
+        self.assertEqual(fields["v10"][0, 0], 10.0)
+        self.assertEqual(fields["u500"][0, 0], 20.0)
+        self.assertEqual(fields["v500"][0, 0], 30.0)
+        # Geopotential converted to height: 56000 / 9.80665
+        self.assertAlmostEqual(fields["hgt500"][0, 0], 56000.0 / 9.80665, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -153,6 +153,7 @@ def run_pipeline(
     fetch_hour_fn: FetchHourFn | None = None,
     predictor_fn: PredictorFn | None = None,
     spc_fetch_fn: SpcFetchFn | None = None,
+    model_name: str = "hrrr",
 ) -> dict[str, Any]:
     """Generate deployable prediction artifacts, then optionally verify against SPC."""
     started = time.perf_counter()
@@ -187,7 +188,7 @@ def run_pipeline(
         spc_fetch = spc_fetch_fn or fetch_current_spc_day1_category
 
         print(f"[cycle check] requested hours require f{required_forecast_hour:02d}", flush=True)
-        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn)
+        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn, model_name=model_name)
         cycle, cycle_detection_metadata = _normalize_cycle_detection(
             detection,
             hours,
@@ -195,7 +196,7 @@ def run_pipeline(
             resolved_cycle_policy,
             require_complete_hour,
         )
-        print(f"[cycle selected] HRRR {cycle.run_cycle:02d}Z {cycle.run_date}", flush=True)
+        print(f"[cycle selected] {cycle.label}", flush=True)
         failure_context["cycle"] = cycle.label
         failure_context["cycleDetection"] = cycle_detection_metadata
         failure_context.update(_cycle_detection_artifact_fields(cycle_detection_metadata))
@@ -214,6 +215,7 @@ def run_pipeline(
             cache_ttl_hours=cache_ttl_hours,
             no_cache=no_cache,
             grid_stride=grid_stride,
+            model_name=model_name,
         )
         if len(raw_hours) < effective_min_successful:
             failure_context["failedHours"] = failed_hours
@@ -422,6 +424,7 @@ def run_incremental_pipeline(
     predictor_fn: PredictorFn | None = None,
     publish_gcs_bucket: str | None = None,
     publish_gcs_prefix: str = "",
+    model_name: str = "hrrr",
 ) -> dict[str, Any]:
     """Publish per-hour artifacts as soon as each HRRR hour is processed."""
     started = time.perf_counter()
@@ -451,7 +454,7 @@ def run_incremental_pipeline(
     try:
         predictor = predictor_fn or predict_hazard_grids
         print(f"[cycle check] requested hours require f{required_forecast_hour:02d}", flush=True)
-        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn)
+        detection = _detect_hrrr_cycle(session, now, required_forecast_hour, detect_cycle_fn, model_name=model_name)
         cycle, cycle_detection_metadata = _normalize_cycle_detection(
             detection,
             hours,
@@ -587,6 +590,7 @@ def run_incremental_pipeline(
                         grid_stride,
                         tile_stride,
                         artifact_generation_id,
+                        model_name,
                     )
                     future_to_hour[future] = forecast_hour
                     if hour_delay_seconds > 0:
@@ -731,6 +735,7 @@ def _fetch_hours(
     cache_ttl_hours: float,
     no_cache: bool,
     grid_stride: int,
+    model_name: str = "hrrr",
 ) -> tuple[dict[int, FetchedHour], list[dict[str, Any]]]:
     out: dict[int, FetchedHour] = {}
     failures: list[dict[str, Any]] = []
@@ -746,6 +751,7 @@ def _fetch_hours(
                 cache_ttl_hours,
                 no_cache,
                 grid_stride,
+                model_name,
             ): hour
             for hour in hours
         }
@@ -781,17 +787,27 @@ def _fetch_one_hour(
     cache_ttl_hours: float,
     no_cache: bool,
     grid_stride: int,
+    model_name: str = "hrrr",
 ) -> FetchedHour:
     if fetch_hour is None:
-        result = fetch_selected_hrrr_hour_with_metadata(
-            ref,
-            session=session,
-            max_workers=max_workers,
-            cache_dir=cache_dir,
-            cache_ttl_hours=cache_ttl_hours,
-            no_cache=no_cache,
-            grid_stride=grid_stride,
-        )
+        if model_name == "ecmwf":
+            from backend.ecmwf_selected import fetch_selected_ecmwf_hour
+            result = fetch_selected_ecmwf_hour(
+                run_date=ref.run_date,
+                run_cycle=ref.run_cycle,
+                forecast_hour=ref.forecast_hour,
+                cache_dir=cache_dir,
+            )
+        else:
+            result = fetch_selected_hrrr_hour_with_metadata(
+                ref,
+                session=session,
+                max_workers=max_workers,
+                cache_dir=cache_dir,
+                cache_ttl_hours=cache_ttl_hours,
+                no_cache=no_cache,
+                grid_stride=grid_stride,
+            )
     else:
         result = fetch_hour(ref, session)
     return _normalize_fetched_hour(ref, result)
@@ -811,6 +827,7 @@ def _process_incremental_hour(
     grid_stride: int,
     tile_stride: int,
     artifact_generation_id: str = "",
+    model_name: str = "hrrr",
 ) -> IncrementalHourResult:
     hour_started = time.perf_counter()
     ref = hour_ref(cycle, forecast_hour)
@@ -827,6 +844,7 @@ def _process_incremental_hour(
             cache_ttl_hours=cache_ttl_hours,
             no_cache=no_cache,
             grid_stride=grid_stride,
+            model_name=model_name,
         )
         fetch_ms = int((time.perf_counter() - fetch_started) * 1000)
 
@@ -945,7 +963,7 @@ def _normalize_fetched_hour(
     ref: HrrrHourRef,
     result: tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour,
 ) -> FetchedHour:
-    if isinstance(result, SelectedHrrrHour):
+    if isinstance(result, SelectedHrrrHour) or type(result).__name__ == "SelectedEcmwfHour":
         return FetchedHour(result.lats, result.lons, result.fields, result.metadata)
     lats, lons, fields = result
     return FetchedHour(
@@ -2217,9 +2235,14 @@ def _detect_hrrr_cycle(
     now: datetime | None,
     required_forecast_hour: int,
     detect_cycle_fn: CycleDetectFn | None,
+    model_name: str = "hrrr",
 ) -> HrrrCycle | HrrrCycleDetection:
     if detect_cycle_fn is not None:
         return detect_cycle_fn(session, now)
+    if model_name == "ecmwf":
+        from backend.ecmwf_selected import latest_available_ecmwf_cycle
+        cycle = latest_available_ecmwf_cycle()
+        return HrrrCycle(cycle.run_date, cycle.run_cycle)
     return latest_available_hrrr_cycle_with_metadata(
         session=session,
         now=now,
@@ -2362,6 +2385,7 @@ def _cache_metadata(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="Artifact output directory.")
+    parser.add_argument("--model", default="hrrr", choices=["hrrr", "ecmwf"], help="Convective forecast model to ingest.")
     parser.add_argument("--forecast-hours", type=int, nargs="+")
     parser.add_argument("--all-hours", action="store_true", help="Process every forecast hour f00 through f48.")
     parser.add_argument(
@@ -2500,6 +2524,7 @@ def main() -> None:
                     require_complete_hour=args.require_complete_hour,
                     publish_gcs_bucket=args.publish_gcs_bucket,
                     publish_gcs_prefix=args.publish_gcs_prefix,
+                    model_name=args.model,
                 )
                 needs_shard_finalizer = (
                     task_shard is not None
@@ -2532,6 +2557,7 @@ def main() -> None:
                     preview=not args.no_preview,
                     cycle_policy=cycle_policy,
                     require_complete_hour=args.require_complete_hour,
+                    model_name=args.model,
                 )
             print(json.dumps({
                 "outputDir": str(output_dir),
