@@ -13,6 +13,8 @@ import { FORECAST_HOURS } from '../types/forecast';
 import { buildOutlook } from './outlookEngine';
 import { buildHazards } from './hazardEngine';
 import { buildRiskPolygons } from './polygonBuilder';
+import { fillIngredientComposites } from './ingredientsDerive';
+import { applyLeadTimeUncertainty } from './leadTimeUncertainty';
 
 const REGION: Region = {
   label: 'Central Plains — OK / KS / TX panhandle',
@@ -90,15 +92,66 @@ const PROFILES: Array<Omit<Ingredients,
     frontSignal: 'weak', initiationConf: 0.45, stormMode: 'linear', capStrength: 'weak' },
 ];
 
-import { fillIngredientComposites } from './ingredientsDerive';
-import { applyLeadTimeUncertainty } from './leadTimeUncertainty';
+function interpolateProfile(h: number): Omit<Ingredients, 'stp' | 'scp' | 'ehi' | 'ship' | 'tornadoComposite'> {
+  const hours = [0, 3, 6, 9, 12, 18, 24, 48];
+  // Append a profile at 48h that transitions back to stable early morning conditions (PROFILES[0])
+  const extendedProfiles = [...PROFILES, PROFILES[0]];
+
+  // Find left and right bounds
+  let leftIdx = 0;
+  for (let i = 0; i < hours.length; i++) {
+    if (hours[i] <= h) {
+      leftIdx = i;
+    }
+  }
+  const rightIdx = Math.min(leftIdx + 1, hours.length - 1);
+
+  if (leftIdx === rightIdx) {
+    return extendedProfiles[leftIdx];
+  }
+
+  const t = (h - hours[leftIdx]) / (hours[rightIdx] - hours[leftIdx]);
+  const left = extendedProfiles[leftIdx];
+  const right = extendedProfiles[rightIdx];
+
+  // Helper to interpolate numeric values
+  const num = (k: keyof typeof left) => {
+    const lv = left[k] as number;
+    const rv = right[k] as number;
+    return lv + (rv - lv) * t;
+  };
+
+  // Helper for categorical values: pick the closer one
+  const cat = <T>(k: keyof typeof left): T => {
+    return (t >= 0.5 ? right[k] : left[k]) as T;
+  };
+
+  return {
+    mlcape: num('mlcape'),
+    mucape: num('mucape'),
+    sbcape: num('sbcape'),
+    cin: num('cin'),
+    sfcDewpointF: num('sfcDewpointF'),
+    pwatIn: num('pwatIn'),
+    lclM: num('lclM'),
+    moistureDepthM: num('moistureDepthM'),
+    srh01: num('srh01'),
+    srh03: num('srh03'),
+    shear06Kt: num('shear06Kt'),
+    stormRelWindKt: num('stormRelWindKt'),
+    frontSignal: cat('frontSignal'),
+    initiationConf: num('initiationConf'),
+    stormMode: cat('stormMode'),
+    capStrength: cat('capStrength'),
+  };
+}
 
 function buildHourSnapshot(
   hour: number,
   baseISO: string,
   index: number,
 ): HourSnapshot {
-  const ing: Ingredients = fillIngredientComposites(PROFILES[Math.min(index, PROFILES.length - 1)]);
+  const ing: Ingredients = fillIngredientComposites(interpolateProfile(hour));
   const hazards = buildHazards(ing);
   const outlook = buildOutlook(ing, hazards);
   const region = regionForIndex(index);
