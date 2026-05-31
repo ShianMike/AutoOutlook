@@ -218,8 +218,15 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
     write_json(output_dir / "outlook" / "risk-polygons.geojson", merged_risk_polygons(index, artifact_dir))
     write_json(output_dir / "outlook" / "aggregate-risk-polygons.geojson", merged_risk_polygons(index, artifact_dir))
     write_json(output_dir / "outlook" / "probability-tiles.json", lightweight_probability_tiles(index))
+    write_json(output_dir / "outlook" / "trends.json", helpers._outlook_trends_payload(
+        current_dir=artifact_dir,
+        forecast_hour=12,
+        model="ecmwf" if "ECMWF" in str(index.get("cycle", "")).upper() else "hrrr",
+        legacy_dir=legacy_artifact_dir,
+    ))
 
     copy_if_exists(legacy_artifact_dir / "verification_summary.json", output_dir / "outlook" / "verification.json")
+    copy_if_exists(legacy_artifact_dir / "spc_day1_cat.geojson", output_dir / "outlook" / "spc-day1-category.geojson")
     copy_if_exists(legacy_artifact_dir / "preview.png", output_dir / "outlook" / "preview.png")
 
     for forecast_hour in coerce_hours(index.get("readyForecastHours")):

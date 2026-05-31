@@ -25,6 +25,30 @@ export interface OutlookArtifactFeatureCollection {
   features: OutlookArtifactFeature[];
 }
 
+export interface SpcCategoryFeature {
+  type: 'Feature';
+  geometry: {
+    type: 'Polygon' | 'MultiPolygon';
+    coordinates: number[][][] | number[][][][];
+  };
+  properties: {
+    DN?: number;
+    LABEL?: string;
+    LABEL2?: string;
+    VALID_ISO?: string;
+    EXPIRE_ISO?: string;
+    ISSUE_ISO?: string;
+    FORECASTER?: string;
+    stroke?: string;
+    fill?: string;
+  };
+}
+
+export interface SpcCategoryFeatureCollection {
+  type: 'FeatureCollection';
+  features: SpcCategoryFeature[];
+}
+
 export interface OutlookProbabilityShapeFeature {
   type: 'Feature';
   geometry: {
@@ -80,6 +104,37 @@ export interface OutlookCyclePolicy {
   description?: string;
 }
 
+export interface SpcVerificationRegion {
+  cells: number;
+  bbox: number[];
+  centerLat: number;
+  centerLon: number;
+}
+
+export interface SpcVerificationSummary {
+  source?: string;
+  error?: string;
+  spcValidTimeISO?: string;
+  spcExpireTimeISO?: string;
+  spcIssueTimeISO?: string;
+  spcForecaster?: string;
+  comparisonGridCells?: number;
+  agreementCells?: number;
+  agreementFraction?: number | null;
+  underforecastCells?: number;
+  overforecastCells?: number;
+  predictedCategories?: Record<string, number>;
+  officialCategories?: Record<string, number>;
+  underforecastRegions?: SpcVerificationRegion[];
+  overforecastRegions?: SpcVerificationRegion[];
+  meteorologicalExplanations?: string[];
+  leakageGuard?: string;
+  spcDay1Url?: string;
+  spcGeojsonZipUrl?: string;
+  spcFetchedAtISO?: string;
+  spcFetchedAfterPredictionArtifacts?: boolean;
+}
+
 export interface OutlookArtifactMetadata {
   generatedAtISO: string;
   cycle: string;
@@ -102,15 +157,7 @@ export interface OutlookArtifactMetadata {
   aggregateCategoryCounts?: Record<string, number>;
   categoryCounts?: Record<string, number>;
   artifacts?: Record<string, string | null>;
-  spcVerification?: {
-    agreementFraction?: number | null;
-    underforecastCells?: number;
-    overforecastCells?: number;
-    spcIssueTimeISO?: string;
-    spcValidTimeISO?: string;
-    spcExpireTimeISO?: string;
-    leakageGuard?: string;
-  } | null;
+  spcVerification?: SpcVerificationSummary | null;
   mode?: 'full' | 'incremental';
   status?: 'running' | 'complete' | 'partial' | 'failed';
   readyForecastHours?: number[];

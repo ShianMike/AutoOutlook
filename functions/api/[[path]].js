@@ -6,6 +6,8 @@ const STATIC_ROUTES = new Map([
   ['/api/outlook/aggregate-risk-polygons', '/_api/outlook/aggregate-risk-polygons.geojson'],
   ['/api/outlook/probability-tiles', '/_api/outlook/probability-tiles.json'],
   ['/api/outlook/verification', '/_api/outlook/verification.json'],
+  ['/api/outlook/spc-day1-category', '/_api/outlook/spc-day1-category.geojson'],
+  ['/api/outlook/trends', '/_api/outlook/trends.json'],
   ['/api/outlook/incremental', '/_api/outlook/incremental/index.json'],
   ['/api/outlook/incremental/available-hours', '/_api/outlook/incremental/index.json'],
   ['/api/outlook/incremental/summary', '/_api/outlook/incremental/summary.json'],

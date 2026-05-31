@@ -293,6 +293,11 @@ def latest_outlook_verification():
     return _json_artifact("verification_summary.json")
 
 
+@app.get("/api/outlook/spc-day1-category")
+def latest_outlook_spc_day1_category():
+    return _json_artifact("spc_day1_cat.geojson")
+
+
 @app.get("/api/outlook/incremental")
 def incremental_outlook_index():
     return _json_path(_selected_incremental_artifact_dir() / "index.json")
@@ -360,6 +365,360 @@ def incremental_outlook_hour_probability_tile(forecast_hour: int):
 @app.get("/api/outlook/incremental/hour/<int:forecast_hour>/metadata")
 def incremental_outlook_hour_metadata(forecast_hour: int):
     return _incremental_hour_json(forecast_hour, "metadata.json")
+
+
+@app.get("/api/outlook/trends")
+def outlook_trends():
+    forecast_hour = _parse_trend_forecast_hour(request.args.get("hour"))
+    return _json_response(_outlook_trends_payload(
+        current_dir=_selected_incremental_artifact_dir(),
+        forecast_hour=forecast_hour,
+        model=_request_model(),
+        legacy_dir=ARTIFACT_DIR,
+    ))
+
+
+def _parse_trend_forecast_hour(value: str | None) -> int:
+    try:
+        hour = int(value) if value else 12
+    except (TypeError, ValueError):
+        return 12
+    return max(0, min(ECMWF_MAX_INCREMENTAL_FORECAST_HOUR, hour))
+
+
+def _outlook_trends_payload(
+    current_dir: Path | None = None,
+    forecast_hour: int = 12,
+    model: str | None = None,
+    legacy_dir: Path | None = None,
+) -> dict:
+    current_dir = current_dir or _selected_incremental_artifact_dir()
+    model = model or _request_model()
+    current_index = _read_trend_index(current_dir)
+    current_point = _trend_point(current_dir, current_index, forecast_hour)
+    if not current_index or not current_point:
+        return _inactive_trends_payload(
+            "Current cycle artifacts are not ready for trend comparison.",
+            forecast_hour,
+            model,
+        )
+
+    previous_dir, previous_index = _find_previous_trend_artifact(current_dir, current_index, legacy_dir)
+    previous_point = _trend_point(previous_dir, previous_index, forecast_hour) if previous_dir and previous_index else None
+    if not previous_point:
+        return {
+            **_inactive_trends_payload(
+                "Previous cycle cache is not available yet.",
+                forecast_hour,
+                model,
+            ),
+            "currentCycle": current_index.get("cycle"),
+            "currentCategory": _frontend_category(current_point["category"]),
+            "currentForecastHour": current_point["forecastHour"],
+            "previousCycleCached": False,
+        }
+
+    previous_category = previous_point["category"]
+    current_category = current_point["category"]
+    hazards = _trend_hazard_deltas(previous_point["probabilities"], current_point["probabilities"])
+    spatial = _trend_spatial_shift(previous_point["region"], current_point["region"], model)
+    confidence_delta = current_point["confidence"] - previous_point["confidence"]
+    trend_category = _trend_category(previous_category, current_category, hazards, spatial)
+    trend_label = _trend_label(trend_category)
+    previous_label = _frontend_category(previous_category)
+    current_label = _frontend_category(current_category)
+
+    return {
+        "active": True,
+        "trendCategory": trend_category,
+        "trendLabel": trend_label,
+        "comparisonHeadline": f"{previous_label} -> {current_label} ({trend_label})",
+        "forecastHour": int(forecast_hour),
+        "previousForecastHour": previous_point["forecastHour"],
+        "currentForecastHour": current_point["forecastHour"],
+        "previousCycle": previous_index.get("cycle", "Previous cycle"),
+        "currentCycle": current_index.get("cycle", "Current cycle"),
+        "previousCycleTimeISO": previous_index.get("cycleTimeISO"),
+        "currentCycleTimeISO": current_index.get("cycleTimeISO"),
+        "previousCategory": previous_label,
+        "currentCategory": current_label,
+        "categoryDelta": _risk_ordinal(current_category) - _risk_ordinal(previous_category),
+        "hazards": hazards,
+        "tornadoDelta": hazards["tornado"]["delta"],
+        "hailDelta": hazards["hail"]["delta"],
+        "windDelta": hazards["wind"]["delta"],
+        "spatial": spatial,
+        "spatialShift": spatial["summary"],
+        "confidencePrevious": previous_point["confidence"],
+        "confidenceCurrent": current_point["confidence"],
+        "confidenceDelta": confidence_delta,
+        "previousCycleCached": True,
+        "previousArtifactDir": previous_dir.name if previous_dir else None,
+        "currentArtifactDir": current_dir.name,
+        "explanation": _trend_explanation(trend_category, hazards, spatial, previous_label, current_label),
+    }
+
+
+def _inactive_trends_payload(reason: str, forecast_hour: int, model: str | None) -> dict:
+    model_label = "ECMWF" if model == "ecmwf" else "HRRR"
+    return {
+        "active": False,
+        "trendCategory": "UNAVAILABLE",
+        "trendLabel": "Previous Cycle Pending",
+        "comparisonHeadline": f"{model_label} cycle trend pending",
+        "forecastHour": int(forecast_hour),
+        "previousCycleCached": False,
+        "reason": reason,
+        "hazards": {
+            hazard: {"previous": None, "current": None, "delta": 0.0, "trend": "flat"}
+            for hazard in ("tornado", "hail", "wind")
+        },
+        "tornadoDelta": 0.0,
+        "hailDelta": 0.0,
+        "windDelta": 0.0,
+        "spatialShift": reason,
+        "confidenceDelta": 0.0,
+        "explanation": reason,
+    }
+
+
+def _read_trend_index(artifact_dir: Path | None) -> dict | None:
+    if artifact_dir is None:
+        return None
+    for name in ("index.json", "metadata.json"):
+        payload = _read_json_path(artifact_dir / name)
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _find_previous_trend_artifact(
+    current_dir: Path,
+    current_index: dict,
+    legacy_dir: Path | None,
+) -> tuple[Path | None, dict | None]:
+    current_cycle = current_index.get("cycle")
+    for candidate in _previous_trend_candidates(current_dir, legacy_dir):
+        candidate_index = _read_trend_index(candidate)
+        if not isinstance(candidate_index, dict):
+            continue
+        if current_cycle and candidate_index.get("cycle") == current_cycle:
+            continue
+        return candidate, candidate_index
+    return None, None
+
+
+def _previous_trend_candidates(current_dir: Path, legacy_dir: Path | None) -> list[Path]:
+    raw_candidates: list[Path] = []
+    configured = os.environ.get("AUTOOUTLOOK_PREVIOUS_INCREMENTAL_ARTIFACT_DIR")
+    if configured:
+        raw_candidates.append(Path(configured))
+    raw_candidates.append(current_dir.with_name(f"{current_dir.name}.previous"))
+    if current_dir.name.endswith("_complete"):
+        base_name = current_dir.name[: -len("_complete")]
+        raw_candidates.append(current_dir.with_name(f"{base_name}.previous"))
+    else:
+        raw_candidates.append(current_dir.with_name(f"{current_dir.name}_complete.previous"))
+    if legacy_dir is not None:
+        raw_candidates.append(legacy_dir)
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in raw_candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _trend_point(artifact_dir: Path | None, index: dict | None, requested_hour: int) -> dict | None:
+    if artifact_dir is None or not isinstance(index, dict):
+        return None
+    metadata, actual_hour = _trend_metadata_for_hour(artifact_dir, index, requested_hour)
+    if not isinstance(metadata, dict):
+        return None
+    category_counts = (
+        metadata.get("categoryCounts")
+        or metadata.get("aggregateCategoryCounts")
+        or index.get("aggregateCategoryCounts")
+        or {}
+    )
+    category = _max_category_from_counts(category_counts if isinstance(category_counts, dict) else {})
+    probabilities = _forecast_probability_max(metadata)
+    if not any(probabilities.values()):
+        probabilities = _forecast_probability_max(index)
+    polygons = (
+        _read_json_path(_incremental_hour_path(actual_hour, artifact_dir) / "risk_polygons.geojson")
+        or _read_json_path(artifact_dir / "risk_polygons.geojson")
+        or _read_json_path(artifact_dir / "aggregate_risk_polygons.geojson")
+    )
+    region = _artifact_region(metadata, polygons, category)
+    return {
+        "forecastHour": int(actual_hour),
+        "validTimeISO": metadata.get("validTimeISO") or _valid_iso_from_cycle(index, actual_hour),
+        "category": category,
+        "probabilities": probabilities,
+        "confidence": _artifact_confidence(category, probabilities),
+        "region": region,
+    }
+
+
+def _trend_metadata_for_hour(artifact_dir: Path, index: dict, requested_hour: int) -> tuple[dict | None, int]:
+    direct_path = _incremental_hour_path(requested_hour, artifact_dir) / "metadata.json"
+    direct = _read_json_path(direct_path)
+    if isinstance(direct, dict):
+        return direct, requested_hour
+
+    for item in index.get("hours", []):
+        if isinstance(item, dict) and int(item.get("forecastHour", -999)) == int(requested_hour):
+            return item, requested_hour
+
+    candidate_hours = (
+        _coerce_forecast_hours(index.get("readyForecastHours"))
+        or _coerce_forecast_hours(index.get("forecastHours"))
+        or _coerce_forecast_hours(index.get("requestedForecastHours"))
+    )
+    hour_items = [item for item in index.get("hours", []) if isinstance(item, dict) and "forecastHour" in item]
+    if not candidate_hours and hour_items:
+        candidate_hours = _coerce_forecast_hours([item.get("forecastHour") for item in hour_items])
+
+    for hour in sorted(candidate_hours, key=lambda item: (abs(item - requested_hour), item)):
+        payload = _read_json_path(_incremental_hour_path(hour, artifact_dir) / "metadata.json")
+        if isinstance(payload, dict):
+            return payload, hour
+        for item in hour_items:
+            if int(item.get("forecastHour", -999)) == int(hour):
+                return item, hour
+
+    if "categoryCounts" in index or "aggregateCategoryCounts" in index:
+        return index, int(requested_hour)
+    return None, int(requested_hour)
+
+
+def _trend_hazard_deltas(previous: dict[str, float], current: dict[str, float]) -> dict:
+    hazards = {}
+    for hazard in ("tornado", "hail", "wind"):
+        previous_value = float(previous.get(hazard, 0.0) or 0.0)
+        current_value = float(current.get(hazard, 0.0) or 0.0)
+        delta = current_value - previous_value
+        hazards[hazard] = {
+            "previous": previous_value,
+            "current": current_value,
+            "delta": delta,
+            "deltaPercent": delta * 100,
+            "trend": "up" if delta > 0.004 else "down" if delta < -0.004 else "flat",
+        }
+    return hazards
+
+
+def _trend_category(previous_category: str, current_category: str, hazards: dict, spatial: dict) -> str:
+    category_delta = _risk_ordinal(current_category) - _risk_ordinal(previous_category)
+    if category_delta > 0:
+        return "UPGRADED"
+    if category_delta < 0:
+        return "DOWNGRADED"
+    if float(spatial.get("distanceMiles", 0.0) or 0.0) >= 30:
+        return "SHIFTED"
+    if any(abs(float(item.get("delta", 0.0) or 0.0)) >= 0.03 for item in hazards.values()):
+        return "SHIFTED"
+    return "STABLE"
+
+
+def _trend_label(trend_category: str) -> str:
+    return {
+        "UPGRADED": "Risk Upgraded",
+        "DOWNGRADED": "Risk Lowered",
+        "SHIFTED": "Risk Center Shifted",
+        "STABLE": "Risk Stable",
+    }.get(trend_category, "Trend Pending")
+
+
+def _risk_ordinal(category: str) -> int:
+    return {
+        "NONE": 0,
+        "TSTM": 1,
+        "MRGL": 2,
+        "SLGT": 3,
+        "ENH": 4,
+        "MDT": 5,
+        "MOD": 5,
+        "HIGH": 6,
+    }.get(str(category or "NONE").upper(), 0)
+
+
+def _trend_spatial_shift(previous_region: dict, current_region: dict, model: str | None) -> dict:
+    previous_lat = float(previous_region.get("centerLat", 0.0) or 0.0)
+    previous_lon = float(previous_region.get("centerLon", 0.0) or 0.0)
+    current_lat = float(current_region.get("centerLat", 0.0) or 0.0)
+    current_lon = float(current_region.get("centerLon", 0.0) or 0.0)
+    distance_miles = _haversine_miles(previous_lat, previous_lon, current_lat, current_lon)
+    bearing = _bearing_degrees(previous_lat, previous_lon, current_lat, current_lon)
+    direction = _compass_direction(bearing)
+    distance_km = distance_miles * 1.609344
+    unit_label = f"{distance_km:.0f} km" if model == "ecmwf" else f"{distance_miles:.0f} mi"
+    if distance_miles < 5:
+        summary = "Risk center held nearly stationary"
+    else:
+        summary = f"Risk center shifted {unit_label} {direction.lower()}"
+    return {
+        "distanceMiles": distance_miles,
+        "distanceKm": distance_km,
+        "direction": direction,
+        "summary": summary,
+        "previousCenter": {"lat": previous_lat, "lon": previous_lon},
+        "currentCenter": {"lat": current_lat, "lon": current_lon},
+    }
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_miles = 3958.7613
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    return radius_miles * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
+
+
+def _bearing_degrees(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_lambda = math.radians(lon2 - lon1)
+    y = math.sin(d_lambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def _compass_direction(degrees: float) -> str:
+    directions = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
+    return directions[int((degrees + 22.5) // 45) % len(directions)]
+
+
+def _trend_explanation(
+    trend_category: str,
+    hazards: dict,
+    spatial: dict,
+    previous_category: str,
+    current_category: str,
+) -> str:
+    strongest_hazard, strongest = max(
+        hazards.items(),
+        key=lambda item: abs(float(item[1].get("delta", 0.0) or 0.0)),
+    )
+    delta = float(strongest.get("delta", 0.0) or 0.0)
+    hazard_text = f"{strongest_hazard} {'increased' if delta >= 0 else 'decreased'} {abs(delta) * 100:.0f} percentage points"
+    if trend_category == "UPGRADED":
+        return f"Risk category increased from {previous_category} to {current_category}; {hazard_text}. {spatial['summary']}."
+    if trend_category == "DOWNGRADED":
+        return f"Risk category decreased from {previous_category} to {current_category}; {hazard_text}. {spatial['summary']}."
+    if trend_category == "SHIFTED":
+        return f"Category stayed {current_category}, but the run-to-run signal moved or changed; {hazard_text}. {spatial['summary']}."
+    return f"Risk remains {current_category}; hazard deltas are minor and {spatial['summary'].lower()}."
 
 
 @app.get("/api/outlook/preview.png")

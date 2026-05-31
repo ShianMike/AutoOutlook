@@ -84,10 +84,63 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.6',
+    codename: 'SPC QC Console & Overlay Compare',
+    date: '2026-05-31',
+    status: 'CURRENT',
+    summary:
+      'Promotes SPC Day 1 verification into a dedicated operator QC workflow. Adds AutoOutlook/SPC/overlay map comparison, rebuilds the verification panel around agreement, displacement, and category-ledger cards, and removes sidebar clutter from watch readiness, model telemetry, and previous-cycle trend experiments.',
+    highlights: [
+      'SPC QC Console: Agreement, displacement ratio, category ledger, leakage guard, metadata ticker, and diagnostic logs in one panel',
+      'SPC Overlay Compare: AutoOutlook only, SPC Day 1 only, and overlay comparison modes on the main outlook map',
+      'Bounded QC Hatches: Underforecast and overforecast hatches now mark actual comparison regions instead of flooding the whole map',
+      'Full Risk Ledger: NONE, TSTM, MRGL, SLGT, ENH, MDT, and HIGH stay visible even when their counts are zero',
+      'Focused Sidebar: Removed time scrubber, watch readiness, model integrity, and previous-cycle trend navigation clutter',
+      'v0.6 Documentation: Landing page, reference manual, and changelog now describe the SPC QC workflow',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'SPC overlay comparison modes',
+        body: 'Added map controls for AutoOutlook contours only, official SPC Day 1 contours only, and overlay compare mode. Overlay mode keeps AutoOutlook and SPC boundaries visible together for direct visual QA.',
+      },
+      {
+        kind: 'NEW',
+        title: 'System Calibration / SPC QC panel',
+        body: 'Introduced a dedicated verification panel with SPC agreement, evaluated/aligned cells, displacement ratio, SPC forecaster metadata, valid/expiration timestamps, leakage guard status, and diagnostic logs.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Category ledger shows every risk tier',
+        body: 'The category ledger now renders every risk category from NONE through HIGH, including zero-count rows, with better right-side padding so values no longer crowd the bar border.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Overlay QC hatches are bounded',
+        body: 'Fixed the underforecast and overforecast hatch regions so they no longer cover the entire map. Hatches now stay tied to the actual SPC-vs-AutoOutlook comparison areas.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Responsive verification-card layout',
+        body: 'Reworked SPC Agreement, Displacement Ratio, and Category Ledger into equal-height cards with compact headers and hover/focus descriptions for QC terms.',
+      },
+      {
+        kind: 'REMOVE',
+        title: 'Removed nonessential operator navigation',
+        body: 'Removed sidebar buttons for the time scrubber, watch readiness, model integrity ledger, and previous-cycle trend panel so the dashboard navigation stays focused on active review tasks.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'v0.6 public copy and docs refresh',
+        body: 'Updated the landing page, reference manual, transition copy, and in-app changelog to explain the SPC QC console, overlay comparison modes, and streamlined dashboard navigation.',
+      },
+    ],
+  },
+  {
     version: 'v0.5',
     codename: 'Brutalist UI Refactor & Hazard Diagnostics',
     date: '2026-05-31',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'Refactors operator dashboard layout, integrates unified control dropdowns, enhances the Hazard Probability Board with comprehensive hover diagnostics, replaces all emojis with custom SVGs, and refines flood risk formulation to incorporate multi-variable soil and drainage profiles.',
     highlights: [
@@ -869,7 +922,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.5
+          AutoOutlook · Automated Convective Risk Intelligence · v0.6
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

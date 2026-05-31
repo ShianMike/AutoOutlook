@@ -3,15 +3,14 @@ import ForecastDisclaimer from './ForecastDisclaimer';
 import { viewLinkHandler } from '../utils/navigateView';
 
 const NAV_ITEMS = [
-  { id: 'time-scrubber', href: '#time-scrubber', label: 'Time Scrubber', code: '01' },
-  { id: 'outlook-map', href: '#outlook-map', label: 'Outlook Map', code: '02' },
-  { id: 'primary-outlook', href: '#primary-outlook', label: 'Primary Outlook', code: '03' },
-  { id: 'hazards', href: '#hazards', label: 'Hazards', code: '04' },
-  { id: 'ingredients', href: '#ingredients', label: 'Parameters', code: '05' },
-  { id: 'timeline', href: '#timeline', label: 'Risk Timeline', code: '06' },
-  { id: 'discussion', href: '#discussion', label: 'Discussion', code: '07' },
-  { id: 'readiness', href: '#readiness', label: 'Watch Readiness', code: '08' },
-  { id: 'system-status', href: '#system-status', label: 'System Status', code: '09' },
+  { id: 'outlook-map', href: '#outlook-map', label: 'Outlook Map', code: '01' },
+  { id: 'primary-outlook', href: '#primary-outlook', label: 'Primary Outlook', code: '02' },
+  { id: 'hazards', href: '#hazards', label: 'Hazards', code: '03' },
+  { id: 'ingredients', href: '#ingredients', label: 'Parameters', code: '04' },
+  { id: 'timeline', href: '#timeline', label: 'Risk Timeline', code: '05' },
+  { id: 'discussion', href: '#discussion', label: 'Discussion', code: '06' },
+  { id: 'verification', href: '#verification', label: 'SPC Verification', code: '07' },
+  { id: 'system-status', href: '#system-status', label: 'System Status', code: '08' },
 ];
 
 export default function DashboardSidebar() {

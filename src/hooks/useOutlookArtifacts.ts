@@ -9,6 +9,7 @@ import type {
   OutlookProbabilityHour,
   OutlookProbabilityTile,
   OutlookProbabilityTiles,
+  SpcVerificationSummary,
 } from '../types/outlookArtifacts';
 import { apiUrl } from '../utils/apiBase';
 
@@ -41,6 +42,14 @@ async function fetchJson<T>(url: string, signal?: AbortSignal, activeRegion?: Ac
     throw new Error(`HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function fetchOptionalSpcVerification(
+  signal: AbortSignal | undefined,
+  activeRegion: ActiveRegion,
+): Promise<SpcVerificationSummary | undefined> {
+  return fetchJson<SpcVerificationSummary>('/api/outlook/verification', signal, activeRegion)
+    .catch(() => undefined);
 }
 
 function forecastHourLabel(hour: number | undefined): string {
@@ -507,6 +516,11 @@ export function useOutlookArtifacts(
         const incremental = await fetchJson<OutlookIncrementalIndex>('/api/outlook/incremental', controller.signal, activeRegion)
           .catch(() => undefined);
         if (incremental && selectedForecastHour !== undefined) {
+          const spcVerification = incremental.spcVerification
+            ?? await fetchOptionalSpcVerification(controller.signal, activeRegion);
+          const incrementalMetadata: OutlookIncrementalIndex = spcVerification
+            ? { ...incremental, spcVerification }
+            : incremental;
           const cacheKey = resetProbabilityCacheIfNeeded(incremental);
           void warmMergedRiskPolygons(incremental, cacheKey);
           const ready = incremental.readyForecastHours ?? [];
@@ -541,8 +555,9 @@ export function useOutlookArtifacts(
             riskPolygonCacheRef.current.set(artifactForecastHour, riskPolygons);
             const displayRiskPolygons = displayRiskPolygonsForSelectedHour(riskPolygons, selectedForecastHour, selectedValidTimeISO);
             const readyMetadata: OutlookArtifactMetadata = {
-              ...incremental,
+              ...incrementalMetadata,
               ...hourMetadata,
+              spcVerification: hourMetadata?.spcVerification ?? incremental.spcVerification ?? spcVerification ?? null,
               mode: 'incremental',
               selectedArtifactForecastHour: artifactForecastHour,
               artifactForecastHour,
@@ -607,7 +622,7 @@ export function useOutlookArtifacts(
               const nextState: OutlookArtifactState = {
                 status: 'pending',
                 artifacts: {
-                  metadata: incremental,
+                  metadata: incrementalMetadata,
                   riskPolygons: { type: 'FeatureCollection', features: [] },
                   incrementalIndex: incremental,
                   selectedArtifactForecastHour: artifactForecastHour,
@@ -625,7 +640,7 @@ export function useOutlookArtifacts(
               const nextState: OutlookArtifactState = {
                 status: 'failed',
                 artifacts: {
-                  metadata: incremental,
+                  metadata: incrementalMetadata,
                   riskPolygons: { type: 'FeatureCollection', features: [] },
                   incrementalIndex: incremental,
                   selectedArtifactForecastHour: artifactForecastHour,
@@ -645,7 +660,7 @@ export function useOutlookArtifacts(
               const nextState: OutlookArtifactState = {
                 status: 'missing',
                 artifacts: {
-                  metadata: incremental,
+                  metadata: incrementalMetadata,
                   riskPolygons: { type: 'FeatureCollection', features: [] },
                   incrementalIndex: incremental,
                   selectedArtifactForecastHour: artifactForecastHour,
@@ -659,11 +674,12 @@ export function useOutlookArtifacts(
           }
         }
 
-        const [metadata, riskPolygons, aggregateRiskPolygons, probabilityTiles] = await Promise.all([
+        const [metadata, riskPolygons, aggregateRiskPolygons, probabilityTiles, spcVerification] = await Promise.all([
           fetchJson<OutlookArtifactMetadata>('/api/outlook/latest', controller.signal, activeRegion),
           fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/risk-polygons', controller.signal, activeRegion),
           fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/aggregate-risk-polygons', controller.signal, activeRegion).catch(() => undefined),
           fetchJson<OutlookProbabilityTiles>('/api/outlook/probability-tiles', controller.signal, activeRegion).catch(() => undefined),
+          fetchOptionalSpcVerification(controller.signal, activeRegion),
         ]);
         const displayProbabilityTiles = probabilityTilesWithDisplayedHour(
           probabilityTiles,
@@ -675,7 +691,11 @@ export function useOutlookArtifacts(
           setState({
             status: 'ready',
             artifacts: {
-              metadata: { ...metadata, mode: 'full' },
+              metadata: {
+                ...metadata,
+                spcVerification: metadata.spcVerification ?? spcVerification ?? null,
+                mode: 'full',
+              },
               riskPolygons,
               aggregateRiskPolygons,
               probabilityTiles: displayProbabilityTiles,

@@ -40,20 +40,20 @@ const CAPABILITIES: { tag: string; title: string; body: string; accent: string }
   },
   {
     tag: 'C-04',
-    title: 'SPC Verification',
-    body: 'Forecast bundles are verified against the official SPC Day 1 outlook on a 40 km grid. Agreement %, underforecast cells, and overforecast cells are exposed as first-class telemetry.',
+    title: 'SPC QC Console',
+    body: 'Forecast bundles are checked against the official SPC Day 1 outlook with an agreement readout, displacement ratio, post-prediction leakage guard, and a full risk category ledger.',
     accent: 'bg-signal-cyan',
   },
   {
     tag: 'C-05',
-    title: 'Model Audit Panel',
-    body: 'Activation gate, dataset quality, and reason-for-inactive — all surfaced so operators can trust or distrust the run on sight.',
+    title: 'SPC Overlay Compare',
+    body: 'Switch the map between AutoOutlook only, official SPC Day 1 only, or overlay comparison. QC hatches mark true agreement, underforecast, and overforecast regions.',
     accent: 'bg-signal-lime',
   },
   {
     tag: 'C-06',
-    title: 'Forecast Discussion',
-    body: 'Auto-generated narrative paragraph blending ingredients, composites, and storm-mode signals into operator-readable forecast prose. No GPT, no hallucinations — pure rules.',
+    title: 'Focused Operator Navigation',
+    body: 'The sidebar now prioritizes the operational path: outlook map, primary forecast, hazards, parameters, timeline, discussion, SPC verification, and system status.',
     accent: 'bg-signal-violet',
   },
 ];
@@ -86,8 +86,8 @@ const PIPELINE_STEPS = [
   {
     code: '05',
     label: 'VERIFY',
-    title: 'SPC cross-check',
-    body: 'After publish, the official SPC Day 1 outlook is fetched purely for verification. It never feeds back into the forecast pipeline — a hard leakage guard.',
+    title: 'SPC QC cross-check',
+    body: 'After publish, the official SPC Day 1 outlook is fetched purely for verification. The QC bundle exposes agreement, underforecast, overforecast, category counts, and forecaster metadata.',
   },
 ];
 
@@ -129,6 +129,8 @@ const TECH_PILLS = [
   'TOPOJSON',
   'WEBP TILES',
   'SPC VERIFICATION',
+  'SPC OVERLAY QC',
+  'CATEGORY LEDGER',
 ];
 
 // ---------------------------------------------------------------------------
@@ -238,7 +240,7 @@ function Hero() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v0.5 · SEVERE OUTLOOK</RetroBadge>
+            <RetroBadge tone="paper">v0.6 · SPC QC</RetroBadge>
           </div>
 
           <h1 className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
@@ -256,7 +258,7 @@ function Hero() {
             AutoOutlook ingests the latest extended-range model cycle, derives the severe-weather ingredient deck,
             runs gated tornado / hail / wind probability heads, and publishes
             SPC-style risk polygons + probability tiles for forecast hours <span className="font-mono font-bold text-ink">f00–f48</span>.
-            Every outlook is verified against the official SPC Day 1 outlook before it ships.
+            v0.6 adds a dedicated SPC QC console, official Day 1 overlay comparison, and a cleaner operator sidebar.
           </p>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -286,7 +288,7 @@ function Hero() {
             <Stat label="FORECAST HOURS" value="f00–f48" sub="hourly resolution" />
             <Stat label="PROVIDER CHAIN" value="3-tier" sub="live · fallback · mock" />
             <Stat label="HAZARD HEADS" value="3 + 1" sub="tor · hail · wind · flood" />
-            <Stat label="SPC VERIFY" value="40 km" sub="agreement grid" />
+            <Stat label="SPC QC" value="3 modes" sub="auto · SPC · overlay" />
           </dl>
         </div>
 
@@ -311,8 +313,8 @@ function Hero() {
               <DarkStat label="CYCLE" value="12Z RUN" sub="auto-detected" />
               <DarkStat label="OUTLOOK" value="ENH" valueClass="bg-risk-enh text-paper px-2" sub="central plains" />
               <DarkStat label="MAIN HAZARD" value="🌪 TORNADO" sub="conf 72%" />
-              <DarkStat label="ML MODEL" value="ACTIVE" valueClass="text-signal-lime" sub="gate OK" />
-              <DarkStat label="SPC AGREE" value="84%" sub="40 km grid" />
+              <DarkStat label="SPC QC" value="LEDGER" valueClass="text-signal-lime" sub="risk counts" />
+              <DarkStat label="SPC AGREE" value="35%" sub="QC sample" />
             </div>
 
             {/* probability heatmap simulation */}
@@ -428,7 +430,8 @@ function LiveTickerBand() {
   const items = [
     '► 12Z CYCLE · 49 OUTLOOKS PUBLISHED',
     '► HAZARD PROBABILITY HEADS · ACTIVE',
-    '► SPC AGREEMENT 84% · UNDERFORECAST 0.6%',
+    '► SPC QC · AGREEMENT + DISPLACEMENT + LEDGER',
+    '► OVERLAY COMPARE · AUTO / SPC / QC HATCH',
     '► PROVIDER CHAIN: LIVE → FALLBACK → MOCK',
     '► MAIN HAZARD · TORNADO · CONF 72%',
     '► RUN-LOCK CLEAR · NEXT REFRESH 27 MIN',
@@ -524,8 +527,8 @@ function CapabilitiesBento() {
         <SectionHead tag="CAPABILITIES / 03" title="An operations console, not a chart." />
         <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
           Every panel exists to answer one operational question. The dashboard refuses generic SaaS chrome —
-          no dropdowns, no station selectors, no editable inputs. The only interactions are the forecast-hour slider,
-          play/pause, and a manual refresh.
+          controls are compact, labels are explicit, and the sidebar now stays focused on the panels that matter
+          during forecast review.
         </p>
 
         <div className="mt-10 grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
@@ -598,9 +601,8 @@ function HowItWorks() {
             <p className="font-sans text-sm leading-relaxed">
               Predictions are published <span className="font-bold text-signal-amber">first</span>.
               The official SPC Day 1 outlook is fetched <span className="font-bold text-signal-amber">after</span>,
-              and only for verification — it never feeds back into the forecast pipeline.
-              Inactive heads surface a <span className="font-mono text-signal-amber">reason-for-inactive</span> string —
-              never a silent fallback.
+              and only for verification — it never feeds back into the forecast pipeline. v0.6 surfaces that guard
+              directly in the SPC QC panel alongside agreement, displacement, and category-ledger diagnostics.
             </p>
           </div>
         </div>
@@ -785,7 +787,7 @@ function TechStack() {
         <div className="mt-10 grid grid-cols-1 gap-5 md:grid-cols-3">
           <FactCard k="49" label="Forecast hours" sub="f00–f48 hourly outlooks" />
           <FactCard k="6" label="Risk categories" sub="TSTM → HIGH ladder" />
-          <FactCard k="40 km" label="Verification grid" sub="SPC Day 1 cross-check" />
+          <FactCard k="3" label="SPC compare modes" sub="Auto · SPC · overlay QC" />
         </div>
       </div>
     </section>
@@ -818,7 +820,7 @@ function FinalCTA() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v0.5</RetroBadge>
+            <RetroBadge tone="amber">v0.6</RetroBadge>
           </div>
 
           <h2
@@ -830,8 +832,8 @@ function FinalCTA() {
           </h2>
 
           <p className="mt-6 max-w-[640px] font-sans text-base leading-relaxed text-paper/75 sm:text-lg">
-            No sign-up. No tour. The dashboard auto-loads the latest cycle, runs the provider chain, and renders a
-            verified convective outlook within seconds. Stop watching weather Twitter.
+            No sign-up. No tour. The dashboard auto-loads the latest cycle, renders the outlook, and gives the
+            SPC agreement panel enough detail to see where AutoOutlook matched, missed, or overcalled the Day 1.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -868,7 +870,7 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.5
+          AutoOutlook · Automated Convective Risk Intelligence · v0.6
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>

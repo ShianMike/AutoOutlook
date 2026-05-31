@@ -5,7 +5,7 @@ import { FORECAST_HOUR_LABELS } from '../types/forecast';
 import RetroPanel from './retro/RetroPanel';
 import RetroBadge from './retro/RetroBadge';
 import HazardOutlookMap from './HazardOutlookMap';
-import GeneratedOutlookMap from './GeneratedOutlookMap';
+import GeneratedOutlookMap, { type SpcComparisonMode } from './GeneratedOutlookMap';
 import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
 import type { OutlookArtifactState } from '../hooks/useOutlookArtifacts';
@@ -253,6 +253,7 @@ export default function OutlookMapPanel({
   setActivePhilippinePane,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
+  const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>('auto');
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
   const [isExporting, setIsExporting] = useState(false);
@@ -363,7 +364,7 @@ export default function OutlookMapPanel({
       const canvas = await captureFixedExportCanvas(exportRef.current);
       const dataUrl = canvas.toDataURL('image/png');
       const validStamp = stampISO(snapshot.validTimeISO);
-      const filename = `autooutlook_${mode}_F${String(snapshot.forecastHour).padStart(3, '0')}_${validStamp}.png`;
+      const filename = `autooutlook_${mode === 'levels' ? spcComparisonMode : mode}_F${String(snapshot.forecastHour).padStart(3, '0')}_${validStamp}.png`;
       const link = document.createElement('a');
       link.href = dataUrl;
       link.download = filename;
@@ -566,6 +567,7 @@ export default function OutlookMapPanel({
               artifacts={outlookArtifacts.artifacts}
               message={outlookArtifacts.message}
               activeRegion={activeRegion}
+              comparisonMode={spcComparisonMode}
             />
           </div>
         ) : (
@@ -733,6 +735,24 @@ export default function OutlookMapPanel({
                 <option value="hail">Hail</option>
                 <option value="wind">Damaging Wind</option>
                 <option value="tornado">Tornado</option>
+              </select>
+            </div>
+          )}
+
+          {mode === 'levels' && activeRegion === 'conus' && (
+            <div className="flex items-center gap-2 animate-fadeIn" data-spc-comparison-control="true">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                SPC Compare
+              </label>
+              <select
+                value={spcComparisonMode}
+                onChange={(e) => setSpcComparisonMode(e.target.value as SpcComparisonMode)}
+                disabled={isAnyExporting}
+                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+              >
+                <option value="auto">AutoOutlook Only</option>
+                <option value="spc">SPC Day 1 Only</option>
+                <option value="overlay">Overlay Compare</option>
               </select>
             </div>
           )}

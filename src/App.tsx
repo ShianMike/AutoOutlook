@@ -16,6 +16,7 @@ import ForecastDiscussion from './components/ForecastDiscussion';
 import RiskTimeline from './components/RiskTimeline';
 import WatchReadinessPanel from './components/WatchReadinessPanel';
 import SystemStatusPanel from './components/SystemStatusPanel';
+import VerificationPanel from './components/VerificationPanel';
 import DocsSidebar from './components/docs/DocsSidebar';
 import DocumentationPage from './components/docs/DocumentationPage';
 import LandingPage from './components/landing/LandingPage';
@@ -34,6 +35,7 @@ const DASHBOARD_ANCHORS = new Set([
   'timeline',
   'discussion',
   'readiness',
+  'verification',
   'system-status',
 ]);
 
@@ -194,6 +196,10 @@ export default function App() {
             />
           </section>
 
+          <section id="verification" className="scroll-mt-4">
+            <VerificationPanel spcVerification={outlookArtifacts.artifacts?.metadata?.spcVerification} />
+          </section>
+
           <section id="system-status" className="scroll-mt-4">
             <SystemStatusPanel
               bundle={auto.bundle}
@@ -213,7 +219,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v0.5
+              AutoOutlook · Automated Convective Risk Intelligence · v0.6
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

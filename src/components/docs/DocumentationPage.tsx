@@ -420,6 +420,7 @@ export default function DocumentationPage() {
         <DocsOverview />
         <DocsLevels />
         <DocsPerformance />
+        <DocsSpcQc />
         <DocsPredictability />
         <DocsHazards />
         <DocsSources />
@@ -445,12 +446,12 @@ function DocsHero() {
         </div>
         <div className="flex items-center gap-2">
           <RetroBadge tone="cyan">Static</RetroBadge>
-          <RetroBadge tone="ink">v0.5</RetroBadge>
+          <RetroBadge tone="ink">v0.6</RetroBadge>
         </div>
       </div>
       <div className="border-t-[2px] border-paper/20 bg-ink px-4 py-1.5 xl:px-5">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/55">
-          Nine sections · Architecture · Levels · Skill · Predictability · Bands · Providers · Glossary · Disclaimer · Research
+          Ten sections · Architecture · Levels · Skill · SPC QC · Predictability · Bands · Providers · Glossary · Disclaimer · Research
         </span>
       </div>
     </header>
@@ -556,14 +557,14 @@ function DocsOverview() {
         ACRI mirrors the categorical and probabilistic structure of an SPC convective outlook
         using HRRR model fields, MetPy-style derived ingredients, and XGBoost hazard
         probabilities. It produces a categorical risk surface, per-hazard probability bands,
-        a parameter dashboard, an auto-generated forecast discussion, and a system-status
-        readout, all refreshed every 15 minutes.
+        a parameter dashboard, an auto-generated forecast discussion, an SPC QC console,
+        and a system-status readout, all refreshed every 15 minutes.
       </Body>
 
       <StatGrid
         items={[
           { label: 'Forecast Horizon', value: '0 – 48 h' },
-          { label: 'Slider Stops',     value: '7' },
+          { label: 'SPC Compare',      value: '3 modes' },
           { label: 'Auto Refresh',     value: '15 min' },
           { label: 'Hazards Modeled',  value: '3 + 1' },
         ]}
@@ -777,11 +778,102 @@ function DocsPerformance() {
   );
 }
 
+function DocsSpcQc() {
+  return (
+    <DocSection
+      id="docs-spc-qc"
+      eyebrow="DOC / 04 · SPC DAY 1 COMPARISON"
+      title="SPC QC Console"
+      badge={<RetroBadge tone="lime">v0.6</RetroBadge>}
+    >
+      <Lead>
+        v0.6 turns the SPC Day 1 verification artifact into an operator-facing QC panel
+        and a direct map comparison mode.
+      </Lead>
+
+      <Body>
+        The backend emits <Mono>verification_summary.json</Mono> after AutoOutlook artifacts
+        are generated. The frontend reads that summary and renders the agreement percentage,
+        underforecast and overforecast cell counts, category ledgers, SPC forecaster metadata,
+        valid/expiration timestamps, and leakage-guard status.
+      </Body>
+
+      <StatGrid
+        items={[
+          { label: 'Map Modes', value: '3' },
+          { label: 'QC Cards', value: '3' },
+          { label: 'Risk Rows', value: '7' },
+          { label: 'Leakage Guard', value: 'Post' },
+        ]}
+      />
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <SpcQcCard
+          title="SPC Agreement"
+          badge="QC"
+          body="A compact calibration card shows the agreement percentage, aligned cells, evaluated cells, and whether the official SPC outlook was fetched only after prediction artifacts were ready."
+        />
+        <SpcQcCard
+          title="Displacement Ratio"
+          badge="UNF / OVF"
+          body="Underforecast means SPC risk exceeds AutoOutlook. Overforecast means AutoOutlook exceeds SPC. Hover or focus the cards to read those definitions in-app."
+        />
+        <SpcQcCard
+          title="Category Ledger"
+          badge="All Risks"
+          body="Every category from NONE through HIGH stays visible, even when the count is zero, so users can quickly compare AutoOutlook and SPC distribution by tier."
+        />
+      </div>
+
+      <div className="border-[3px] border-ink bg-paper p-3 shadow-retro-sm">
+        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.22em] text-ink/55">
+          Overlay Comparison Modes
+        </div>
+        <DocList>
+          <DocListItem><Mono>AutoOutlook only</Mono> shows the generated categorical risk contours.</DocListItem>
+          <DocListItem><Mono>SPC Day 1 only</Mono> shows the official SPC categorical boundaries for the current Day 1 product.</DocListItem>
+          <DocListItem><Mono>Overlay compare</Mono> combines both layers and uses bounded QC hatches for agreement, underforecast, and overforecast regions.</DocListItem>
+        </DocList>
+      </div>
+
+      <Body>
+        The overlay hatches are diagnostic, not replacement outlooks. The official SPC
+        product remains the authoritative operational forecast; AutoOutlook uses it only
+        to explain calibration after the automated run is already complete.
+      </Body>
+    </DocSection>
+  );
+}
+
+function SpcQcCard({
+  title,
+  badge,
+  body,
+}: {
+  title: string;
+  badge: string;
+  body: string;
+}) {
+  return (
+    <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="font-display text-[13px] font-extrabold uppercase tracking-widest text-ink">
+          {title}
+        </span>
+        <span className="shrink-0 border-[2px] border-ink bg-signal-lime px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-ink">
+          {badge}
+        </span>
+      </div>
+      <p className="text-[12.5px] leading-snug text-ink/75">{body}</p>
+    </div>
+  );
+}
+
 function DocsPredictability() {
   return (
     <DocSection
       id="docs-predictability"
-      eyebrow="DOC / 04 · WHAT 0–48 H ACTUALLY MEANS"
+      eyebrow="DOC / 05 · WHAT 0–48 H ACTUALLY MEANS"
       title="Predictability Window"
     >
       <Lead>
@@ -833,7 +925,7 @@ function DocsHazards() {
   return (
     <DocSection
       id="docs-hazards"
-      eyebrow="DOC / 05 · PROBABILITY CONTOURS"
+      eyebrow="DOC / 06 · PROBABILITY CONTOURS"
       title="Hazard Probability Bands"
     >
       <Lead>
@@ -962,7 +1054,7 @@ function DocsSources() {
   return (
     <DocSection
       id="docs-sources"
-      eyebrow="DOC / 06 · WHERE THE DATA COMES FROM"
+      eyebrow="DOC / 07 · WHERE THE DATA COMES FROM"
       title="Data Provider Chain"
     >
       <Lead>
@@ -1049,7 +1141,7 @@ function DocsGlossary() {
   return (
     <DocSection
       id="docs-glossary"
-      eyebrow="DOC / 07 · PARAMETER DICTIONARY"
+      eyebrow="DOC / 08 · PARAMETER DICTIONARY"
       title="Ingredients Glossary"
       badge={<RetroBadge tone="cyan">{totalTerms} terms</RetroBadge>}
     >
@@ -1197,7 +1289,7 @@ function DocsDisclaimerSection() {
   return (
     <DocSection
       id="docs-disclaimer"
-      eyebrow="DOC / 08 · USE & VERIFICATION"
+      eyebrow="DOC / 09 · USE & VERIFICATION"
       title="Verification & Disclaimer"
       badge={<RetroBadge tone="red">Experimental</RetroBadge>}
     >
@@ -1240,7 +1332,7 @@ function DocsResearchSources() {
   return (
     <DocSection
       id="docs-research"
-      eyebrow="DOC / 09 · FORMULATION REFERENCES"
+      eyebrow="DOC / 10 · FORMULATION REFERENCES"
       title="Research Sources"
       badge={<RetroBadge tone="lime">{RESEARCH_SOURCES.length} refs</RetroBadge>}
     >

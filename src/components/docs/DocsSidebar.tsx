@@ -11,12 +11,13 @@ export const DOCS_NAV_ITEMS: DocsNavItem[] = [
   { id: 'docs-overview',       label: 'System Overview',       code: '01' },
   { id: 'docs-levels',         label: 'Risk Level Codex',      code: '02' },
   { id: 'docs-performance',    label: 'Model Skill',           code: '03' },
-  { id: 'docs-predictability', label: 'Predictability Window', code: '04' },
-  { id: 'docs-hazards',        label: 'Hazard Bands',          code: '05' },
-  { id: 'docs-sources',        label: 'Provider Chain',        code: '06' },
-  { id: 'docs-glossary',       label: 'Ingredients Glossary',  code: '07' },
-  { id: 'docs-disclaimer',     label: 'Verification & Notes',  code: '08' },
-  { id: 'docs-research',       label: 'Research Sources',      code: '09' },
+  { id: 'docs-spc-qc',         label: 'SPC QC Console',        code: '04' },
+  { id: 'docs-predictability', label: 'Predictability Window', code: '05' },
+  { id: 'docs-hazards',        label: 'Hazard Bands',          code: '06' },
+  { id: 'docs-sources',        label: 'Provider Chain',        code: '07' },
+  { id: 'docs-glossary',       label: 'Ingredients Glossary',  code: '08' },
+  { id: 'docs-disclaimer',     label: 'Verification & Notes',  code: '09' },
+  { id: 'docs-research',       label: 'Research Sources',      code: '10' },
 ];
 
 export default function DocsSidebar() {
@@ -93,7 +94,7 @@ export default function DocsSidebar() {
 
   const handleBack = () => {
     hashLockUntilRef.current = Date.now() + 900;
-    window.location.hash = '#time-scrubber';
+    window.location.hash = '#outlook-map';
   };
 
   return (

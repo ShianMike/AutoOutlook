@@ -1,7 +1,12 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, PhilippineRegionPane, RiskCategory, UpperAirVector } from '../types/forecast';
-import type { OutlookArtifacts, OutlookArtifactFeatureCollection, ArtifactRiskCategory } from '../types/outlookArtifacts';
+import type {
+  OutlookArtifacts,
+  OutlookArtifactFeatureCollection,
+  ArtifactRiskCategory,
+  SpcCategoryFeatureCollection,
+} from '../types/outlookArtifacts';
 import {
   artifactRiskShapesToFeatureCollection,
   artifactRiskToFeatureCollection,
@@ -12,8 +17,11 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
+import { apiUrl } from '../utils/apiBase';
 
 const STATES_URL = '/us-states-10m.json';
+
+export type SpcComparisonMode = 'auto' | 'spc' | 'overlay';
 
 type ArtifactState = 'loading' | 'ready' | 'missing' | 'error' | 'pending' | 'failed';
 
@@ -24,6 +32,7 @@ interface GeneratedOutlookMapProps {
   message: string | null;
   activeRegion?: ActiveRegion;
   philippinePane?: PhilippineRegionPane;
+  comparisonMode?: SpcComparisonMode;
 }
 
 function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
@@ -153,9 +162,27 @@ function displayCategory(category: ArtifactRiskCategory | RiskCategory | undefin
   return category === 'MOD' ? 'MDT' : category;
 }
 
+function spcCategory(feature: SpcCategoryFeatureCollection['features'][number] | undefined): Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'> {
+  const label = String(feature?.properties?.LABEL || '').toUpperCase();
+  if (label === 'HIGH') return 'HIGH';
+  if (label === 'MDT' || label === 'MOD') return 'MDT';
+  if (label === 'ENH') return 'ENH';
+  if (label === 'SLGT') return 'SLGT';
+  if (label === 'MRGL') return 'MRGL';
+  return 'TSTM';
+}
+
 function maxCategory(collection: OutlookArtifactFeatureCollection): ArtifactRiskCategory | undefined {
   return collection.features.reduce<ArtifactRiskCategory | undefined>((best, feature) => {
     const category = feature.properties.category;
+    if (!best || CATEGORY_ORD[category] > CATEGORY_ORD[best]) return category;
+    return best;
+  }, undefined);
+}
+
+function maxSpcCategory(collection: SpcCategoryFeatureCollection): ArtifactRiskCategory | undefined {
+  return collection.features.reduce<ArtifactRiskCategory | undefined>((best, feature) => {
+    const category = spcCategory(feature);
     if (!best || CATEGORY_ORD[category] > CATEGORY_ORD[best]) return category;
     return best;
   }, undefined);
@@ -174,6 +201,23 @@ function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollectio
   return {
     ...demoted,
     features: [...demoted.features].sort((a, b) => CATEGORY_ORD[a.properties.category] - CATEGORY_ORD[b.properties.category]).map((feature) => {
+      if (feature.geometry.type === 'Polygon') {
+        const coordinates = normalizePolygonRings(feature.geometry.coordinates as number[][][]);
+        return { ...feature, geometry: { ...feature.geometry, coordinates } };
+      }
+      const coordinates = (feature.geometry.coordinates as number[][][][]).map((polygon) =>
+        normalizePolygonRings(polygon),
+      );
+      return { ...feature, geometry: { ...feature.geometry, coordinates } };
+    }),
+  };
+}
+
+function normalizeSpcCollection(collection: SpcCategoryFeatureCollection | null): SpcCategoryFeatureCollection | null {
+  if (!collection) return null;
+  return {
+    ...collection,
+    features: [...collection.features].sort((a, b) => CATEGORY_ORD[spcCategory(a)] - CATEGORY_ORD[spcCategory(b)]).map((feature) => {
       if (feature.geometry.type === 'Polygon') {
         const coordinates = normalizePolygonRings(feature.geometry.coordinates as number[][][]);
         return { ...feature, geometry: { ...feature.geometry, coordinates } };
@@ -229,6 +273,12 @@ function riskPolygonsForHour(
   return { ...collection, features };
 }
 
+function comparisonTitle(mode: SpcComparisonMode, modelLabel: string): string {
+  if (mode === 'spc') return 'Official SPC Day 1 Risk Boundaries';
+  if (mode === 'overlay') return `${modelLabel} / SPC Overlay Comparison`;
+  return `${modelLabel}/XGBoost Risk Levels`;
+}
+
 export default function GeneratedOutlookMap({
   snapshot,
   status,
@@ -236,9 +286,13 @@ export default function GeneratedOutlookMap({
   message,
   activeRegion = 'conus',
   philippinePane = 'national',
+  comparisonMode = 'auto',
 }: GeneratedOutlookMapProps) {
+  const [spcDay1, setSpcDay1] = useState<SpcCategoryFeatureCollection | null>(null);
+  const [spcStatus, setSpcStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
   const isPhil = activeRegion === 'philippines';
   const modelLabel = generatedModelLabel(activeRegion, artifacts);
+  const effectiveComparisonMode: SpcComparisonMode = activeRegion === 'conus' ? comparisonMode : 'auto';
   const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
   const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
   const projection = isPhil ? 'geoMercator' : 'geoAlbers';
@@ -251,6 +305,48 @@ export default function GeneratedOutlookMap({
         scale: 1000,
       };
   const selectedForecastHour = snapshot?.forecastHour;
+  const spcVerification = artifacts?.metadata?.spcVerification ?? null;
+  const showAutoLayer = effectiveComparisonMode === 'auto' || effectiveComparisonMode === 'overlay';
+  const showSpcLayer = effectiveComparisonMode === 'spc' || effectiveComparisonMode === 'overlay';
+  const isOverlayMode = effectiveComparisonMode === 'overlay';
+
+  useEffect(() => {
+    if (!showSpcLayer || activeRegion !== 'conus') {
+      if (!spcDay1) setSpcStatus('idle');
+      return;
+    }
+    if (spcDay1) {
+      setSpcStatus('ready');
+      return;
+    }
+
+    const controller = new AbortController();
+    setSpcStatus('loading');
+    fetch(apiUrl('/api/outlook/spc-day1-category'), {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then((response) => {
+        if (response.status === 404) {
+          setSpcStatus('missing');
+          return null;
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<SpcCategoryFeatureCollection>;
+      })
+      .then((payload) => {
+        if (!payload) return;
+        setSpcDay1(payload);
+        setSpcStatus('ready');
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        setSpcStatus('error');
+      });
+
+    return () => controller.abort();
+  }, [activeRegion, showSpcLayer, spcDay1]);
+
   const selectedTile = useMemo(
     () => getArtifactHourTile(artifacts, selectedForecastHour),
     [artifacts, selectedForecastHour],
@@ -284,10 +380,17 @@ export default function GeneratedOutlookMap({
   const usingTileRisk = selectedCollection === tileRiskCollection;
   const renderedCollection = selectedCollection;
   const hasGeneratedLayer = renderedCollection.features.length > 0;
+  const normalizedSpcDay1 = useMemo(() => normalizeSpcCollection(spcDay1), [spcDay1]);
+  const hasSpcLayer = Boolean(normalizedSpcDay1?.features.length);
   const renderedMax = maxCategory(renderedCollection);
+  const spcMax = normalizedSpcDay1 ? maxSpcCategory(normalizedSpcDay1) : undefined;
   const tileMax = getArtifactMaxCategory(artifacts, selectedForecastHour);
   const hasGeneratedArtifact = Boolean(selectedTile || artifactRiskCollection?.features.length || aggregateRiskCollection?.features.length);
-  const mapCategory = hasGeneratedArtifact ? renderedMax ?? tileMax : undefined;
+  const mapCategory = effectiveComparisonMode === 'spc'
+    ? spcMax
+    : hasGeneratedArtifact
+      ? renderedMax ?? tileMax
+      : undefined;
 
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
 
@@ -333,11 +436,13 @@ export default function GeneratedOutlookMap({
     <div className="outlook-export-map-card border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
         <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[13px] leading-none tracking-normal">
-          {`${modelLabel}/XGBoost Risk Levels`}
+          {comparisonTitle(effectiveComparisonMode, modelLabel)}
         </span>
         <div className="flex shrink-0 items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
-            CAT {displayCategory(mapCategory)}
+            {effectiveComparisonMode === 'overlay'
+              ? `${Math.round((spcVerification?.agreementFraction ?? 0) * 100)}% AGREE`
+              : `CAT ${displayCategory(mapCategory)}`}
           </span>
         </div>
       </header>
@@ -384,7 +489,7 @@ export default function GeneratedOutlookMap({
             </Geographies>
           )}
 
-          {hasGeneratedLayer && (
+          {showAutoLayer && hasGeneratedLayer && (
             <Geographies geography={renderedCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
@@ -402,26 +507,81 @@ export default function GeneratedOutlookMap({
                         // read as solid colors. Bands merge through color
                         // contrast alone since all boundary strokes removed.
                         default: {
-                          fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
-                          stroke: 'none',
-                          strokeWidth: 0,
+                          fill: isOverlayMode ? 'none' : style.fill,
+                          fillOpacity: isOverlayMode ? 0 : usingTileRisk ? 0.88 : 0.80,
+                          stroke: isOverlayMode ? style.stroke : 'none',
+                          strokeWidth: isOverlayMode ? 1.65 : 0,
+                          strokeOpacity: isOverlayMode ? 0.9 : undefined,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         hover: {
-                          fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
-                          stroke: 'none',
-                          strokeWidth: 0,
+                          fill: isOverlayMode ? 'none' : style.fill,
+                          fillOpacity: isOverlayMode ? 0 : usingTileRisk ? 0.88 : 0.80,
+                          stroke: isOverlayMode ? style.stroke : 'none',
+                          strokeWidth: isOverlayMode ? 1.65 : 0,
+                          strokeOpacity: isOverlayMode ? 0.9 : undefined,
                           outline: 'none',
                           pointerEvents: 'none',
                         },
                         pressed: {
-                          fill: style.fill,
-                          fillOpacity: usingTileRisk ? 0.88 : 0.80,
-                          stroke: 'none',
-                          strokeWidth: 0,
+                          fill: isOverlayMode ? 'none' : style.fill,
+                          fillOpacity: isOverlayMode ? 0 : usingTileRisk ? 0.88 : 0.80,
+                          stroke: isOverlayMode ? style.stroke : 'none',
+                          strokeWidth: isOverlayMode ? 1.65 : 0,
+                          strokeOpacity: isOverlayMode ? 0.9 : undefined,
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {showSpcLayer && hasSpcLayer && normalizedSpcDay1 && (
+            <Geographies geography={normalizedSpcDay1}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const category = spcCategory(normalizedSpcDay1.features[index]);
+                  const style = LEVEL_STYLE[category];
+                  const spcFill = typeof geo.properties.fill === 'string' ? geo.properties.fill : style.fill;
+                  const spcStroke = typeof geo.properties.stroke === 'string' ? geo.properties.stroke : style.stroke;
+                  return (
+                    <Geography
+                      key={`official-spc-risk-${geo.rsmKey ?? index}-${category}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: {
+                          fill: effectiveComparisonMode === 'spc' ? spcFill : 'none',
+                          fillOpacity: effectiveComparisonMode === 'spc' ? 0.72 : 0,
+                          stroke: effectiveComparisonMode === 'spc' ? 'none' : spcStroke,
+                          strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
+                          strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
+                          strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        hover: {
+                          fill: effectiveComparisonMode === 'spc' ? spcFill : 'none',
+                          fillOpacity: effectiveComparisonMode === 'spc' ? 0.72 : 0,
+                          stroke: effectiveComparisonMode === 'spc' ? 'none' : spcStroke,
+                          strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
+                          strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
+                          strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
+                          outline: 'none',
+                          pointerEvents: 'none',
+                        },
+                        pressed: {
+                          fill: effectiveComparisonMode === 'spc' ? spcFill : 'none',
+                          fillOpacity: effectiveComparisonMode === 'spc' ? 0.72 : 0,
+                          stroke: effectiveComparisonMode === 'spc' ? 'none' : spcStroke,
+                          strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
+                          strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
+                          strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -540,7 +700,7 @@ export default function GeneratedOutlookMap({
           ))}
         </ComposableMap>
 
-        {!hasGeneratedArtifact && (
+        {!hasGeneratedArtifact && effectiveComparisonMode !== 'spc' && (
           <div className="absolute inset-4 flex items-center justify-center">
             <div className="max-w-[520px] border-[3px] border-ink bg-paper p-4 shadow-retro">
               <div className="font-display text-[14px] font-extrabold uppercase tracking-wider">
@@ -561,28 +721,62 @@ export default function GeneratedOutlookMap({
           </div>
         )}
 
+        {showSpcLayer && !hasSpcLayer && (
+          <div className="absolute inset-4 flex items-center justify-center">
+            <div className="max-w-[520px] border-[3px] border-ink bg-paper p-4 shadow-retro">
+              <div className="font-display text-[14px] font-extrabold uppercase tracking-wider">
+                SPC Day 1 layer unavailable
+              </div>
+              <p className="mt-2 font-mono text-[11px] leading-relaxed text-ink/70">
+                {spcStatus === 'loading'
+                  ? 'Fetching official SPC Day 1 category polygons.'
+                  : spcStatus === 'missing'
+                    ? 'The official SPC Day 1 GeoJSON artifact has not been published for this run.'
+                    : 'The official SPC Day 1 GeoJSON artifact could not be loaded.'}
+              </p>
+            </div>
+          </div>
+        )}
+
         <div className="absolute bottom-2 left-2 border-[2px] border-ink bg-paper px-2.5 py-2 shadow-retro-sm">
           <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-ink/70 leading-none mb-1.5">
-            Generated risk categories
+            {isOverlayMode ? 'SPC comparison legend' : effectiveComparisonMode === 'spc' ? 'Official SPC categories' : 'Generated risk categories'}
           </div>
-          <div className="grid grid-cols-3 gap-x-2 gap-y-1">
-            {CATEGORY_RAMP.map((category) => (
-              <div key={category} className="flex items-center gap-1 font-mono text-[10px] font-bold leading-none">
-                <span
-                  className="inline-block h-3 w-3 border-[1.5px] border-ink"
-                  style={{ backgroundColor: LEVEL_STYLE[category].fill }}
-                  aria-hidden
-                />
-                <span>{LEVEL_STYLE[category].label}</span>
+          {isOverlayMode ? (
+            <div className="grid grid-cols-1 gap-y-1">
+              <div className="flex items-center gap-1 font-mono text-[10px] font-bold leading-none">
+                <span className="inline-block h-3 w-5 border-[1.5px] border-ink bg-[linear-gradient(90deg,transparent_0,transparent_45%,rgba(95,143,34,0.8)_45%,rgba(95,143,34,0.8)_55%,transparent_55%)]" aria-hidden />
+                <span>AutoOutlook contours</span>
               </div>
-            ))}
-          </div>
+              <div className="flex items-center gap-1 font-mono text-[10px] font-bold leading-none">
+                <span className="inline-block h-3 w-5 border-[1.5px] border-ink bg-[repeating-linear-gradient(90deg,transparent_0,transparent_3px,rgba(38,102,42,0.9)_3px,rgba(38,102,42,0.9)_6px)]" aria-hidden />
+                <span>SPC Day 1 contours</span>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-x-2 gap-y-1">
+              {CATEGORY_RAMP.map((category) => (
+                <div key={category} className="flex items-center gap-1 font-mono text-[10px] font-bold leading-none">
+                  <span
+                    className="inline-block h-3 w-3 border-[1.5px] border-ink"
+                    style={{ backgroundColor: LEVEL_STYLE[category].fill }}
+                    aria-hidden
+                  />
+                  <span>{LEVEL_STYLE[category].label}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {artifacts?.metadata && (
           <div className="absolute right-2 bottom-2 border-[2px] border-ink bg-paper px-2.5 py-2 shadow-retro-sm font-mono text-[9px] uppercase tracking-widest text-ink/70">
             <div>{artifacts.metadata.cycle}</div>
-            <div>Generated {formatGeneratedAt(artifacts.metadata.generatedAtISO)}</div>
+            <div>
+              {effectiveComparisonMode === 'spc'
+                ? `SPC ${spcVerification?.spcForecaster || 'DAY 1'}`
+                : `Generated ${formatGeneratedAt(artifacts.metadata.generatedAtISO)}`}
+            </div>
           </div>
         )}
       </div>

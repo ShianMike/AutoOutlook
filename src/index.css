@@ -109,6 +109,16 @@
     background-size: 10px;
     padding-right: 28px !important;
   }
+  .spc-tooltip-host > .spc-tooltip-bubble {
+    opacity: 0;
+    transform: translate(-50%, 0.25rem);
+  }
+  .spc-tooltip-host:hover > .spc-tooltip-bubble,
+  .spc-tooltip-host:focus > .spc-tooltip-bubble,
+  .spc-tooltip-host:focus-visible > .spc-tooltip-bubble {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

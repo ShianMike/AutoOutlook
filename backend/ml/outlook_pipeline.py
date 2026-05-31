@@ -474,6 +474,7 @@ def run_incremental_pipeline(
                 f"[incremental reset] clearing stale hour artifacts from {previous_cycle} before writing {cycle.label}",
                 flush=True,
             )
+            _cache_previous_incremental_cycle(output_dir)
             _clear_incremental_hour_artifacts(output_dir)
         if existing_index is not None:
             existing_ready = [
@@ -1648,6 +1649,10 @@ def _publish_incremental_artifacts_to_gcs(
     complete_dir = _incremental_complete_output_dir(output_dir)
     if complete_dir.exists() and _incremental_index_covers_requested_hours(index, requested_hours):
         complete_files = _upload_directory_to_gcs(bucket, complete_dir, _gcs_join(prefix, complete_dir.name))
+    previous_files = 0
+    previous_dir = output_dir.with_name(f"{output_dir.name}.previous")
+    if previous_dir.exists():
+        previous_files = _upload_directory_to_gcs(bucket, previous_dir, _gcs_join(prefix, previous_dir.name))
 
     result = {
         "enabled": True,
@@ -1655,11 +1660,12 @@ def _publish_incremental_artifacts_to_gcs(
         "prefix": prefix.strip("/"),
         "currentFiles": current_files,
         "completeFiles": complete_files,
+        "previousFiles": previous_files,
         "latencyMs": int((time.perf_counter() - started) * 1000),
     }
     print(
         f"[gcs publish] bucket={bucket_name} prefix={result['prefix']} "
-        f"currentFiles={current_files} completeFiles={complete_files} "
+        f"currentFiles={current_files} completeFiles={complete_files} previousFiles={previous_files} "
         f"latency={result['latencyMs']}ms",
         flush=True,
     )
@@ -2010,6 +2016,20 @@ def _read_incremental_index(output_dir: Path, cycle: HrrrCycle) -> dict[str, Any
     if payload.get("cycle") != cycle.label:
         return None
     return payload
+
+
+def _cache_previous_incremental_cycle(output_dir: Path) -> Path | None:
+    output_dir = Path(output_dir)
+    if not output_dir.exists():
+        return None
+    previous_index = _read_incremental_index_payload(output_dir)
+    if not previous_index.get("cycle"):
+        return None
+    previous_dir = output_dir.with_name(f"{output_dir.name}.previous")
+    if previous_dir.exists():
+        shutil.rmtree(previous_dir, ignore_errors=True)
+    shutil.copytree(output_dir, previous_dir)
+    return previous_dir
 
 
 def _clear_incremental_hour_artifacts(output_dir: Path) -> None:

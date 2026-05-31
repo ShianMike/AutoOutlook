@@ -51,6 +51,7 @@ from backend.ml.outlook_pipeline import (
     PRODUCTION_FORECAST_HOURS,
     CloudRunTaskShard,
     FetchedHour,
+    _cache_previous_incremental_cycle,
     _hydrate_incremental_artifacts_from_gcs,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
@@ -2726,7 +2727,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(hail["15%"]["properties"]["vectorization"]["displayHigherRiskExpansionKm"], 10.0)
         self.assertEqual(hail["15%"]["properties"]["vectorization"]["displayLowerOwnedBoundaryKm"], 0.0)
 
-    def test_frontend_risk_fill_layers_are_stroke_free_with_separate_thin_boundaries(self) -> None:
+    def test_frontend_risk_fill_layers_are_stroke_free_except_overlay_compare(self) -> None:
         root = Path(__file__).resolve().parents[2]
         spc_source = (root / "src" / "components" / "SpcLevelOutlookMap.tsx").read_text(encoding="utf-8")
         generated_source = (root / "src" / "components" / "GeneratedOutlookMap.tsx").read_text(encoding="utf-8")
@@ -2734,14 +2735,17 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         spc_fill = spc_source[spc_source.index("key={`spc-level-${"):spc_source.index("key={`state-outline-")]
         generated_fill = generated_source[generated_source.index("key={`generated-risk-${"):generated_source.index("key={`generated-state-outline-")]
 
+        self.assertIn("stroke: 'none'", spc_fill)
+        self.assertIn("strokeWidth: 0", spc_fill)
+        self.assertIn("stroke: isOverlayMode ? style.stroke : 'none'", generated_fill)
+        self.assertIn("strokeWidth: isOverlayMode ? 1.65 : 0", generated_fill)
+
         for fill_block in (spc_fill, generated_fill):
-            self.assertIn("stroke: 'none'", fill_block)
-            self.assertIn("strokeWidth: 0", fill_block)
             self.assertNotIn("strokeWidth: 2.2", fill_block)
 
-        # Risk bands render as solid fills with no boundary strokes.
-        # All separator and boundary outline layers have been removed
-        # so bands merge seamlessly through color contrast alone.
+        # Risk bands render as solid fills with no boundary strokes in the
+        # default outlook view. Overlay compare mode may render thin contour
+        # strokes so AutoOutlook and SPC boundaries can be visually compared.
         self.assertNotIn("hasMetricDisplayGaps", generated_source)
         self.assertNotIn("riskGapFillCollection", generated_source)
         self.assertNotIn("generated-risk-gap-fill-", generated_source)
@@ -3228,6 +3232,95 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["cycle"], "HRRR 06Z 20260517")
         self.assertEqual(payload["generatedAtISO"], "2026-05-17T10:18:46Z")
+
+    def test_outlook_trends_route_compares_previous_cycle_cache(self) -> None:
+        import backend.server as server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current_dir = root / "latest_incremental"
+            previous_dir = root / "latest_incremental.previous"
+            for artifact_dir, cycle, center_lon, category_counts, probabilities in (
+                (
+                    previous_dir,
+                    "HRRR 06Z 20260517",
+                    -98.0,
+                    {"NONE": 10, "TSTM": 2000, "MRGL": 900, "SLGT": 600},
+                    {"tornado": 0.02, "hail": 0.12, "wind": 0.10},
+                ),
+                (
+                    current_dir,
+                    "HRRR 12Z 20260517",
+                    -96.5,
+                    {"NONE": 10, "TSTM": 2000, "MRGL": 900, "SLGT": 600, "ENH": 1300},
+                    {"tornado": 0.07, "hail": 0.22, "wind": 0.26},
+                ),
+            ):
+                hour_dir = artifact_dir / "hours" / "f00"
+                hour_dir.mkdir(parents=True)
+                (artifact_dir / "index.json").write_text(json.dumps({
+                    "status": "complete",
+                    "cycle": cycle,
+                    "cycleTimeISO": "2026-05-17T12:00:00Z",
+                    "readyForecastHours": [0],
+                    "requestedForecastHours": [0],
+                    "model": {"active": True},
+                }), encoding="utf-8")
+                (hour_dir / "metadata.json").write_text(json.dumps({
+                    "forecastHour": 0,
+                    "validTimeISO": "2026-05-17T12:00:00Z",
+                    "categoryCounts": category_counts,
+                    "region": {
+                        "label": "Test risk center",
+                        "centerLat": 35.0,
+                        "centerLon": center_lon,
+                        "bbox": [center_lon - 1, 34.0, center_lon + 1, 36.0],
+                    },
+                    "probabilityStats": {
+                        "categoryConsistencyProbabilityMax": probabilities,
+                    },
+                }), encoding="utf-8")
+                (hour_dir / "risk_polygons.geojson").write_text(json.dumps({
+                    "type": "FeatureCollection",
+                    "features": [],
+                }), encoding="utf-8")
+
+            with (
+                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", current_dir),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", None),
+                patch.object(server, "ARTIFACT_DIR", root / "latest"),
+            ):
+                response = server.app.test_client().get("/api/outlook/trends?hour=0&region=conus")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["active"])
+        self.assertEqual(payload["trendCategory"], "UPGRADED")
+        self.assertEqual(payload["previousCategory"], "SLGT")
+        self.assertEqual(payload["currentCategory"], "ENH")
+        self.assertAlmostEqual(payload["tornadoDelta"], 0.05)
+        self.assertGreater(payload["spatial"]["distanceMiles"], 80)
+
+    def test_incremental_previous_cycle_cache_copies_current_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            (output_dir / "index.json").write_text(json.dumps({
+                "cycle": "HRRR 06Z 20260517",
+                "readyForecastHours": [0],
+            }), encoding="utf-8")
+            (hour_dir / "metadata.json").write_text(json.dumps({
+                "forecastHour": 0,
+                "categoryCounts": {"SLGT": 700},
+            }), encoding="utf-8")
+
+            previous_dir = _cache_previous_incremental_cycle(output_dir)
+
+            self.assertEqual(previous_dir, output_dir.with_name("latest_incremental.previous"))
+            self.assertTrue((previous_dir / "index.json").exists())
+            self.assertTrue((previous_dir / "hours" / "f00" / "metadata.json").exists())
 
     def test_probability_tiles_route_uses_latest_bulk_artifact_when_present(self) -> None:
         import backend.server as server
