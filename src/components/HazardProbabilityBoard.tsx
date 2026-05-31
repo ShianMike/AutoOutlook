@@ -29,7 +29,7 @@ export default function HazardProbabilityBoard({ snapshot, artifacts, artifactSt
       eyebrow="04 / Per-hazard automated estimate"
       badge={<FocusLocationBadge focus={focus} />}
     >
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {HAZARD_ORDER.map((key) => (
           <HazardCard
             key={key}
@@ -43,6 +43,64 @@ export default function HazardProbabilityBoard({ snapshot, artifacts, artifactSt
     </RetroPanel>
   );
 }
+
+const TornadoIcon = ({ className = 'w-4 h-4' }: { className?: string }) => (
+  <svg className={`${className} stroke-current`} fill="none" viewBox="0 0 24 24" strokeWidth={2.5}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4h16M6 8h12M8 12h8M9 16h6M11 20h2" />
+  </svg>
+);
+
+const HailIcon = ({ className = 'w-4 h-4' }: { className?: string }) => (
+  <svg className={`${className} fill-current`} viewBox="0 0 24 24">
+    <path d="M12 2L2 12l10 10 10-10L12 2z" />
+  </svg>
+);
+
+const WindIcon = ({ className = 'w-4 h-4' }: { className?: string }) => (
+  <svg className={`${className} stroke-current`} fill="none" viewBox="0 0 24 24" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2" />
+    <path d="M9.6 4.6A2 2 0 1 1 11 8H2" />
+    <path d="M12.6 19.4A2 2 0 1 0 14 16H2" />
+  </svg>
+);
+
+const FloodIcon = ({ className = 'w-4 h-4' }: { className?: string }) => (
+  <svg className={`${className} stroke-current`} fill="none" viewBox="0 0 24 24" strokeWidth={2.5}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 9c3.33-2 6.67-2 10 0s6.67 2 10 0M3 15c3.33-2 6.67-2 10 0s6.67 2 10 0" />
+  </svg>
+);
+
+const LightningIcon = ({ className = 'w-2.5 h-2.5' }: { className?: string }) => (
+  <svg className={`${className} fill-current`} viewBox="0 0 24 24">
+    <path d="M13 2L3 14h9v8l10-12h-9l1-8z" />
+  </svg>
+);
+
+const MapPinIcon = ({ className = 'w-2.5 h-2.5' }: { className?: string }) => (
+  <svg className={`${className} fill-current`} viewBox="0 0 24 24">
+    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" />
+  </svg>
+);
+
+const BroadcastIcon = ({ className = 'w-3.5 h-3.5' }: { className?: string }) => (
+  <svg className={`${className} fill-current`} viewBox="0 0 24 24">
+    <path d="M12 2C6.48 2 2 6.48 2 12c0 2.76 1.12 5.26 2.93 7.07l1.42-1.42C4.85 16.15 4 14.18 4 12c0-4.41 3.59-8 8-8s8 3.59 8 8c0 2.18-.85 4.15-2.34 5.66l1.42 1.42C20.88 17.26 22 14.76 22 12c0-5.52-4.48-10-10-10zm0 4c-3.31 0-6 2.69-6 6 0 1.66.68 3.15 1.76 4.24l1.42-1.42C8.42 14.07 8 13.08 8 12c0-2.21 1.79-4 4-4s4 1.79 4 4c0 1.08-.42 2.07-1.18 2.82l1.42 1.42C17.32 15.15 18 13.66 18 12c0-3.31-2.69-6-6-6zm0 4c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
+  </svg>
+);
+
+const HAZARD_ICONS: Record<HazardKey, React.ComponentType<{ className?: string }>> = {
+  tornado: TornadoIcon,
+  hail: HailIcon,
+  wind: WindIcon,
+  flood: FloodIcon,
+};
+
+const HAZARD_DESCRIPTIONS: Record<HazardKey, string> = {
+  tornado: 'Tornado: A violently rotating column of air in contact with both the surface and a convective cloud. Risks assess the likelihood of a tornado within 25 miles of a point.',
+  hail: 'Severe Hail: Frozen precipitation falling from intense storm updrafts. Severe threshold is ≥ 1.00 inch diameter; significant severe (SIG) indicates giant ≥ 2.00 inch hail.',
+  wind: 'Damaging Wind: High-velocity convective downdrafts producing damaging straight-line gusts exceeding 50 knots (58 mph). Risk assesses local downburst/squall line potential.',
+  flood: 'Excessive Rainfall & Flooding: Intense convective precipitation rates exceeding local soil infiltration or drainage capacity, resulting in rapid runoff and flash flooding.',
+};
 
 function HazardCard({
   hazardKey,
@@ -89,50 +147,98 @@ function HazardCard({
     ? describePeakLocation(snapshot, artifactPeakLocation.lat, artifactPeakLocation.lon)
     : describeFallbackLocation(snapshot);
 
+  const HazardIcon = HAZARD_ICONS[hazardKey];
+
   return (
-    <div className="border-[3px] border-ink bg-paper shadow-retro flex flex-col">
-      <div className="flex items-center justify-between border-b-[3px] border-ink px-3 py-2 bg-ink text-paper">
-        <div className="flex items-center gap-2">
-          <span className="text-xl leading-none">{meta.glyph}</span>
-          <span className="font-display font-extrabold uppercase text-sm tracking-wider">
+    <div className="relative border-[3px] border-ink bg-paper shadow-retro hover:shadow-retro-lg hover:-translate-y-1 transition-all duration-200 flex flex-col cursor-default group overflow-visible">
+      <div className="flex items-center justify-between border-b-[3px] border-ink px-3 py-2.5 bg-ink text-paper group-hover:bg-signal-amber group-hover:text-ink transition-colors duration-200 relative overflow-visible">
+        <div className="flex items-center gap-2 relative group/tooltip cursor-help select-none">
+          <span className="text-paper group-hover:text-ink transition-colors duration-200 shrink-0">
+            <HazardIcon className="w-5 h-5 transition-transform group-hover/tooltip:scale-110 duration-200" />
+          </span>
+          <span className="font-display font-extrabold uppercase text-xs tracking-wider border-b border-dashed border-paper/30 group-hover:border-ink/30 group-hover/tooltip:text-signal-amber transition-colors duration-150">
             {meta.label}
           </span>
+          
+          {/* Neo-Brutalist Floating Tooltip */}
+          <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-2.5 w-60 scale-90 opacity-0 transition-all duration-200 group-hover/tooltip:scale-100 group-hover/tooltip:opacity-100 origin-bottom-left">
+            <div className="border-[2px] border-signal-amber bg-ink text-signal-lime px-2.5 py-1.5 font-mono text-[9.5px] leading-normal shadow-[4px_4px_0_0_#9ad62a] text-left normal-case tracking-normal">
+              {HAZARD_DESCRIPTIONS[hazardKey]}
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5 shrink-0 select-none">
           {hz?.significantSevere && !isArtifact && (
-            <span className="font-display font-extrabold text-[9px] tracking-widest border-[2px] border-signal-red bg-signal-red text-paper px-1 py-0.5">
-              SIG
+            <span className="font-display font-extrabold text-[8px] tracking-widest border-[2px] border-signal-red bg-signal-red text-paper px-1 py-0.5 animate-pulse shadow-retro-xs flex items-center gap-0.5">
+              <LightningIcon /> SIG
             </span>
           )}
           <span
-            className={`font-display font-extrabold text-[11px] tracking-widest border-[2px] border-paper px-1.5 py-0.5 ${riskMeta.tw}`}
+            className={`font-display font-extrabold text-[10px] tracking-widest border-[2px] border-paper px-1.5 py-0.5 shadow-retro-xs ${riskMeta.tw}`}
           >
             {riskMeta.chipText}
           </span>
         </div>
       </div>
-      <div className="p-3 flex flex-col gap-3">
-        {/* Probability */}
-        <div>
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 font-mono text-[10px] uppercase tracking-widest text-ink/60">
-            <span className="min-w-0 truncate pr-1">Probability</span>
-            <span className="min-w-[4.25rem] max-w-full overflow-hidden text-right">
-              <span className="block whitespace-nowrap font-display text-[clamp(1.25rem,1.8vw,1.5rem)] font-extrabold text-ink leading-none tabular-nums">{probPct}</span>
-              <span className="mt-1 block max-w-[8.5rem] truncate font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-ink/65 sm:max-w-[9.5rem]">
-                {location}
+      
+      {/* Body container with relative and overflow-hidden for the sliding overlay */}
+      <div className="relative overflow-hidden flex-1 flex flex-col">
+        <div className="p-3.5 flex flex-col gap-3.5 bg-paper/50 flex-1">
+          {/* Probability display */}
+          <div className="flex flex-col">
+            <div className="flex items-start justify-between">
+              <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                PROBABILITY
               </span>
-            </span>
+              <div className="text-right">
+                <span className="block whitespace-nowrap font-display text-[26px] font-extrabold text-ink leading-none tracking-tight tabular-nums">
+                  {probPct}
+                </span>
+                <span className="mt-1 flex items-center gap-1 justify-end font-mono text-[8px] font-bold uppercase tracking-wider text-ink/50 max-w-[12rem]" title={location}>
+                  <MapPinIcon /> <span className="truncate">{location}</span>
+                </span>
+              </div>
+            </div>
+            <ProgressBar value={probability} type="probability" />
           </div>
-          <ProgressBar value={probability} fillClass="bg-signal-red" />
-        </div>
-        {/* Confidence */}
-        <div>
-          <div className="flex items-baseline justify-between font-mono text-[10px] uppercase tracking-widest text-ink/60">
-            <span>Confidence</span>
-            <span className="font-mono text-[12px] font-bold text-ink">{confPct}%</span>
+
+          {/* Confidence display */}
+          <div className="flex flex-col">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                CONFIDENCE
+              </span>
+              <span className="font-mono text-[11px] font-extrabold text-ink tracking-wide">
+                {confPct}%
+              </span>
+            </div>
+            <ProgressBar value={hz?.confidence ?? 0} type="confidence" segments={10} />
           </div>
-          <ProgressBar value={hz?.confidence ?? 0} fillClass="bg-ink" segments={10} />
         </div>
+
+        {/* Sliding meteorological explanation overlay on hover */}
+        {hz && (
+          <div className="absolute inset-0 bg-ink/95 text-paper p-3.5 font-mono text-[10px] leading-relaxed flex flex-col justify-between translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out z-10 select-none">
+            <div className="flex flex-col gap-1.5 overflow-y-auto max-h-[110px] scrollbar-thin pr-1">
+              <div className="font-display font-extrabold text-[9px] uppercase tracking-wider text-signal-amber border-b border-paper/20 pb-0.5 mb-1.5 flex items-center gap-1.5">
+                <BroadcastIcon /> METEOROLOGICAL REASONING
+              </div>
+              <p className="text-paper/90 text-[10.5px]">
+                {artifactUnavailable
+                  ? 'Selected cycle hazard data is currently offline or unavailable.'
+                  : hz.explanation || 'No hazard description details are available for this forecast hour.'}
+              </p>
+            </div>
+            {hz.supporting && hz.supporting.length > 0 && !artifactUnavailable && (
+              <div className="mt-2 pt-2 border-t border-paper/10">
+                <span className="block font-bold text-[8px] tracking-widest text-signal-amber mb-0.5">SUPPORTING VARIABLES</span>
+                <span className="block text-[8px] text-paper/70 truncate uppercase tracking-wider">
+                  {hz.supporting.join(' · ')}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -188,23 +294,42 @@ function distance(latA: number, lonA: number, latB: number, lonB: number): numbe
 
 function ProgressBar({
   value,
-  fillClass,
+  type = 'probability',
   segments = 16,
 }: {
   value: number;
-  fillClass: string;
+  type?: 'probability' | 'confidence';
   segments?: number;
 }) {
   return (
-    <div className="mt-1 h-2 border-[2px] border-ink bg-paper relative overflow-hidden">
-      {Array.from({ length: segments }).map((_, i) => (
-        <div
-          key={i}
-          className={`absolute top-0 h-full ${i / segments < value ? fillClass : ''}`}
-          style={{ left: `${(i / segments) * 100}%`, width: `${100 / segments - 0.4}%` }}
-          aria-hidden
-        />
-      ))}
+    <div className="mt-1.5 h-3.5 border-[2px] border-ink bg-ink/5 p-[1.5px] relative overflow-hidden flex gap-[2px] shadow-retro-xs">
+      {Array.from({ length: segments }).map((_, i) => {
+        const isActive = i / segments < value;
+        let colorClass = 'bg-paper-dark/15'; // inactive segment
+        if (isActive) {
+          if (type === 'probability') {
+            if (i < segments * 0.4) {
+              colorClass = 'bg-emerald-500 border-t border-emerald-300';
+            } else if (i < segments * 0.7) {
+              colorClass = 'bg-yellow-500 border-t border-yellow-300';
+            } else if (i < segments * 0.9) {
+              colorClass = 'bg-orange-500 border-t border-orange-300';
+            } else {
+              colorClass = 'bg-red-500 border-t border-red-300 animate-pulse';
+            }
+          } else {
+            // Confidence uses solid retro ink bars
+            colorClass = 'bg-ink border-t border-ink/40';
+          }
+        }
+        return (
+          <div
+            key={i}
+            className={`h-full flex-1 transition-all duration-300 ${colorClass}`}
+            aria-hidden
+          />
+        );
+      })}
     </div>
   );
 }

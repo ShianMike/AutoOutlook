@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
 import { useOutlookArtifacts } from './hooks/useOutlookArtifacts';
-import { FORECAST_HOUR_LABELS } from './types/forecast';
+import { FORECAST_HOUR_LABELS, type ActiveRegion, type PhilippineRegionPane } from './types/forecast';
 
 import DashboardSidebar from './components/DashboardSidebar';
 import CommandHeader from './components/CommandHeader';
@@ -47,10 +47,13 @@ function viewFromHash(): AppView {
 }
 
 export default function App() {
-  const auto = useAutoForecast();
+  const [activeRegion, setActiveRegion] = useState<ActiveRegion>('conus');
+  const [activePhilippinePane, setActivePhilippinePane] = useState<PhilippineRegionPane>('national');
+
+  const auto = useAutoForecast(activeRegion);
   const hour = useForecastHour(auto.bundle);
   const snapshot = hour.snapshot;
-  const outlookArtifacts = useOutlookArtifacts(snapshot?.forecastHour, snapshot?.validTimeISO);
+  const outlookArtifacts = useOutlookArtifacts(snapshot?.forecastHour, snapshot?.validTimeISO, activeRegion);
   const mlDriven = Boolean(auto.bundle?.mlModel?.active && auto.bundle.mlHazardHours);
   const hourLabel = snapshot
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
@@ -143,6 +146,10 @@ export default function App() {
               isPlaying={hour.isPlaying}
               onIndexChange={hour.setIndex}
               setPlaying={hour.setPlaying}
+              activeRegion={activeRegion}
+              setActiveRegion={setActiveRegion}
+              activePhilippinePane={activePhilippinePane}
+              setActivePhilippinePane={setActivePhilippinePane}
             />
           </section>
 
@@ -206,7 +213,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v0.4
+              AutoOutlook · Automated Convective Risk Intelligence · v0.5
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

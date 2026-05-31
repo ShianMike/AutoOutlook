@@ -190,12 +190,18 @@ def _ecmwf_messages_to_fields(messages: list[dict[str, Any]]) -> tuple[np.ndarra
     if lons.ndim > 1:
         lons = lons[0, :]
 
+    # Sort longitudes monotonically to prevent contouring wraps/artifacts across the 180/-180 seam
+    sort_idx = np.argsort(lons)
+    lons = lons[sort_idx]
+
     fields: dict[str, np.ndarray] = {}
 
     for msg in messages:
         cat = msg.get("category")
         param = msg.get("parameter")
         vals = np.asarray(msg.get("values"), dtype=float)
+        if vals.ndim == 2:
+            vals = vals[:, sort_idx]
         
         # Standard GRIB2 mapping for ECMWF HRES:
         if cat == 7 and param == 6: # CAPE (Surface)

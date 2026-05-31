@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ActiveRegion } from '../types/forecast';
 import type {
   OutlookArtifacts,
   OutlookArtifactFeatureCollection,
@@ -29,8 +30,10 @@ const HOUR_MS = 60 * 60 * 1000;
 const VALID_TIME_TOLERANCE_MS = 20 * 60 * 1000;
 const PREFETCH_RADIUS = 6;
 
-async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(apiUrl(url), { signal, cache: 'no-store' });
+async function fetchJson<T>(url: string, signal?: AbortSignal, activeRegion?: ActiveRegion): Promise<T> {
+  const separator = url.includes('?') ? '&' : '?';
+  const finalUrl = activeRegion ? `${url}${separator}region=${activeRegion}` : url;
+  const response = await fetch(apiUrl(finalUrl), { signal, cache: 'no-store' });
   if (response.status === 404) {
     throw new Error('artifact_missing');
   }
@@ -279,6 +282,7 @@ function incrementalCacheKey(incremental: OutlookIncrementalIndex): string {
 export function useOutlookArtifacts(
   selectedForecastHour?: number,
   selectedValidTimeISO?: string,
+  activeRegion: ActiveRegion = 'conus',
   refreshMs = 15 * 1000,
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
@@ -412,6 +416,8 @@ export function useOutlookArtifacts(
         if (riskPolygonCacheRef.current.has(forecastHour)) return;
         const riskPolygons = await fetchJson<OutlookArtifactFeatureCollection>(
           `/api/outlook/incremental/hour/${forecastHour}/risk-polygons`,
+          undefined,
+          activeRegion,
         );
         if (!isMountedRef.current || cacheCycleRef.current !== cacheKey) return;
         riskPolygonCacheRef.current.set(forecastHour, riskPolygons);
@@ -463,8 +469,8 @@ export function useOutlookArtifacts(
         prefetchingHoursRef.current.add(displayHour);
         try {
           const [tile, hourMetadata] = await Promise.all([
-            fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactHour}/probability-tile`),
-            fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactHour}/metadata`).catch(() => undefined),
+            fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactHour}/probability-tile`, undefined, activeRegion),
+            fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactHour}/metadata`, undefined, activeRegion).catch(() => undefined),
           ]);
           if (!isMountedRef.current || cacheCycleRef.current !== cacheKey) return;
           const probabilityHour = displayProbabilityHourForSelectedHour(
@@ -498,7 +504,7 @@ export function useOutlookArtifacts(
         });
       }
       try {
-        const incremental = await fetchJson<OutlookIncrementalIndex>('/api/outlook/incremental', controller.signal)
+        const incremental = await fetchJson<OutlookIncrementalIndex>('/api/outlook/incremental', controller.signal, activeRegion)
           .catch(() => undefined);
         if (incremental && selectedForecastHour !== undefined) {
           const cacheKey = resetProbabilityCacheIfNeeded(incremental);
@@ -528,9 +534,9 @@ export function useOutlookArtifacts(
             }
             void prefetchNeighborProbabilityTiles(incremental, cacheKey);
             const [riskPolygons, hourMetadata, timelineSummary] = await Promise.all([
-              fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/incremental/hour/${artifactForecastHour}/risk-polygons`, controller.signal),
-              fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactForecastHour}/metadata`, controller.signal).catch(() => undefined),
-              fetchJson<OutlookIncrementalSummary>('/api/outlook/incremental/summary', controller.signal).catch(() => undefined),
+              fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/incremental/hour/${artifactForecastHour}/risk-polygons`, controller.signal, activeRegion),
+              fetchJson<OutlookArtifactMetadata>(`/api/outlook/incremental/hour/${artifactForecastHour}/metadata`, controller.signal, activeRegion).catch(() => undefined),
+              fetchJson<OutlookIncrementalSummary>('/api/outlook/incremental/summary', controller.signal, activeRegion).catch(() => undefined),
             ]);
             riskPolygonCacheRef.current.set(artifactForecastHour, riskPolygons);
             const displayRiskPolygons = displayRiskPolygonsForSelectedHour(riskPolygons, selectedForecastHour, selectedValidTimeISO);
@@ -563,7 +569,7 @@ export function useOutlookArtifacts(
             }
             let tile: OutlookProbabilityTile;
             try {
-              tile = await fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactForecastHour}/probability-tile`, controller.signal);
+              tile = await fetchJson<OutlookProbabilityTile>(`/api/outlook/incremental/hour/${artifactForecastHour}/probability-tile`, controller.signal, activeRegion);
             } catch {
               return;
             }
@@ -654,10 +660,10 @@ export function useOutlookArtifacts(
         }
 
         const [metadata, riskPolygons, aggregateRiskPolygons, probabilityTiles] = await Promise.all([
-          fetchJson<OutlookArtifactMetadata>('/api/outlook/latest', controller.signal),
-          fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/risk-polygons', controller.signal),
-          fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/aggregate-risk-polygons', controller.signal).catch(() => undefined),
-          fetchJson<OutlookProbabilityTiles>('/api/outlook/probability-tiles', controller.signal).catch(() => undefined),
+          fetchJson<OutlookArtifactMetadata>('/api/outlook/latest', controller.signal, activeRegion),
+          fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/risk-polygons', controller.signal, activeRegion),
+          fetchJson<OutlookArtifactFeatureCollection>('/api/outlook/aggregate-risk-polygons', controller.signal, activeRegion).catch(() => undefined),
+          fetchJson<OutlookProbabilityTiles>('/api/outlook/probability-tiles', controller.signal, activeRegion).catch(() => undefined),
         ]);
         const displayProbabilityTiles = probabilityTilesWithDisplayedHour(
           probabilityTiles,
@@ -685,7 +691,7 @@ export function useOutlookArtifacts(
           status: message === 'artifact_missing' ? 'missing' : 'error',
           artifacts: null,
           message: message === 'artifact_missing'
-            ? 'Generated HRRR/XGBoost outlook artifacts are not available yet.'
+            ? `Generated ${activeRegion === 'philippines' ? 'ECMWF' : 'HRRR'}/XGBoost outlook artifacts are not available yet.`
             : `Generated outlook artifact fetch failed: ${message}`,
         };
         setState((previous) => preserveReadySelectedHour(previous, selectedForecastHour, nextState));
@@ -702,7 +708,7 @@ export function useOutlookArtifacts(
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [refreshMs, selectedForecastHour, selectedValidTimeISO]);
+  }, [refreshMs, selectedForecastHour, selectedValidTimeISO, activeRegion]);
 
   return state;
 }

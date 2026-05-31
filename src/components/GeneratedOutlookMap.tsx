@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { HourSnapshot, RiskCategory, UpperAirVector } from '../types/forecast';
+import type { ActiveRegion, HourSnapshot, PhilippineRegionPane, RiskCategory, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts, OutlookArtifactFeatureCollection, ArtifactRiskCategory } from '../types/outlookArtifacts';
 import {
   artifactRiskShapesToFeatureCollection,
@@ -11,6 +11,7 @@ import {
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
+import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -21,7 +22,13 @@ interface GeneratedOutlookMapProps {
   status: ArtifactState;
   artifacts: OutlookArtifacts | null;
   message: string | null;
-  activeRegion?: 'conus' | 'philippines';
+  activeRegion?: ActiveRegion;
+  philippinePane?: PhilippineRegionPane;
+}
+
+function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
+  if (activeRegion !== 'philippines') return 'HRRR';
+  return 'ECMWF';
 }
 
 interface UpperAirFeature {
@@ -222,12 +229,21 @@ function riskPolygonsForHour(
   return { ...collection, features };
 }
 
-export default function GeneratedOutlookMap({ snapshot, status, artifacts, message, activeRegion = 'conus' }: GeneratedOutlookMapProps) {
+export default function GeneratedOutlookMap({
+  snapshot,
+  status,
+  artifacts,
+  message,
+  activeRegion = 'conus',
+  philippinePane = 'national',
+}: GeneratedOutlookMapProps) {
   const isPhil = activeRegion === 'philippines';
-  const geoUrl = isPhil ? '/world-110m.json' : STATES_URL;
+  const modelLabel = generatedModelLabel(activeRegion, artifacts);
+  const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
+  const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
   const projection = isPhil ? 'geoMercator' : 'geoAlbers';
   const projectionConfig = isPhil
-    ? { center: [121.8, 12.5] as [number, number], scale: 2800 }
+    ? { center: activePhilippinePane.center, scale: activePhilippinePane.scale }
     : {
         rotate: [96, 0, 0] as [number, number, number],
         center: [0, 38] as [number, number],
@@ -317,7 +333,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
     <div className="outlook-export-map-card border-[3px] border-ink bg-paper shadow-retro flex flex-col">
       <header className="min-h-[40px] border-b-[2px] border-ink bg-ink text-paper px-3 py-2 flex items-center justify-between gap-3 overflow-visible">
         <span className="shrink-0 whitespace-nowrap pr-3 font-display font-extrabold uppercase text-[13px] leading-none tracking-normal">
-          HRRR/XGBoost Risk Levels
+          {`${modelLabel}/XGBoost Risk Levels`}
         </span>
         <div className="flex shrink-0 items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
@@ -421,7 +437,7 @@ export default function GeneratedOutlookMap({ snapshot, status, artifacts, messa
             {({ geographies }) =>
               geographies.map((geo) => (
                 <Geography
-                  key={`generated-outline-${geo.rsmKey}`}
+                  key={`generated-state-outline-${geo.rsmKey}`}
                   geography={geo}
                   style={{
                     default: { fill: 'none', stroke: '#8f8f8f', strokeWidth: 0.7, strokeOpacity: 0.85, outline: 'none' },

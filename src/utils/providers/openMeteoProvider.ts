@@ -2,6 +2,7 @@
 // for raw fields, then derives ingredients + runs the standard engines.
 
 import type {
+  ActiveRegion,
   CityMarker,
   ForecastBundle,
   ForecastProvider,
@@ -11,7 +12,7 @@ import type {
   SignalStrength,
   StormMode,
 } from '../../types/forecast';
-import { FORECAST_HOURS } from '../../types/forecast';
+import { HRRR_FORECAST_HOURS, ECMWF_FORECAST_HOURS } from '../../types/forecast';
 import { buildOutlook } from '../outlookEngine';
 import { buildHazards } from '../hazardEngine';
 import { buildRiskPolygons } from '../polygonBuilder';
@@ -22,9 +23,9 @@ import {
 } from '../ingredientsDerive';
 import { applyLeadTimeUncertainty } from '../leadTimeUncertainty';
 
-// Sample grid across CONUS - kept small so a single browser doesn't burn
+// Sample grid across CONUS and Philippines - kept small so a single browser doesn't burn
 // through Open-Meteo's free quota.
-const SAMPLE_POINTS: { name: string; lat: number; lon: number; states: string[] }[] = [
+const CONUS_SAMPLE_POINTS = [
   { name: 'Central Plains',     lat: 36.0,  lon: -98.0,  states: ['OK', 'KS', 'TX'] },
   { name: 'Mid-South',          lat: 35.0,  lon: -90.0,  states: ['AR', 'TN', 'MS'] },
   { name: 'Southern Plains',    lat: 32.5,  lon: -98.0,  states: ['TX', 'LA'] },
@@ -32,20 +33,25 @@ const SAMPLE_POINTS: { name: string; lat: number; lon: number; states: string[] 
   { name: 'Southeast',          lat: 33.0,  lon: -85.0,  states: ['AL', 'GA', 'FL'] },
 ];
 
-const ENDPOINT = 'https://api.open-meteo.com/v1/gfs';
+const PHILIPPINES_SAMPLE_POINTS = [
+  { name: 'Manila / Central Luzon', lat: 14.6,  lon: 121.0,  states: [] },
+  { name: 'Cebu / Central Visayas', lat: 10.3,  lon: 123.9,  states: [] },
+  { name: 'Davao / East Mindanao',  lat: 7.1,   lon: 125.6,  states: [] },
+  { name: 'Baguio / North Luzon',   lat: 16.4,  lon: 120.6,  states: [] },
+  { name: 'Tacloban / East Visayas',lat: 11.2,  lon: 125.0,  states: [] },
+];
+
+const GFS_ENDPOINT = 'https://api.open-meteo.com/v1/gfs';
+const ECMWF_ENDPOINT = 'https://api.open-meteo.com/v1/ecmwf';
 const OPEN_METEO_CACHE_MS = 30 * 60 * 1000;
 const OPEN_METEO_RATE_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
 
-let cachedBundle: ForecastBundle | null = null;
-let cacheExpiresAt = 0;
+// Cached bundles for each region
+let cachedBundles: Record<string, ForecastBundle | null> = {};
+let cacheExpiresAtMap: Record<string, number> = {};
 let rateLimitCooldownUntil = 0;
 
-// Hours to request (matches FORECAST_HOURS).
-const HOURS = FORECAST_HOURS;
-
 // Open-Meteo "hourly" variables we need.
-// NOTE: Open-Meteo's GFS endpoint exposes precipitable water as
-// `total_column_integrated_water_vapour` (kg/m²), NOT `precipitable_water`.
 const HOURLY_VARS = [
   'cape',
   'convective_inhibition',
@@ -94,25 +100,32 @@ class OpenMeteoRateLimitError extends Error {
 async function fetchPoint(
   lat: number,
   lon: number,
+  activeRegion: ActiveRegion,
   signal?: AbortSignal,
 ): Promise<ApiResponse> {
-  const url = new URL(ENDPOINT);
+  const isPhil = activeRegion === 'philippines';
+  const endpoint = isPhil ? ECMWF_ENDPOINT : GFS_ENDPOINT;
+  const url = new URL(endpoint);
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
   url.searchParams.set('hourly', HOURLY_VARS.join(','));
   url.searchParams.set('windspeed_unit', 'kn');
   url.searchParams.set('temperature_unit', 'fahrenheit');
-  url.searchParams.set('forecast_days', '3');
+  url.searchParams.set('forecast_days', isPhil ? '4' : '3');
   const res = await fetch(url.toString(), { signal });
   if (res.status === 429) throw new OpenMeteoRateLimitError();
   if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
   return (await res.json()) as ApiResponse;
 }
 
-async function fetchSamplePoints(signal?: AbortSignal): Promise<ApiResponse[]> {
+async function fetchSamplePoints(
+  samplePoints: typeof CONUS_SAMPLE_POINTS,
+  activeRegion: ActiveRegion,
+  signal?: AbortSignal,
+): Promise<ApiResponse[]> {
   const responses: ApiResponse[] = [];
-  for (const point of SAMPLE_POINTS) {
-    responses.push(await fetchPoint(point.lat, point.lon, signal));
+  for (const point of samplePoints) {
+    responses.push(await fetchPoint(point.lat, point.lon, activeRegion, signal));
   }
   return responses;
 }
@@ -363,7 +376,7 @@ function scorePointAtHour(resp: ApiResponse, baseISO: string, hour: number): num
   return (cape / 2000) * (shear / 30) * (Math.max(0, td - 50) / 15) * capPenalty * init;
 }
 
-function regionFromPoint(p: typeof SAMPLE_POINTS[number]): Region {
+function regionFromPoint(p: { name: string; lat: number; lon: number; states: string[] }): Region {
   return {
     label: p.name,
     centerLat: p.lat,
@@ -376,8 +389,16 @@ function regionFromPoint(p: typeof SAMPLE_POINTS[number]): Region {
 export const openMeteoProvider: ForecastProvider = {
   id: 'openMeteo',
   label: 'Open-Meteo GFS',
-  async fetchBundle(signal?: AbortSignal): Promise<ForecastBundle> {
+  async fetchBundle(signal?: AbortSignal, activeRegion: ActiveRegion = 'conus'): Promise<ForecastBundle> {
+    const isPhil = activeRegion === 'philippines';
+    const samplePoints = isPhil ? PHILIPPINES_SAMPLE_POINTS : CONUS_SAMPLE_POINTS;
+    const hoursToFetch = isPhil ? ECMWF_FORECAST_HOURS : HRRR_FORECAST_HOURS;
+    const cacheKey = activeRegion;
+
     const nowMs = Date.now();
+    const cachedBundle = cachedBundles[cacheKey];
+    const cacheExpiresAt = cacheExpiresAtMap[cacheKey] || 0;
+
     if (cachedBundle && nowMs < cacheExpiresAt) return cachedBundle;
     if (nowMs < rateLimitCooldownUntil) {
       throw new Error('Open-Meteo fallback is cooling down after rate limiting');
@@ -386,7 +407,7 @@ export const openMeteoProvider: ForecastProvider = {
     const t0 = performance.now();
     let responses: ApiResponse[];
     try {
-      responses = await fetchSamplePoints(signal);
+      responses = await fetchSamplePoints(samplePoints, activeRegion, signal);
     } catch (err) {
       if (err instanceof OpenMeteoRateLimitError) {
         rateLimitCooldownUntil = Date.now() + OPEN_METEO_RATE_LIMIT_COOLDOWN_MS;
@@ -397,12 +418,12 @@ export const openMeteoProvider: ForecastProvider = {
     const baseDate = new Date();
     const baseISO = baseDate.toISOString();
     const hours: HourSnapshot[] = [];
-    HOURS.forEach((h, i) => {
+    hoursToFetch.forEach((h, i) => {
       const scored = responses
         .map((resp, idx) => ({ idx, score: scorePointAtHour(resp, baseISO, h) }))
         .sort((a, b) => b.score - a.score);
       const winnerIdx = scored[0]?.idx ?? 0;
-      const region = regionFromPoint(SAMPLE_POINTS[winnerIdx]);
+      const region = regionFromPoint(samplePoints[winnerIdx]);
       const snap = snapshotFromPoint(i, h, baseISO, responses[winnerIdx], region);
       if (snap) hours.push(snap);
     });
@@ -418,17 +439,21 @@ export const openMeteoProvider: ForecastProvider = {
     const t1 = performance.now();
 
     const bundle: ForecastBundle = {
-      cycle: `GFS ${String(cycleHourUTC).padStart(2, '0')}Z ${issued.toISOString().slice(0, 10)}`,
+      cycle: isPhil
+        ? `ECMWF ${String(cycleHourUTC).padStart(2, '0')}Z ${issued.toISOString().slice(0, 10)}`
+        : `GFS ${String(cycleHourUTC).padStart(2, '0')}Z ${issued.toISOString().slice(0, 10)}`,
       issuedAtISO: issued.toISOString(),
       hours,
       source: 'live',
       providerId: 'openMeteo',
-      providerNotes: 'Open-Meteo GFS — moving hourly focus region',
+      providerNotes: isPhil
+        ? 'Open-Meteo ECMWF — moving 3-hourly focus region'
+        : 'Open-Meteo GFS — moving hourly focus region',
       latencyMs: Math.round(t1 - t0),
       fetchedAtISO: baseDate.toISOString(),
     };
-    cachedBundle = bundle;
-    cacheExpiresAt = Date.now() + OPEN_METEO_CACHE_MS;
+    cachedBundles[cacheKey] = bundle;
+    cacheExpiresAtMap[cacheKey] = Date.now() + OPEN_METEO_CACHE_MS;
     return bundle;
   },
 };

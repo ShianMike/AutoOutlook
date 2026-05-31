@@ -21,6 +21,9 @@ export function clipOrganizedSevereCenter(lon: number, lat: number): [number, nu
 }
 
 function clipToCoastalLand(lon: number, lat: number, inlandMargin: number): [number, number] {
+  if (lon > 0) {
+    return [lon, lat];
+  }
   let clippedLon = Math.max(-125, Math.min(-66, lon));
   let clippedLat = Math.max(24, Math.min(50, lat));
 

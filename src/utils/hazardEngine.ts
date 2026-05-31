@@ -38,7 +38,12 @@ const WIND_HAIL_THRESHOLDS: [number, RiskCategory][] = [
 
 // Flood is not an SPC categorical hazard but we map it analogously to
 // wind/hail so AutoOutlook can show a consistent flood outlook.
-const FLOOD_THRESHOLDS: [number, RiskCategory][] = WIND_HAIL_THRESHOLDS;
+const FLOOD_THRESHOLDS: [number, RiskCategory][] = [
+  [0.45, 'HIGH'],
+  [0.30, 'MOD'],
+  [0.15, 'SLGT'],
+  [0.05, 'MRGL'],
+];
 
 const HAZARD_THRESHOLD_TABLE: Record<HazardKey, [number, RiskCategory][]> = {
   tornado: TOR_THRESHOLDS,
@@ -281,47 +286,67 @@ function windEval(ing: Ingredients): RawHazard {
 }
 
 // ── Flood evaluation ────────────────────────────────────────────────
-// Key ingredients: PWAT, moisture proxy, and slow/repeating storm motion.
-// High PWAT alone can produce heavy rain, but fast storm motions should not
-// promote a broad flood probability without a training signal.
+// Key ingredients based on hydrometeorological flash flood forecasting principles:
+// 1. Moisture & Precipitation Efficiency (warm cloud depth and high precipitable water)
+// 2. Convective Instability (high CAPE supporting extreme rainfall rates)
+// 3. Duration & Echo Training (slow steering flow / low shear and training storm modes)
+// 4. Initiation & Uplift Forcing
 function floodEval(ing: Ingredients): RawHazard {
-  const pwatTerm  = Math.min(ing.pwatIn / 2.0, 1) * 0.15;
-  const depthTerm = Math.min(ing.moistureDepthM / 3500, 1) * 0.06;
-  const capeTerm  = Math.min(ing.mlcape / 2500, 1) * 0.04;
-  const motionFactor =
-    ing.shear06Kt < 20 ? 1.00 :
-    ing.shear06Kt < 30 ? 0.82 :
-    ing.shear06Kt < 45 ? 0.65 :
-    ing.shear06Kt < 60 ? 0.50 : 0.40;
+  // 1. Moisture & Precipitation Efficiency
+  const pwatFactor = clamp01((ing.pwatIn - 0.75) / (2.2 - 0.75));
+  const lclFactor = clamp01((2200 - ing.lclM) / (2200 - 600));
+  const tdFactor = clamp01((ing.sfcDewpointF - 52) / (72 - 52));
+  const moistureScore = 0.5 * pwatFactor + 0.3 * tdFactor + 0.2 * lclFactor;
+
+  // 2. Convective Instability (potential rainfall intensity)
+  const capeScore = clamp01(ing.mucape / 3000);
+
+  // 3. Storm Duration & Echo Training Potential
+  // Slow steering flow (low shear) increases point rainfall duration.
+  const motionScore =
+    ing.shear06Kt < 15 ? 1.00 :
+    ing.shear06Kt < 25 ? 0.88 :
+    ing.shear06Kt < 40 ? 0.65 :
+    ing.shear06Kt < 55 ? 0.45 : 0.25;
+  
+  // Linear squall lines (training echo systems) or Multicell clusters are highly prone to training/back-building.
+  const modeScore =
+    ing.stormMode === 'linear' ? 1.00 :
+    ing.stormMode === 'multicell' ? 0.85 :
+    ing.stormMode === 'mixed' ? 0.60 : 0.35;
+
+  const durationScore = 0.5 * motionScore + 0.5 * modeScore;
+
+  // 4. Dynamic Forcing and Initiation modifier
+  const initFactor = initiationModifier(ing, 0.40);
+
+  // Physically grounded Flash Flood Potential (FFP) raw index
+  const raw = (0.45 * moistureScore + 0.20 * capeScore + 0.35 * durationScore) * initFactor;
+
+  // Dynamic cap limits flooding without supporting echo-training or extreme moisture
   const trainSignal = ing.shear06Kt < 30 || ing.stormMode === 'linear' || ing.stormMode === 'multicell';
-  // Low shear + high CAPE → slow-moving cells that train over the same area.
-  const trainBoost = ing.shear06Kt < 25 && ing.mlcape > 1500 ? 0.045 : 0;
-  const modeBoost  = ing.stormMode === 'linear' ? 0.02 :
-                     ing.stormMode === 'multicell' ? 0.015 : 0;
-  const raw = (pwatTerm + depthTerm + capeTerm + trainBoost + modeBoost) * initiationModifier(ing, 0.38) * motionFactor;
-  const broadFloodCap = trainSignal || ing.pwatIn >= 2.10 ? 0.24 : 0.10;
+  const broadFloodCap = trainSignal || ing.pwatIn >= 2.10 ? 0.48 : 0.15;
   const probability = clamp01(Math.min(raw, broadFloodCap));
 
-  // This is not SPC "significant severe"; keep the board from showing SIG
-  // for flooding. The probability itself communicates the flood concern.
-  const sigBase = 0;
-  const sigSevereProb = clamp01(sigBase);
+  // Flood does not map to significant severe SPC wind/hail categories
+  const sigSevereProb = 0;
 
   const supporting: string[] = [];
-  if (ing.pwatIn >= 1.4)         supporting.push(`PWAT ${ing.pwatIn.toFixed(2)} in`);
-  if (ing.moistureDepthM >= 3000) supporting.push(`PWAT moisture proxy ${Math.round(ing.moistureDepthM)} m`);
+  if (ing.pwatIn >= 1.35)         supporting.push(`PWAT ${ing.pwatIn.toFixed(2)} in`);
+  if (ing.sfcDewpointF >= 62)     supporting.push(`Sfc Dewpoint ${Math.round(ing.sfcDewpointF)}°F`);
+  if (ing.lclM < 1200)            supporting.push(`Low LCL (${Math.round(ing.lclM)} m)`);
+  if (ing.mucape >= 1200)         supporting.push(`MUCAPE ${Math.round(ing.mucape)} J/kg`);
   if (ing.shear06Kt < 25)         supporting.push('Slow storm motion');
-  if (!trainSignal && ing.pwatIn >= 1.6) supporting.push('Fast flow limits training');
   if (supporting.length === 0)    supporting.push('Limited heavy-rain signals');
 
   const explanation =
     probability >= 0.30
-      ? 'Anomalously high precipitable water with deep moisture and training cells support a significant flash flood threat.'
+      ? 'Extremely high precipitable water, steep warm-cloud depth, and slow-moving, training convection structures support a high flash flooding and excessive rainfall threat.'
       : probability >= 0.15
-      ? 'Above-normal PWAT and a training or repeating-storm signal present a notable flash-flood risk.'
+      ? 'Favorable thermodynamic instability, high precipitable water, and potential for repeating/training convective tracks present a notable flash flood risk.'
       : probability >= 0.05
-      ? 'Localized heavy rainfall is possible with the strongest storms; broader flooding is limited without a stronger training signal.'
-      : 'Heavy-rain threat appears limited given moisture and storm-motion signals.';
+      ? 'Localized heavy rainfall is possible with robust convective cells, but limited storm duration or lower ambient moisture bounds the flash flood potential.'
+      : 'Flash flood threat is low; weak instability, dry tropospheric layers, or fast steering flow bounds precipitation rates and training potential.';
 
   const baseConf = clamp01(0.35 + 0.35 * Math.min(ing.pwatIn / 2.0, 1) + 0.15 * (ing.shear06Kt < 25 ? 1 : 0.4));
   return { probability, sigSevereProb, supporting, explanation, baseConf };

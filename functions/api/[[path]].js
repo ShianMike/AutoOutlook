@@ -24,18 +24,27 @@ function apiHeaders(cacheControl, contentType = 'application/json; charset=utf-8
   };
 }
 
-function resolveStaticPath(pathname) {
+function resolveStaticPath(pathname, region, model = null) {
+  const prefix = region === 'philippines' ? '/_api/philippines' : (region === 'conus' ? '/_api/conus' : '/_api');
+
   const direct = STATIC_ROUTES.get(pathname);
-  if (direct) return direct;
+  if (direct) {
+    return direct.replace('/_api', prefix);
+  }
 
   const match = pathname.match(HOUR_ROUTE);
   if (!match) return null;
 
   const forecastHour = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(forecastHour) || forecastHour < 0 || forecastHour > 48) return null;
+  const maxForecastHour = region === 'philippines' ? 90 : 48;
+  if (!Number.isFinite(forecastHour) || forecastHour < 0 || forecastHour > maxForecastHour) return null;
   const hour = `f${String(forecastHour).padStart(2, '0')}`;
   const name = match[2] === 'risk-polygons' ? 'risk-polygons.geojson' : `${match[2]}.json`;
-  return `/_api/outlook/incremental/hour/${hour}/${name}`;
+
+  if (prefix === '/_api') {
+    return `/_api/outlook/incremental/hour/${hour}/${name}`;
+  }
+  return `${prefix}/outlook/incremental/hour/${hour}/${name}`;
 }
 
 function contentTypeFor(pathname) {
@@ -88,10 +97,27 @@ export async function onRequest(context) {
 
   const url = new URL(context.request.url);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
-  const staticPath = resolveStaticPath(pathname);
+  const region = url.searchParams.get('region');
+
+  const model = url.searchParams.get('model');
+
+  let staticPath = resolveStaticPath(pathname, region, model);
   if (!staticPath) return notReady(pathname);
 
-  const assetResponse = await fetchStaticAsset(context, staticPath);
+  let assetResponse = await fetchStaticAsset(context, staticPath);
+
+  // If regional asset is not found, try falling back to the legacy root asset path
+  if (isMissingAssetResponse(assetResponse) && region) {
+    const fallbackPath = resolveStaticPath(pathname, null, null);
+    if (fallbackPath && fallbackPath !== staticPath) {
+      const fallbackResponse = await fetchStaticAsset(context, fallbackPath);
+      if (!isMissingAssetResponse(fallbackResponse)) {
+        assetResponse = fallbackResponse;
+        staticPath = fallbackPath;
+      }
+    }
+  }
+
   if (isMissingAssetResponse(assetResponse)) {
     const status = pathname === '/api/forecast' || pathname === '/api/health' ? 503 : 404;
     return notReady(pathname, status);

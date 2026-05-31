@@ -7,7 +7,9 @@
 
 param(
     [switch]$SyncArtifacts,
-    [switch]$SkipArtifactSync
+    [switch]$SkipArtifactSync,
+    [ValidateSet("hrrr", "ecmwf")]
+    [string]$Model = "hrrr"
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,12 +61,21 @@ if ($shouldSyncArtifacts -and $gcloud) {
     Write-Host "  Skipping artifact sync. Local dev will use existing backend\artifacts files." -ForegroundColor Gray
 }
 
+$artifactSuffix = $Model.Replace("-", "_")
+$incrementalArtifactDir = Join-Path $artifactRoot "latest_incremental_$artifactSuffix"
+if (-not (Test-Path $incrementalArtifactDir)) {
+    $incrementalArtifactDir = Join-Path $artifactRoot "latest_incremental"
+}
+
+Write-Host "  Using model artifacts directory: $incrementalArtifactDir" -ForegroundColor Cyan
+
 # Backend: FLASK_DEBUG=1 enables Werkzeug file-watcher; any .py save restarts Flask
 $backendCmd = @"
 Set-Location '$root';
 `$env:FLASK_DEBUG='1';
 `$env:AUTOOUTLOOK_FORECAST_SOURCE='artifact';
 `$env:AUTOOUTLOOK_ENABLE_LIVE_BUILD='false';
+`$env:AUTOOUTLOOK_INCREMENTAL_ARTIFACT_DIR='$incrementalArtifactDir';
 & '$python' -m backend.server
 "@
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd `

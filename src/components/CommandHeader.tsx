@@ -156,6 +156,12 @@ function Stat({ label, value, sub, accent }: { label: string; value: string; sub
   );
 }
 
+const WarningIcon = () => (
+  <svg className="w-3.5 h-3.5 fill-current text-signal-red animate-pulse" viewBox="0 0 24 24">
+    <path d="M12 2L1 21h22L12 2zm0 4l7.53 13H4.47L12 6zm-1 3v4h2V9h-2zm0 6v2h2v-2h-2z" />
+  </svg>
+);
+
 function TickerSpan({
   bundle,
   snapshot,
@@ -176,7 +182,13 @@ function TickerSpan({
   const displayHeadline = snapshot
     ? headline ?? snapshot.outlook.headline
     : 'GENERATING FORECAST HEADLINE';
-  const sigTag = !usingGeneratedArtifacts && snapshot?.outlook.significantSevere ? '► ⚠ SIGNIFICANT SEVERE POSSIBLE' : null;
+  
+  const sigTag = !usingGeneratedArtifacts && snapshot?.outlook.significantSevere ? (
+    <span className="inline-flex items-center gap-1.5 text-signal-red font-extrabold">
+      ► <WarningIcon /> SIGNIFICANT SEVERE POSSIBLE
+    </span>
+  ) : null;
+
   const focus = focusLocationFromSnapshot(snapshot);
   const items = bundle
     ? [
@@ -188,10 +200,11 @@ function TickerSpan({
         `► ${bundle.hours.length} FORECAST HOURS LOADED`,
       ]
     : ['► BOOTING AUTOOUTLOOK', '► LOADING FORECAST PROVIDERS', '► STAND BY'];
+  
   return (
     <div className="flex shrink-0">
       {items.map((t, i) => (
-        <span key={i} className="px-5 py-1">{t}</span>
+        <span key={i} className="px-5 py-1 flex items-center gap-1.5">{t}</span>
       ))}
     </div>
   );

@@ -3,13 +3,14 @@
 // even without live data.
 
 import type {
+  ActiveRegion,
   CityMarker,
   ForecastBundle,
   HourSnapshot,
   Ingredients,
   Region,
 } from '../types/forecast';
-import { FORECAST_HOURS } from '../types/forecast';
+import { HRRR_FORECAST_HOURS, ECMWF_FORECAST_HOURS } from '../types/forecast';
 import { buildOutlook } from './outlookEngine';
 import { buildHazards } from './hazardEngine';
 import { buildRiskPolygons } from './polygonBuilder';
@@ -22,6 +23,14 @@ const REGION: Region = {
   centerLon: -98.5,
   bbox: [-104, 32, -94, 41],
   states: ['OK', 'KS', 'TX', 'AR', 'MO'],
+};
+
+const PHILIPPINES_REGION: Region = {
+  label: 'Philippines — National',
+  centerLat: 12.8797,
+  centerLon: 121.7740,
+  bbox: [115.0, 4.5, 126.5, 21.0],
+  states: [],
 };
 
 const CITIES: { name: string; lat: number; lon: number }[] = [
@@ -37,6 +46,19 @@ const CITIES: { name: string; lat: number; lon: number }[] = [
   { name: 'Joplin',        lat: 37.08, lon: -94.51 },
 ];
 
+const PHILIPPINES_CITIES: { name: string; lat: number; lon: number }[] = [
+  { name: 'Manila',    lat: 14.60, lon: 120.98 },
+  { name: 'Cebu City', lat: 10.32, lon: 123.90 },
+  { name: 'Davao City',lat: 7.07,  lon: 125.61 },
+  { name: 'Quezon City', lat: 14.68, lon: 121.04 },
+  { name: 'Zamboanga', lat: 6.92,  lon: 122.08 },
+  { name: 'Cagayan de Oro', lat: 8.45, lon: 124.63 },
+  { name: 'Baguio',    lat: 16.40, lon: 120.60 },
+  { name: 'Iloilo City', lat: 10.72, lon: 122.56 },
+  { name: 'Tacloban',  lat: 11.24, lon: 125.00 },
+  { name: 'Legazpi',   lat: 13.14, lon: 123.73 },
+];
+
 function regionForIndex(index: number): Region {
   const eastDrift = Math.min(index, 10) * 0.55;
   const northDrift = Math.sin(index * 0.7) * 0.45;
@@ -47,6 +69,19 @@ function regionForIndex(index: number): Region {
     centerLat,
     centerLon,
     bbox: [centerLon - 5.5, centerLat - 3.2, centerLon + 5.5, centerLat + 3.2],
+  };
+}
+
+function philippinesRegionForIndex(index: number): Region {
+  const eastDrift = Math.min(index, 10) * 0.15;
+  const northDrift = Math.sin(index * 0.5) * 0.25;
+  const centerLon = PHILIPPINES_REGION.centerLon - 0.5 + eastDrift;
+  const centerLat = PHILIPPINES_REGION.centerLat + northDrift;
+  return {
+    ...PHILIPPINES_REGION,
+    centerLat,
+    centerLon,
+    bbox: [centerLon - 6.5, centerLat - 8.2, centerLon + 6.5, centerLat + 8.2],
   };
 }
 
@@ -150,13 +185,16 @@ function buildHourSnapshot(
   hour: number,
   baseISO: string,
   index: number,
+  activeRegion: ActiveRegion = 'conus',
 ): HourSnapshot {
   const ing: Ingredients = fillIngredientComposites(interpolateProfile(hour));
   const hazards = buildHazards(ing);
   const outlook = buildOutlook(ing, hazards);
-  const region = regionForIndex(index);
+  const isPhil = activeRegion === 'philippines';
+  const region = isPhil ? philippinesRegionForIndex(index) : regionForIndex(index);
   const validTimeISO = new Date(new Date(baseISO).getTime() + hour * 3600_000).toISOString();
-  const cities: CityMarker[] = CITIES.map((c) => {
+  const citiesList = isPhil ? PHILIPPINES_CITIES : CITIES;
+  const cities: CityMarker[] = citiesList.map((c) => {
     // Distance from region center -> downgrade risk away from core.
     const dLat = Math.abs(c.lat - region.centerLat);
     const dLon = Math.abs(c.lon - region.centerLon);
@@ -181,7 +219,7 @@ function buildHourSnapshot(
   });
 }
 
-export function buildMockBundle(now: Date = new Date()): ForecastBundle {
+export function buildMockBundle(now: Date = new Date(), activeRegion: ActiveRegion = 'conus'): ForecastBundle {
   // Snap "issued" cycle to most recent 6-hour synoptic time for realism.
   const cycleHourUTC = Math.floor(now.getUTCHours() / 6) * 6;
   const issued = new Date(Date.UTC(
@@ -189,15 +227,21 @@ export function buildMockBundle(now: Date = new Date()): ForecastBundle {
     cycleHourUTC, 0, 0, 0,
   ));
   const issuedISO = issued.toISOString();
-  const cycleStr = `HRRR ${String(cycleHourUTC).padStart(2, '0')}Z ${issuedISO.slice(0, 10)}`;
-  const hours = FORECAST_HOURS.map((h, i) => buildHourSnapshot(h, issuedISO, i));
+  const isPhil = activeRegion === 'philippines';
+  const cycleStr = isPhil
+    ? `ECMWF ${String(cycleHourUTC).padStart(2, '0')}Z ${issuedISO.slice(0, 10)}`
+    : `HRRR ${String(cycleHourUTC).padStart(2, '0')}Z ${issuedISO.slice(0, 10)}`;
+  const forecastHours = isPhil ? ECMWF_FORECAST_HOURS : HRRR_FORECAST_HOURS;
+  const hours = forecastHours.map((h, i) => buildHourSnapshot(h, issuedISO, i, activeRegion));
   return {
     cycle: cycleStr,
     issuedAtISO: issuedISO,
     hours,
     source: 'simulated',
     providerId: 'mock',
-    providerNotes: 'Deterministic mock dataset (Central Plains spring severe day)',
+    providerNotes: isPhil
+      ? 'Deterministic mock dataset (Philippines ECMWF severe day)'
+      : 'Deterministic mock dataset (Central Plains spring severe day)',
     latencyMs: 12,
     fetchedAtISO: now.toISOString(),
   };

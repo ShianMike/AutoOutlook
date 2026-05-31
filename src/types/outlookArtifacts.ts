@@ -84,6 +84,7 @@ export interface OutlookArtifactMetadata {
   generatedAtISO: string;
   cycle: string;
   cycleTimeISO?: string;
+  cycleMetadata?: OutlookCycleCheck | null;
   latestExtendedCandidate?: OutlookCycleCheck | null;
   selectedCycleWasFallback?: boolean;
   fallbackReason?: string | null;

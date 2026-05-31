@@ -29,3 +29,5 @@ backend/hrrr_cache_selected/
 .tmp/
 .codex-*.log
 .codex-last-image.txt
+scratch/
+backend/scratch/

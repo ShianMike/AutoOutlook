@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ForecastBundle, HourSnapshot } from '../types/forecast';
 
 const PLAY_INTERVAL_MS = 1500;
-const MAX_FORECAST_HOUR = 48;
+const MAX_FORECAST_HOUR = 90;
 
 export interface ForecastHourState {
   index: number;

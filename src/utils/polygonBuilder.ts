@@ -31,11 +31,16 @@ function organicPoints(
   tiltDeg: number,
   n: number,
   seed: number,
+  bbox?: [number, number, number, number],
 ): [number, number][] {
   const tilt = (tiltDeg * Math.PI) / 180;
   const cos = Math.cos(tilt);
   const sin = Math.sin(tilt);
   const out: [number, number][] = [];
+  const minLon = bbox ? bbox[0] : -125;
+  const minLat = bbox ? bbox[1] : 24;
+  const maxLon = bbox ? bbox[2] : -66;
+  const maxLat = bbox ? bbox[3] : 50;
   for (let i = 0; i < n; i++) {
     const t = (i / n) * Math.PI * 2;
     const wob =
@@ -46,8 +51,8 @@ function organicPoints(
       0.03 * Math.sin(7 * t + seed * 1.8 + 2.2);
     const ex = rLon * wob * Math.cos(t);
     const ey = rLat * wob * Math.sin(t);
-    const lon = Math.max(-125, Math.min(-66, centerLon + (ex * cos - ey * sin)));
-    const lat = Math.max(24, Math.min(50, centerLat + (ex * sin + ey * cos)));
+    const lon = Math.max(minLon, Math.min(maxLon, centerLon + (ex * cos - ey * sin)));
+    const lat = Math.max(minLat, Math.min(maxLat, centerLat + (ex * sin + ey * cos)));
     out.push([lon, lat]);
   }
   return out;
@@ -85,7 +90,7 @@ export function buildRiskPolygons(
     return [
       {
         category: 'TSTM',
-        coords: chaikinSmooth(organicPoints(region.centerLat, region.centerLon, rLat, rLon, tilt, n, 0), 2),
+        coords: chaikinSmooth(organicPoints(region.centerLat, region.centerLon, rLat, rLon, tilt, n, 0, region.bbox), 2),
       },
     ];
   }
@@ -104,7 +109,7 @@ export function buildRiskPolygons(
     const offsetLat = depth * -0.3;
     const cLat = region.centerLat + offsetLat;
     const cLon = region.centerLon + offsetLon;
-    const outer = chaikinSmooth(organicPoints(cLat, cLon, rLat, rLon, tilt, n, idx * 1.3), 2);
+    const outer = chaikinSmooth(organicPoints(cLat, cLon, rLat, rLon, tilt, n, idx * 1.3, region.bbox), 2);
     let hole: [number, number][] | undefined;
     if (idx < ramp.length - 1) {
       const innerFrac = ramp.length <= 1 ? 1 : (ramp.length - (idx + 1)) / ramp.length;
@@ -114,7 +119,7 @@ export function buildRiskPolygons(
       const innerRLon = innerRLat * innerAspect;
       const innerCLat = region.centerLat + innerDepth * -0.3;
       const innerCLon = region.centerLon + innerDepth * 1.0;
-      hole = chaikinSmooth(organicPoints(innerCLat, innerCLon, innerRLat, innerRLon, tilt, n, (idx + 1) * 1.3), 2).reverse();
+      hole = chaikinSmooth(organicPoints(innerCLat, innerCLon, innerRLat, innerRLon, tilt, n, (idx + 1) * 1.3, region.bbox), 2).reverse();
     }
     return { category: cat, coords: outer, hole };
   });

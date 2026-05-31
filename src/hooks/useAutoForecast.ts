@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ForecastBundle } from '../types/forecast';
+import type { ActiveRegion, ForecastBundle } from '../types/forecast';
 import { fetchLatestForecast, type FetchResult } from '../utils/fetchLatestForecast';
 
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
@@ -16,7 +16,7 @@ export interface AutoForecastState {
   refreshNow: () => void;
 }
 
-export function useAutoForecast(): AutoForecastState {
+export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForecastState {
   const [bundle, setBundle] = useState<ForecastBundle | null>(null);
   const [status, setStatus] = useState<FetchStatus>('idle');
   const [attempted, setAttempted] = useState<FetchResult['attemptedProviders']>([]);
@@ -24,33 +24,50 @@ export function useAutoForecast(): AutoForecastState {
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
 
   const isMountedRef = useRef(true);
-  const inflightRef = useRef<Promise<void> | null>(null);
+  const activeRegionRef = useRef(activeRegion);
+  const previousRegionRef = useRef(activeRegion);
+  const inflightRef = useRef<{ region: ActiveRegion; promise: Promise<void> } | null>(null);
+
+  useEffect(() => {
+    activeRegionRef.current = activeRegion;
+    if (previousRegionRef.current !== activeRegion) {
+      setBundle(null);
+      setAttempted([]);
+      setErrorMsg(null);
+      setLastFetchedAt(null);
+      previousRegionRef.current = activeRegion;
+    }
+  }, [activeRegion]);
 
   const doFetch = useCallback(async () => {
-    if (inflightRef.current) return inflightRef.current;
+    const requestRegion = activeRegion;
+    const currentInflight = inflightRef.current;
+    if (currentInflight?.region === requestRegion) return currentInflight.promise;
     setStatus('loading');
     const job = (async () => {
       try {
-        const result = await fetchLatestForecast();
-        if (!isMountedRef.current) return;
+        const result = await fetchLatestForecast(requestRegion);
+        if (!isMountedRef.current || activeRegionRef.current !== requestRegion) return;
         setBundle(result.bundle);
         setAttempted(result.attemptedProviders);
         setLastFetchedAt(new Date());
         setStatus('success');
         setErrorMsg(null);
       } catch (err) {
-        if (!isMountedRef.current) return;
+        if (!isMountedRef.current || activeRegionRef.current !== requestRegion) return;
         setStatus('error');
         setErrorMsg(err instanceof Error ? err.message : String(err));
       }
     })();
-    inflightRef.current = job;
+    inflightRef.current = { region: requestRegion, promise: job };
     try {
       await job;
     } finally {
-      inflightRef.current = null;
+      if (inflightRef.current?.promise === job) {
+        inflightRef.current = null;
+      }
     }
-  }, []);
+  }, [activeRegion]);
 
   useEffect(() => {
     isMountedRef.current = true;

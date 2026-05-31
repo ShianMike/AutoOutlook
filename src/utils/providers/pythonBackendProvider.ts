@@ -3,6 +3,7 @@
 // engines so the displayed outlook stays consistent across providers.
 
 import type {
+  ActiveRegion,
   CityMarker,
   ForecastBundle,
   ForecastProvider,
@@ -58,9 +59,13 @@ interface BackendBundle {
 export const pythonBackendProvider: ForecastProvider = {
   id: 'backend',
   label: 'NOMADS HRRR · siphon + MetPy',
-  async fetchBundle(signal?: AbortSignal): Promise<ForecastBundle> {
+  async fetchBundle(signal?: AbortSignal, activeRegion?: ActiveRegion): Promise<ForecastBundle> {
     const t0 = performance.now();
-    const res = await fetch(ENDPOINT, { signal });
+    const url = new URL(ENDPOINT, window.location.origin);
+    if (activeRegion) {
+      url.searchParams.set('region', activeRegion);
+    }
+    const res = await fetch(url.toString(), { signal, cache: 'no-store' });
     if (!res.ok) throw new Error(`Backend HTTP ${res.status}`);
     const raw = (await res.json()) as BackendBundle;
 

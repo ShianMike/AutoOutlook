@@ -18,7 +18,12 @@ export type TimelinePeriod =
   | 'f013_f018'
   | 'f019_f024'
   | 'f025_f036'
-  | 'f037_f048';
+  | 'f037_f048'
+  | 'f000_f012'
+  | 'f013_f024'
+  | 'f025_f048'
+  | 'f049_f072'
+  | 'f073_f090';
 
 export interface TimelineSegment {
   period: TimelinePeriod;
@@ -42,13 +47,21 @@ export interface TimelineSegment {
   note: string;
 }
 
-const PERIOD_WINDOWS: Array<{ period: TimelinePeriod; label: string; minHour: number; maxHour: number }> = [
+const HRRR_PERIOD_WINDOWS: Array<{ period: TimelinePeriod; label: string; minHour: number; maxHour: number }> = [
   { period: 'f000_f006', label: 'F000-F006', minHour: 0,  maxHour: 6  },
   { period: 'f007_f012', label: 'F007-F012', minHour: 7,  maxHour: 12 },
   { period: 'f013_f018', label: 'F013-F018', minHour: 13, maxHour: 18 },
   { period: 'f019_f024', label: 'F019-F024', minHour: 19, maxHour: 24 },
   { period: 'f025_f036', label: 'F025-F036', minHour: 25, maxHour: 36 },
   { period: 'f037_f048', label: 'F037-F048', minHour: 37, maxHour: 48 },
+];
+
+const ECMWF_PERIOD_WINDOWS: Array<{ period: TimelinePeriod; label: string; minHour: number; maxHour: number }> = [
+  { period: 'f000_f012', label: 'F000-F012', minHour: 0,  maxHour: 12 },
+  { period: 'f013_f024', label: 'F013-F024', minHour: 13, maxHour: 24 },
+  { period: 'f025_f048', label: 'F025-F048', minHour: 25, maxHour: 48 },
+  { period: 'f049_f072', label: 'F049-F072', minHour: 49, maxHour: 72 },
+  { period: 'f073_f090', label: 'F073-F090', minHour: 73, maxHour: 90 },
 ];
 
 const SEVERE_HAZARDS: HazardKey[] = ['tornado', 'hail', 'wind'];
@@ -164,7 +177,9 @@ export function buildRiskTimeline(
   artifactHours: OutlookTimelineHourSummary[] = [],
 ): TimelineSegment[] {
   const artifacts = new Map(artifactHours.map((hour) => [hour.forecastHour, hour]));
-  const segs: TimelineSegment[] = PERIOD_WINDOWS.map((window) => {
+  const isEcmwf = bundle.hours.some((h) => h.forecastHour > 48) || bundle.cycle.includes('ECMWF');
+  const windows = isEcmwf ? ECMWF_PERIOD_WINDOWS : HRRR_PERIOD_WINDOWS;
+  const segs: TimelineSegment[] = windows.map((window) => {
     const snaps = bundle.hours.filter((snap) =>
       snap.forecastHour >= window.minHour && snap.forecastHour <= window.maxHour
     );

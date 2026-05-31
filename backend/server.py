@@ -23,7 +23,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import abort, jsonify, send_file, send_from_directory, Flask  # noqa: E402
+from flask import abort, jsonify, send_file, send_from_directory, Flask, request  # noqa: E402
 from flask_cors import CORS  # noqa: E402
 
 from backend.cache import TTLCache  # noqa: E402
@@ -78,7 +78,9 @@ INCREMENTAL_COMPLETE_ARTIFACT_DIR = (
     if _INCREMENTAL_COMPLETE_ARTIFACT_DIR_ENV
     else None
 )
-FULL_INCREMENTAL_FORECAST_HOURS = set(range(49))
+CONUS_MAX_INCREMENTAL_FORECAST_HOUR = 48
+ECMWF_MAX_INCREMENTAL_FORECAST_HOUR = 90
+FULL_INCREMENTAL_FORECAST_HOURS = set(range(CONUS_MAX_INCREMENTAL_FORECAST_HOUR + 1))
 JSON_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_JSON_CACHE_SECONDS", "300"))
 PNG_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_PNG_CACHE_SECONDS", "900"))
 STATIC_ASSET_CACHE_SECONDS = 31536000
@@ -93,9 +95,10 @@ def _singleflight_lock(key: str) -> threading.Lock:
         return lock
 
 
-def _cycle_key(now: datetime) -> str:
+def _cycle_key(now: datetime, model: str | None = None) -> str:
     cycle_hour = (now.hour // 6) * 6
-    return f"HRRR-{now.date().isoformat()}-{cycle_hour:02d}Z"
+    model_suffix = f"-{model}" if model else ""
+    return f"HRRR-{now.date().isoformat()}-{cycle_hour:02d}Z{model_suffix}"
 
 
 def _parse_iso_utc(value: object) -> datetime | None:
@@ -155,6 +158,49 @@ def _live_build_enabled() -> bool:
     return _bool_env("AUTOOUTLOOK_ENABLE_LIVE_BUILD", True)
 
 
+def _request_model() -> str:
+    try:
+        model = (request.args.get("model") or "").strip().lower()
+        if model:
+            return model
+        region = request.args.get("region")
+        if region == "philippines":
+            return "ecmwf"
+        if region == "conus":
+            return "hrrr"
+    except RuntimeError:
+        pass
+    return "hrrr"
+
+
+def _is_philippines_artifact_model(model: str | None) -> bool:
+    return model == "ecmwf"
+
+
+def _artifact_model_from_index(index: dict | None) -> str:
+    if not isinstance(index, dict):
+        return _request_model()
+    policy_model = str(((index.get("cycleDetection") or {}).get("cyclePolicy") or {}).get("model") or "")
+    cycle_label = str(index.get("cycle") or "")
+    token = f"{policy_model} {cycle_label}".upper()
+    if "ECMWF" in token:
+        return "ecmwf"
+    return _request_model()
+
+
+def _incremental_artifact_dir_for_model(model: str | None) -> Path:
+    base_dir = INCREMENTAL_ARTIFACT_DIR
+    candidates: list[Path] = []
+    if model == "ecmwf":
+        candidates.append(INCREMENTAL_ARTIFACT_DIR.parent / "latest_incremental_ecmwf")
+    elif model == "hrrr":
+        candidates.append(INCREMENTAL_ARTIFACT_DIR.parent / "latest_incremental_hrrr")
+    for target in candidates:
+        if target.exists():
+            return target
+    return base_dir
+
+
 @app.get("/")
 def frontend_index():
     return _static_file("index.html")
@@ -163,10 +209,27 @@ def frontend_index():
 @app.get("/api/forecast")
 def forecast():
     now = datetime.now(timezone.utc)
+    model = _request_model()
+
     if _prefer_artifact_forecast():
-        artifact_bundle = _artifact_forecast_bundle()
-        if artifact_bundle is not None:
-            return _json_response(artifact_bundle)
+        index = _incremental_index()
+        if index is not None:
+            cycle_time = index.get("cycleTimeISO", "")
+            gen_time = index.get("generatedAtISO", "")
+            key = f"artifact-{model}-{cycle_time}-{gen_time}"
+            cached = cache.get(key)
+            if cached is not None:
+                log.info("cache HIT  %s", key)
+                return _json_response(cached)
+            artifact_bundle = _artifact_forecast_bundle()
+            if artifact_bundle is not None:
+                cache.set(key, artifact_bundle)
+                log.info("cache SET  %s", key)
+                return _json_response(artifact_bundle)
+        else:
+            artifact_bundle = _artifact_forecast_bundle()
+            if artifact_bundle is not None:
+                return _json_response(artifact_bundle)
         if not _live_build_enabled():
             return _artifact_not_ready_response(INCREMENTAL_ARTIFACT_DIR / "index.json", status_code=503)
 
@@ -174,7 +237,7 @@ def forecast():
         return _artifact_not_ready_response(INCREMENTAL_ARTIFACT_DIR / "index.json", status_code=503)
 
     base_time = _forecast_base_time(now)
-    key = _cycle_key(base_time)
+    key = _cycle_key(base_time, model)
     cached = cache.get(key)
     if cached is not None:
         log.info("cache HIT  %s", key)
@@ -462,16 +525,25 @@ def _artifact_forecast_bundle():
     anchor_hour = min(hours, key=lambda item: abs(int(item["forecastHour"]) - 12))
     cycle_time_iso = index.get("cycleTimeISO") or hours[0]["validTimeISO"]
     fetched_at_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    model = _artifact_model_from_index(index)
+    cities_list = [] if _is_philippines_artifact_model(model) else CONUS_CITIES
+    index_model = str(((index.get("cycleDetection") or {}).get("cyclePolicy") or {}).get("model") or "").upper()
+    if "ECMWF" in index_model or model == "ecmwf":
+        model_label = "ECMWF"
+    else:
+        model_label = "HRRR"
+
     return {
         "cycle": index.get("cycle") or "Generated HRRR",
         "issuedAtISO": cycle_time_iso,
         "providerNotes": (
-            "Generated HRRR/XGBoost artifacts served from the published artifact bucket; "
-            "on-demand HRRR bundle generation is disabled for web stability."
+            f"Generated {model_label}/XGBoost artifacts served from the published artifact bucket; "
+            "on-demand bundle generation is disabled for web stability."
         ),
         "latencyMs": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
         "region": anchor_hour["region"],
-        "cities": CONUS_CITIES,
+        "cities": cities_list,
         "hours": hours,
         "source": "live",
         "providerId": "backend",
@@ -488,7 +560,7 @@ def _ready_forecast_hours(index: dict) -> list[int]:
             hours.append(int(value))
         except (TypeError, ValueError):
             continue
-    return sorted({hour for hour in hours if 0 <= hour <= 48})
+    return sorted({hour for hour in hours if 0 <= hour <= ECMWF_MAX_INCREMENTAL_FORECAST_HOUR})
 
 
 def _valid_iso_from_cycle(index: dict, forecast_hour: int) -> str | None:
@@ -673,25 +745,46 @@ def _region_from_feature_collection(payload, category: str) -> dict:
             selected = category_features or [feature for feature in features if isinstance(feature, dict)]
             for feature in selected:
                 points.extend(_geojson_positions((feature.get("geometry") or {}).get("coordinates")))
-    if not points:
-        return {
+
+    model = _request_model()
+
+    if _is_philippines_artifact_model(model):
+        # Philippines bounds
+        min_lon_limit, max_lon_limit = 114.0, 128.0
+        min_lat_limit, max_lat_limit = 4.0, 22.0
+        fallback_region = {
+            "label": "Philippines",
+            "centerLat": 12.8797,
+            "centerLon": 121.7740,
+            "bbox": [115.0, 4.5, 126.5, 21.0],
+            "states": [],
+        }
+    else:
+        # CONUS bounds
+        min_lon_limit, max_lon_limit = -130.0, -60.0
+        min_lat_limit, max_lat_limit = 20.0, 55.0
+        fallback_region = {
             "label": "Highlighted corridor",
             "centerLat": 37.0,
             "centerLon": -97.0,
             "bbox": [-105.0, 30.0, -89.0, 43.0],
             "states": [],
         }
+
+    if not points:
+        return fallback_region
+
     lons = [point[0] for point in points]
     lats = [point[1] for point in points]
-    min_lon, max_lon = max(-130.0, min(lons)), min(-60.0, max(lons))
-    min_lat, max_lat = max(20.0, min(lats)), min(55.0, max(lats))
+    min_lon, max_lon = max(min_lon_limit, min(lons)), min(max_lon_limit, max(lons))
+    min_lat, max_lat = max(min_lat_limit, min(lats)), min(max_lat_limit, max(lats))
     pad_lon = max(1.5, (max_lon - min_lon) * 0.15)
     pad_lat = max(1.0, (max_lat - min_lat) * 0.15)
     bbox = [
-        max(-130.0, min_lon - pad_lon),
-        max(20.0, min_lat - pad_lat),
-        min(-60.0, max_lon + pad_lon),
-        min(55.0, max_lat + pad_lat),
+        max(min_lon_limit, min_lon - pad_lon),
+        max(min_lat_limit, min_lat - pad_lat),
+        min(max_lon_limit, max_lon + pad_lon),
+        min(max_lat_limit, max_lat + pad_lat),
     ]
     return {
         "label": "Highlighted corridor",
@@ -719,6 +812,8 @@ def _geojson_positions(value) -> list[tuple[float, float]]:
 def _cities_for_region(region: dict, category: str) -> list[dict]:
     center_lat = float(region.get("centerLat", 37.0) or 37.0)
     center_lon = float(region.get("centerLon", -97.0) or -97.0)
+    if center_lon > 0:  # Philippines/Global region
+        return []
     ramp = ["TSTM", "MRGL", "SLGT", "ENH", "MOD", "HIGH"]
     peak = max(0, ramp.index(category) if category in ramp else 0)
     cities = []
@@ -734,8 +829,11 @@ def _cities_for_region(region: dict, category: str) -> list[dict]:
 
 
 def _empty_upper_air_overlay(forecast_hour: int, valid_time_iso: str, index: dict) -> dict:
+    model = _artifact_model_from_index(index)
+    domain = "Philippines" if _is_philippines_artifact_model(model) else "CONUS"
+
     return {
-        "domain": "CONUS",
+        "domain": domain,
         "level": "500mb",
         "fields": [],
         "gridStride": 0,
@@ -889,9 +987,12 @@ def _incremental_index() -> dict | None:
 
 
 def _selected_incremental_artifact_dir() -> Path:
-    current = _read_incremental_index_from_dir(INCREMENTAL_ARTIFACT_DIR)
+    model = _request_model()
+    base_dir = _incremental_artifact_dir_for_model(model)
+
+    current = _read_incremental_index_from_dir(base_dir)
     if _incremental_index_has_full_coverage(current):
-        return INCREMENTAL_ARTIFACT_DIR
+        return base_dir
     complete_dir = _incremental_complete_artifact_dir()
     fallback = _read_incremental_index_from_dir(complete_dir)
     if _incremental_index_has_full_coverage(fallback):
@@ -899,18 +1000,24 @@ def _selected_incremental_artifact_dir() -> Path:
 
     # Local fallbacks to custom generated directories if latest_incremental is missing/empty
     if not current:
-        custom_dir = INCREMENTAL_ARTIFACT_DIR.parent / "custom_latest_incremental"
+        custom_dir = base_dir.parent / f"custom_{base_dir.name}"
         if _read_incremental_index_from_dir(custom_dir) is not None:
             return custom_dir
-        custom_complete_dir = INCREMENTAL_ARTIFACT_DIR.parent / "custom_latest_incremental_complete"
+        custom_complete_dir = base_dir.parent / f"custom_{base_dir.name}_complete"
         if _read_incremental_index_from_dir(custom_complete_dir) is not None:
             return custom_complete_dir
 
-    return INCREMENTAL_ARTIFACT_DIR
+    return base_dir
 
 
 def _incremental_complete_artifact_dir() -> Path:
-    return INCREMENTAL_COMPLETE_ARTIFACT_DIR or INCREMENTAL_ARTIFACT_DIR.with_name(f"{INCREMENTAL_ARTIFACT_DIR.name}_complete")
+    if INCREMENTAL_COMPLETE_ARTIFACT_DIR:
+        return INCREMENTAL_COMPLETE_ARTIFACT_DIR
+
+    model = _request_model()
+    base_dir = _incremental_artifact_dir_for_model(model)
+
+    return base_dir.with_name(f"{base_dir.name}_complete")
 
 
 def _read_incremental_index_from_dir(artifact_dir: Path) -> dict | None:
@@ -927,8 +1034,13 @@ def _incremental_index_has_full_coverage(index: dict | None) -> bool:
     model = index.get("model")
     if isinstance(model, dict) and model.get("active") is False:
         return False
+    requested = index.get("requestedForecastHours")
+    if isinstance(requested, list) and requested:
+        required_hours = set(_coerce_forecast_hours(requested))
+    else:
+        required_hours = FULL_INCREMENTAL_FORECAST_HOURS
     ready = set(_coerce_forecast_hours(index.get("readyForecastHours")))
-    return FULL_INCREMENTAL_FORECAST_HOURS.issubset(ready)
+    return required_hours.issubset(ready)
 
 
 def _coerce_forecast_hours(value: object) -> list[int]:
@@ -940,7 +1052,7 @@ def _coerce_forecast_hours(value: object) -> list[int]:
             hours.append(int(item))
         except (TypeError, ValueError):
             continue
-    return sorted({hour for hour in hours if 0 <= hour <= 48})
+    return sorted({hour for hour in hours if 0 <= hour <= ECMWF_MAX_INCREMENTAL_FORECAST_HOUR})
 
 
 def _merged_incremental_risk_polygons() -> dict | None:

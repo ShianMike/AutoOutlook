@@ -4,6 +4,8 @@
 export type RiskCategory = 'TSTM' | 'MRGL' | 'SLGT' | 'ENH' | 'MOD' | 'HIGH';
 
 export type HazardKey = 'tornado' | 'hail' | 'wind' | 'flood';
+export type ActiveRegion = 'conus' | 'philippines';
+export type PhilippineRegionPane = 'national' | 'luzon' | 'visayas' | 'mindanao';
 
 export type StormMode = 'discrete' | 'multicell' | 'linear' | 'mixed';
 export type SignalStrength = 'none' | 'weak' | 'moderate' | 'strong';
@@ -193,13 +195,16 @@ export interface ProviderResult {
 export interface ForecastProvider {
   id: ForecastBundle['providerId'];
   label: string;
-  fetchBundle(signal?: AbortSignal): Promise<ForecastBundle>;
+  fetchBundle(signal?: AbortSignal, activeRegion?: ActiveRegion): Promise<ForecastBundle>;
 }
 
 // HRRR is hourly. Keep every hour through +48h available to the slider.
-export const FORECAST_HOURS: number[] = Array.from({ length: 49 }, (_, i) => i);
+export const HRRR_FORECAST_HOURS: number[] = Array.from({ length: 49 }, (_, i) => i);
+export const ECMWF_FORECAST_HOURS: number[] = Array.from({ length: 31 }, (_, i) => i * 3); // 0, 3, 6, ..., 90
+
+export const FORECAST_HOURS: number[] = HRRR_FORECAST_HOURS;
 export const FORECAST_HOUR_LABELS: Record<number, string> = Object.fromEntries(
-  FORECAST_HOURS.map((h) => [h, h === 0 ? 'Current' : `+${h}h`]),
+  Array.from({ length: 91 }, (_, h) => [h, h === 0 ? 'Current' : `+${h}h`]),
 );
 
 // Risk ramp metadata - colors live in tailwind.config.ts.

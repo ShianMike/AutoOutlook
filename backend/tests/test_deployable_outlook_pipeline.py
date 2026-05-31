@@ -50,6 +50,7 @@ from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
     PRODUCTION_FORECAST_HOURS,
     CloudRunTaskShard,
+    FetchedHour,
     _hydrate_incremental_artifacts_from_gcs,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
@@ -361,6 +362,18 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(resolve_forecast_hours(), list(PRODUCTION_FORECAST_HOURS))
         self.assertEqual(resolve_forecast_hours(all_hours=True), list(ALL_FORECAST_HOURS))
         self.assertEqual(resolve_forecast_hours([6, 0, 6]), [0, 6])
+
+    def test_ecmwf_defaults_to_f90_three_hourly(self) -> None:
+        self.assertEqual(
+            resolve_forecast_hours(model_name="ecmwf"),
+            list(range(0, 91, 3)),
+        )
+        self.assertEqual(
+            resolve_forecast_hours([0, 12, 48, 90], model_name="ecmwf"),
+            [0, 12, 48, 90],
+        )
+        with self.assertRaises(ValueError):
+            resolve_forecast_hours([93], model_name="ecmwf")
 
     def test_cycle_requirement_uses_requested_forecast_hours(self) -> None:
         hours = resolve_forecast_hours([0, 6, 12])
@@ -2166,6 +2179,100 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(np.all(capped.probabilities["hail"] == 0.30))
         self.assertTrue(np.all(capped.probabilities["wind"] == 0.30))
         self.assertNotIn("southTexasGulfCoast", capped.report.get("offshoreProbabilitySuppressedCells", {}))
+
+    def test_philippines_offshore_suppression_keeps_land_and_coastal_buffer(self) -> None:
+        probabilities = {
+            "tornado": np.full((3, 3), 0.04),
+            "hail": np.full((3, 3), 0.12),
+            "wind": np.full((3, 3), 0.12),
+        }
+
+        luzon_lats = np.linspace(14.45, 14.75, 3)
+        luzon_lons = np.linspace(120.85, 121.15, 3)
+        land = apply_offshore_probability_suppression(probabilities, luzon_lats, luzon_lons)
+        self.assertGreater(float(np.max(land.probabilities["wind"])), 0.0)
+        self.assertIn("philippinesOffshore", land.report["offshoreProbabilitySuppressedCells"])
+
+        open_water_lats = np.linspace(13.0, 13.5, 3)
+        open_water_lons = np.linspace(127.5, 128.0, 3)
+        water = apply_offshore_probability_suppression(probabilities, open_water_lats, open_water_lons)
+        self.assertTrue(np.all(water.probabilities["tornado"] == 0.0))
+        self.assertTrue(np.all(water.probabilities["hail"] == 0.0))
+        self.assertTrue(np.all(water.probabilities["wind"] == 0.0))
+        self.assertGreater(water.report["offshoreProbabilitySuppressedCells"]["philippinesOffshore"], 0)
+
+    def test_philippines_maritime_environment_caps_high_end_severe_probabilities(self) -> None:
+        fields = small_fields((3, 3))
+        fields["cape"] = np.full((3, 3), 1800.0)
+        fields["cape_ml"] = np.full((3, 3), 1400.0)
+        fields["cape_mu"] = np.full((3, 3), 2000.0)
+        fields["cin"] = np.full((3, 3), -25.0)
+        fields["cin_ml"] = np.full((3, 3), -25.0)
+        fields["td2m"] = np.full((3, 3), 297.0)
+        fields["t2m"] = np.full((3, 3), 302.0)
+        fields["pwat"] = np.full((3, 3), 55.0)
+        fields["u10"] = np.zeros((3, 3))
+        fields["v10"] = np.zeros((3, 3))
+        fields["u500"] = np.full((3, 3), 6.0)
+        fields["v500"] = np.zeros((3, 3))
+        fields["srh01"] = np.full((3, 3), 35.0)
+        fields["srh03"] = np.full((3, 3), 70.0)
+        features = gridded_features_from_fields(fields, 12)
+        probabilities = {
+            "tornado": np.full((3, 3), 0.30),
+            "hail": np.full((3, 3), 0.45),
+            "wind": np.full((3, 3), 0.45),
+        }
+
+        capped = apply_environmental_probability_caps(
+            probabilities,
+            features,
+            {"productionCapable": True, "datasetQuality": {"trainingRows": 9000, "minimumRecommendedRows": 5000}},
+            lats=np.linspace(14.45, 14.75, 3),
+            lons=np.linspace(120.85, 121.15, 3),
+        )
+        category = category_grid_from_probabilities(capped.probabilities, features, {"productionCapable": True})
+
+        self.assertTrue(capped.report["philippinesRegionalCalibrationApplied"])
+        self.assertLessEqual(float(np.max(capped.probabilities["tornado"])), 0.019)
+        self.assertLessEqual(float(np.max(capped.probabilities["hail"])), 0.14)
+        self.assertLessEqual(float(np.max(capped.probabilities["wind"])), 0.14)
+        self.assertLessEqual(int(np.max(category)), SPC_RISK_LABELS.index("MRGL"))
+
+    def test_philippines_organized_environment_can_buffer_wind_but_stays_capped(self) -> None:
+        fields = small_fields((3, 3))
+        fields["cape"] = np.full((3, 3), 1700.0)
+        fields["cape_ml"] = np.full((3, 3), 1300.0)
+        fields["cape_mu"] = np.full((3, 3), 2100.0)
+        fields["cin"] = np.full((3, 3), -45.0)
+        fields["cin_ml"] = np.full((3, 3), -45.0)
+        fields["td2m"] = np.full((3, 3), 297.0)
+        fields["t2m"] = np.full((3, 3), 302.0)
+        fields["pwat"] = np.full((3, 3), 58.0)
+        fields["u10"] = np.zeros((3, 3))
+        fields["v10"] = np.zeros((3, 3))
+        fields["u500"] = np.full((3, 3), 19.0)
+        fields["v500"] = np.zeros((3, 3))
+        fields["srh01"] = np.full((3, 3), 90.0)
+        fields["srh03"] = np.full((3, 3), 125.0)
+        features = gridded_features_from_fields(fields, 12)
+        probabilities = {
+            "tornado": np.full((3, 3), 0.08),
+            "hail": np.full((3, 3), 0.20),
+            "wind": np.full((3, 3), 0.20),
+        }
+
+        capped = apply_environmental_probability_caps(
+            probabilities,
+            features,
+            {"productionCapable": True, "datasetQuality": {"trainingRows": 9000, "minimumRecommendedRows": 5000}},
+            lats=np.linspace(14.45, 14.75, 3),
+            lons=np.linspace(120.85, 121.15, 3),
+        )
+
+        self.assertEqual(capped.report["philippinesGustBufferCells"], 0)
+        self.assertLessEqual(float(np.max(capped.probabilities["wind"])), 0.164)
+        self.assertLessEqual(float(np.max(capped.probabilities["hail"])), 0.29)
 
     def test_probability_tile_suppresses_strict_marine_zone_by_tile_center(self) -> None:
         category = np.full((3, 3), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
@@ -4115,6 +4222,138 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertTrue(payload["hours"][0]["upperAirOverlay"]["hasWindVectors"])
             self.assertEqual(len(payload["hours"][0]["upperAirLines"]), 1)
             self.assertEqual(len(payload["hours"][0]["upperAirVectors"]), 1)
+
+    def test_server_serves_philippines_ecmwf_forecast_through_f90(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            default_dir = root / "latest_incremental"
+            artifact_dir = root / "latest_incremental_ecmwf"
+            default_dir.mkdir()
+            artifact_dir.mkdir()
+            ready_hours = [0, 48, 90]
+            (artifact_dir / "index.json").write_text(json.dumps({
+                "cycle": "ECMWF 00Z 20260505",
+                "cycleTimeISO": "2026-05-05T00:00:00Z",
+                "status": "complete",
+                "readyForecastHours": ready_hours,
+                "requestedForecastHours": ready_hours,
+                "model": {"active": True, "version": "ecmwf-unit"},
+            }), encoding="utf-8")
+            valid_times = {
+                0: "2026-05-05T00:00:00Z",
+                48: "2026-05-07T00:00:00Z",
+                90: "2026-05-08T18:00:00Z",
+            }
+            for hour in ready_hours:
+                hour_dir = artifact_dir / "hours" / f"f{hour:02d}"
+                hour_dir.mkdir(parents=True)
+                (hour_dir / "metadata.json").write_text(json.dumps({
+                    "forecastHour": hour,
+                    "validTimeISO": valid_times[hour],
+                    "categoryCounts": {"NONE": 10, "TSTM": 80},
+                    "region": {
+                        "label": "Philippines",
+                        "centerLat": 12.8797,
+                        "centerLon": 121.7740,
+                        "bbox": [116.5, 4.5, 127.0, 21.0],
+                        "states": [],
+                    },
+                    "probabilityStats": {
+                        "categoryConsistencyProbabilityMax": {
+                            "tornado": 0.0,
+                            "hail": 0.0,
+                            "wind": 0.04,
+                        },
+                    },
+                }), encoding="utf-8")
+                (hour_dir / "risk_polygons.geojson").write_text(json.dumps({
+                    "type": "FeatureCollection",
+                    "features": [],
+                }), encoding="utf-8")
+                (hour_dir / "probability_tile.json").write_text(json.dumps({
+                    "forecastHour": hour,
+                    "validTimeISO": valid_times[hour],
+                    "bbox": [116.5, 4.5, 127.0, 21.0],
+                    "probabilities": {"tornado": [], "hail": [], "wind": []},
+                }), encoding="utf-8")
+            from backend import server
+
+            with (
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", default_dir),
+                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", None),
+                patch.dict(os.environ, {
+                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
+                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
+                }),
+                patch.object(server, "build_bundle", side_effect=AssertionError("should not build live bundle")),
+            ):
+                server.cache.clear()
+                client = server.app.test_client()
+                forecast_response = client.get("/api/forecast?region=philippines")
+                tile_response = client.get("/api/outlook/incremental/hour/90/probability-tile?region=philippines")
+
+            self.assertEqual(forecast_response.status_code, 200)
+            payload = forecast_response.get_json()
+            self.assertEqual([hour["forecastHour"] for hour in payload["hours"]], ready_hours)
+            self.assertEqual(payload["hours"][-1]["forecastHour"], 90)
+            self.assertEqual(payload["hours"][-1]["region"]["label"], "Philippines")
+            self.assertEqual(payload["hours"][-1]["upperAirOverlay"]["domain"], "Philippines")
+            self.assertEqual(payload["cities"], [])
+            self.assertEqual(tile_response.status_code, 200)
+            self.assertEqual(tile_response.get_json()["forecastHour"], 90)
+
+    def test_artifact_forecast_bundle_uses_ecmwf_index_model_without_request_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "latest_incremental_ecmwf"
+            hour_dir = artifact_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            (artifact_dir / "index.json").write_text(json.dumps({
+                "cycle": "ECMWF 00Z 20260505",
+                "cycleTimeISO": "2026-05-05T00:00:00Z",
+                "status": "complete",
+                "readyForecastHours": [0],
+                "cycleDetection": {"cyclePolicy": {"model": "ECMWF"}},
+                "model": {"active": True, "version": "ecmwf-unit"},
+            }), encoding="utf-8")
+            (hour_dir / "metadata.json").write_text(json.dumps({
+                "forecastHour": 0,
+                "validTimeISO": "2026-05-05T00:00:00Z",
+                "categoryCounts": {"NONE": 10, "TSTM": 80},
+                "region": {
+                    "label": "Philippines",
+                    "centerLat": 12.8797,
+                    "centerLon": 121.7740,
+                    "bbox": [116.5, 4.5, 127.0, 21.0],
+                    "states": [],
+                },
+                "probabilityStats": {
+                    "categoryConsistencyProbabilityMax": {
+                        "tornado": 0.0,
+                        "hail": 0.0,
+                        "wind": 0.04,
+                    },
+                },
+            }), encoding="utf-8")
+            (hour_dir / "risk_polygons.geojson").write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [],
+            }), encoding="utf-8")
+
+            from backend import server
+
+            with (
+                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
+                patch.dict(os.environ, {
+                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
+                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
+                }),
+            ):
+                payload = server._artifact_forecast_bundle()
+
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["providerNotes"].split("/XGBoost", 1)[0], "Generated ECMWF")
+            self.assertEqual(payload["cities"], [])
+            self.assertEqual(payload["hours"][0]["upperAirOverlay"]["domain"], "Philippines")
 
     def test_ecmwf_cycle_detection(self) -> None:
         from backend.ecmwf_selected import EcmwfCycle, latest_available_ecmwf_cycle

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { toPng } from 'html-to-image';
-import type { ForecastBundle, HourSnapshot } from '../types/forecast';
+import type { ForecastBundle, HourSnapshot, ActiveRegion, PhilippineRegionPane } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
 import RetroPanel from './retro/RetroPanel';
 import RetroBadge from './retro/RetroBadge';
@@ -12,6 +12,7 @@ import type { OutlookArtifactState } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { recordCanvasesToGif } from '../utils/gifRecorder';
+import type { OutlookHazardKey } from '../utils/hazardProbabilityBands';
 
 interface OutlookMapPanelProps {
   snapshot: HourSnapshot | null;
@@ -21,6 +22,10 @@ interface OutlookMapPanelProps {
   isPlaying: boolean;
   onIndexChange: (index: number) => void;
   setPlaying: (playing: boolean) => void;
+  activeRegion: ActiveRegion;
+  setActiveRegion: (region: ActiveRegion) => void;
+  activePhilippinePane: PhilippineRegionPane;
+  setActivePhilippinePane: (pane: PhilippineRegionPane) => void;
 }
 
 type OutlookMode = 'levels' | 'hazards';
@@ -242,11 +247,14 @@ export default function OutlookMapPanel({
   isPlaying,
   onIndexChange,
   setPlaying,
+  activeRegion,
+  setActiveRegion,
+  activePhilippinePane,
+  setActivePhilippinePane,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
-  const [activeRegion, setActiveRegion] = useState<'conus' | 'philippines'>('conus');
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingGif, setIsExportingGif] = useState(false);
   const [gifDialogOpen, setGifDialogOpen] = useState(false);
@@ -460,173 +468,7 @@ export default function OutlookMapPanel({
       size="sm"
       className="[&>div]:p-2"
     >
-      <div className="mb-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
-        {/* Main selector row */}
-        <div className={`flex flex-wrap items-center justify-between gap-2 p-2 ${mode === 'hazards' ? 'border-b-[3px] border-ink' : ''}`}>
-          <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
-            Forecast type
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <ModeButton active={mode === 'levels'} onClick={() => setMode('levels')} disabled={isAnyExporting}>
-              Risk Levels
-            </ModeButton>
-            <ModeButton active={mode === 'hazards'} onClick={() => setMode('hazards')} disabled={isAnyExporting}>
-              Hazard Probs
-            </ModeButton>
-            <ModeButton active={false} onClick={saveCurrentMap} disabled={!snapshot || isAnyExporting}>
-              {isExporting ? 'Saving…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} PNG`}
-            </ModeButton>
-            <ModeButton active={false} onClick={openGifDialog} disabled={!snapshot || forecastStops.length === 0 || isAnyExporting}>
-              {isExportingGif ? 'Saving GIF…' : `Save ${mode === 'levels' ? 'Levels' : 'Hazards'} GIF`}
-            </ModeButton>
-          </div>
-        </div>
 
-        {/* Region selector row */}
-        <div className="flex flex-wrap items-center justify-between gap-2 p-2 border-t-[3px] border-ink bg-paper/45">
-          <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
-            Active Region
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <SubModeButton active={activeRegion === 'conus'} onClick={() => setActiveRegion('conus')} disabled={isAnyExporting}>
-              United States (CONUS)
-            </SubModeButton>
-            <SubModeButton active={activeRegion === 'philippines'} onClick={() => setActiveRegion('philippines')} disabled={isAnyExporting}>
-              Philippines (Global IFS)
-            </SubModeButton>
-          </div>
-        </div>
-
-        {/* Hazard View sub-row */}
-        {mode === 'hazards' && (
-          <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-paper/40 border-t-[0px] transition-all">
-            <div className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[0.28em] text-ink shadow-retro-sm">
-              Hazard View
-            </div>
-            <div className="flex flex-wrap justify-end gap-2">
-              <SubModeButton active={hazardLayout === 'all'} onClick={() => setHazardLayout('all')} disabled={isAnyExporting}>
-                All 4 Grid
-              </SubModeButton>
-              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'thunder'} onClick={() => { setHazardLayout('single'); setSelectedHazard('thunder'); }} disabled={isAnyExporting}>
-                Thunderstorm
-              </SubModeButton>
-              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'hail'} onClick={() => { setHazardLayout('single'); setSelectedHazard('hail'); }} disabled={isAnyExporting}>
-                Hail
-              </SubModeButton>
-              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'wind'} onClick={() => { setHazardLayout('single'); setSelectedHazard('wind'); }} disabled={isAnyExporting}>
-                Damaging Wind
-              </SubModeButton>
-              <SubModeButton active={hazardLayout === 'single' && selectedHazard === 'tornado'} onClick={() => { setHazardLayout('single'); setSelectedHazard('tornado'); }} disabled={isAnyExporting}>
-                Tornado
-              </SubModeButton>
-            </div>
-          </div>
-        )}
-
-        {/* Exporter Dialogs / Messages (cleanly separated inside the container) */}
-        {gifProgress && (
-          <div className="border-t-[3px] border-ink flex flex-wrap items-center justify-between gap-2 bg-signal-amber px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-ink">
-            <span>
-              {gifProgress.phase === 'capturing'
-                ? `GIF capture ${gifProgress.current}/${gifProgress.total}`
-                : `GIF encode ${gifProgress.current}%`}
-            </span>
-            <button
-              type="button"
-              onClick={cancelGifExport}
-              className="retro-button bg-paper px-2 py-1 text-[10px] leading-none text-ink hover:bg-signal-red hover:text-paper"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-        {gifDialogOpen && (
-          <div className="border-t-[3px] border-ink bg-paper p-3">
-            <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
-              Animated GIF export · {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
-            </div>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Start valid
-                <select
-                  value={gifStartIndex}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setGifStartIndex(next);
-                    setGifEndIndex((index) => Math.max(index, next));
-                  }}
-                  className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink"
-                >
-                  {forecastStops.map((stop, index) => (
-                    <option key={`gif-start-${stop.forecastHour}-${stop.validTimeISO}`} value={index}>
-                      {fmtValidSelect(stop.validTimeISO)} · F{String(stop.forecastHour).padStart(3, '0')}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                End valid
-                <select
-                  value={gifEndIndex}
-                  onChange={(event) => setGifEndIndex(Number(event.target.value))}
-                  className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink"
-                >
-                  {forecastStops.map((stop, index) => (
-                    <option key={`gif-end-${stop.forecastHour}-${stop.validTimeISO}`} value={index} disabled={index < gifStartIndex}>
-                      {fmtValidSelect(stop.validTimeISO)} · F{String(stop.forecastHour).padStart(3, '0')}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Frame delay
-                <select
-                  value={gifDelayMs}
-                  onChange={(event) => setGifDelayMs(Number(event.target.value))}
-                  className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink"
-                >
-                  {GIF_DELAY_OPTIONS.map((delayMs) => (
-                    <option key={delayMs} value={delayMs}>{delayMs} ms</option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Quality
-                <select
-                  value={gifQuality}
-                  onChange={(event) => setGifQuality(event.target.value as GifQualityPreset)}
-                  className="border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink"
-                >
-                  {(Object.keys(GIF_QUALITY_CONFIG) as GifQualityPreset[]).map((quality) => (
-                    <option key={quality} value={quality}>{GIF_QUALITY_CONFIG[quality].label}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setGifDialogOpen(false)}
-                className="retro-button bg-paper px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-paper"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={saveCurrentMapAsGif}
-                className="retro-button bg-signal-amber px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-signal-amber"
-              >
-                Generate GIF
-              </button>
-            </div>
-          </div>
-        )}
-        {exportError && (
-          <div className="border-t-[3px] border-ink bg-paper px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-signal-red">
-            {exportError}
-          </div>
-        )}
-      </div>
 
       <div className="mb-2 grid grid-cols-1 gap-2 lg:grid-cols-[1fr_auto]">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -830,6 +672,209 @@ export default function OutlookMapPanel({
         <div className="outlook-export-disclaimer border-[3px] border-t-0 border-ink bg-ink px-3 py-2 text-paper">
           <ForecastDisclaimer variant="export" />
         </div>
+      </div>
+
+      {/* Unified Control Bar Row (Moved below the map) */}
+      <div className="mt-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
+        <div className="flex flex-wrap items-center gap-4 p-2.5">
+          {/* Dropdown 1: Forecast Type */}
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+              Type
+            </label>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as 'levels' | 'hazards')}
+              disabled={isAnyExporting}
+              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+            >
+              <option value="levels">Risk Levels</option>
+              <option value="hazards">Hazard Probs</option>
+            </select>
+          </div>
+
+          {/* Dropdown 2: Active Region */}
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+              Region
+            </label>
+            <select
+              value={activeRegion}
+              onChange={(e) => setActiveRegion(e.target.value as ActiveRegion)}
+              disabled={isAnyExporting}
+              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+            >
+              <option value="conus">CONUS (United States)</option>
+            </select>
+          </div>
+
+          {/* Dropdown 3: Hazard View (Conditional) */}
+          {mode === 'hazards' && (
+            <div className="flex items-center gap-2 animate-fadeIn">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                Hazard
+              </label>
+              <select
+                value={hazardLayout === 'all' ? 'all' : selectedHazard}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'all') {
+                    setHazardLayout('all');
+                  } else {
+                    setHazardLayout('single');
+                    setSelectedHazard(val as 'thunder' | 'hail' | 'wind' | 'tornado');
+                  }
+                }}
+                disabled={isAnyExporting}
+                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+              >
+                <option value="all">All 4 Grid</option>
+                <option value="thunder">Thunderstorm</option>
+                <option value="hail">Hail</option>
+                <option value="wind">Damaging Wind</option>
+                <option value="tornado">Tornado</option>
+              </select>
+            </div>
+          )}
+
+          {/* Dropdown 4: Exporter Options */}
+          <div className="flex items-center gap-2 ml-auto">
+            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+              Export
+            </label>
+            <select
+              value=""
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === 'png') {
+                  saveCurrentMap();
+                } else if (val === 'gif') {
+                  openGifDialog();
+                }
+                e.target.value = ""; // Reset
+              }}
+              disabled={!snapshot || isAnyExporting}
+              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+            >
+              <option value="" disabled hidden>Choose Export...</option>
+              <option value="png">Save PNG Image</option>
+              <option value="gif" disabled={forecastStops.length === 0}>Save GIF Animation</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Exporter Dialogs / Messages (cleanly separated inside the container) */}
+        {gifProgress && (
+          <div className="border-t-[3px] border-ink flex flex-wrap items-center justify-between gap-2 bg-signal-amber px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-ink">
+            <span>
+              {gifProgress.phase === 'capturing'
+                ? `GIF capture ${gifProgress.current}/${gifProgress.total}`
+                : `GIF encode ${gifProgress.current}%`}
+            </span>
+            <button
+              type="button"
+              onClick={cancelGifExport}
+              className="retro-button bg-paper px-2 py-1 text-[10px] leading-none text-ink hover:bg-signal-red hover:text-paper"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {gifDialogOpen && (
+          <div className="border-t-[3px] border-ink bg-paper p-3">
+            <div className="flex items-center justify-between border-b-[2px] border-ink pb-1.5 mb-3">
+              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
+                Animated GIF export · {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
+              </div>
+              <button
+                type="button"
+                onClick={() => setGifDialogOpen(false)}
+                className="border-[2px] border-ink bg-paper hover:bg-signal-red hover:text-paper px-1.5 py-0.5 font-mono text-[9px] font-bold leading-none shadow-retro-sm transition-colors cursor-pointer select-none"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                Start valid
+                <select
+                  value={gifStartIndex}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setGifStartIndex(next);
+                    setGifEndIndex((index) => Math.max(index, next));
+                  }}
+                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                >
+                  {forecastStops.map((stop, index) => (
+                    <option key={`gif-start-${stop.forecastHour}-${stop.validTimeISO}`} value={index}>
+                      {fmtValidSelect(stop.validTimeISO)} · F{String(stop.forecastHour).padStart(3, '0')}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                End valid
+                <select
+                  value={gifEndIndex}
+                  onChange={(event) => setGifEndIndex(Number(event.target.value))}
+                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                >
+                  {forecastStops.map((stop, index) => (
+                    <option key={`gif-end-${stop.forecastHour}-${stop.validTimeISO}`} value={index} disabled={index < gifStartIndex}>
+                      {fmtValidSelect(stop.validTimeISO)} · F{String(stop.forecastHour).padStart(3, '0')}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                Frame delay
+                <select
+                  value={gifDelayMs}
+                  onChange={(event) => setGifDelayMs(Number(event.target.value))}
+                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                >
+                  {GIF_DELAY_OPTIONS.map((delayMs) => (
+                    <option key={delayMs} value={delayMs}>{delayMs} ms</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
+                Quality
+                <select
+                  value={gifQuality}
+                  onChange={(event) => setGifQuality(event.target.value as GifQualityPreset)}
+                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                >
+                  {(Object.keys(GIF_QUALITY_CONFIG) as GifQualityPreset[]).map((quality) => (
+                    <option key={quality} value={quality}>{GIF_QUALITY_CONFIG[quality].label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setGifDialogOpen(false)}
+                className="retro-button bg-paper px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-paper"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveCurrentMapAsGif}
+                className="retro-button bg-signal-amber px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-signal-amber"
+              >
+                Generate GIF
+              </button>
+            </div>
+          </div>
+        )}
+        {exportError && (
+          <div className="border-t-[3px] border-ink bg-paper px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-widest text-signal-red">
+            {exportError}
+          </div>
+        )}
       </div>
     </RetroPanel>
   );

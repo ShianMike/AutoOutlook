@@ -238,7 +238,7 @@ function Hero() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v0.4 · SEVERE OUTLOOK</RetroBadge>
+            <RetroBadge tone="paper">v0.5 · SEVERE OUTLOOK</RetroBadge>
           </div>
 
           <h1 className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
@@ -818,7 +818,7 @@ function FinalCTA() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v0.4</RetroBadge>
+            <RetroBadge tone="amber">v0.5</RetroBadge>
           </div>
 
           <h2
@@ -868,7 +868,7 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.4
+          AutoOutlook · Automated Convective Risk Intelligence · v0.5
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>

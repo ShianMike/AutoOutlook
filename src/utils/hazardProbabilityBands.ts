@@ -187,6 +187,7 @@ function blobPoints(
   n: number,
   harmonics: ShapeHarmonic[],
   bulges: ShapeBulge[] = [],
+  bbox?: [number, number, number, number],
 ): [number, number][] {
   // CW in (lon, lat) so d3-geo treats the interior as the small region.
   // Radial perturbation by a sum of sinusoidal harmonics gives each hazard
@@ -196,6 +197,10 @@ function blobPoints(
   const cosT = Math.cos(tilt);
   const sinT = Math.sin(tilt);
   const out: [number, number][] = [];
+  const minLon = bbox ? bbox[0] : -125;
+  const minLat = bbox ? bbox[1] : 24;
+  const maxLon = bbox ? bbox[2] : -66;
+  const maxLat = bbox ? bbox[3] : 50;
   for (let i = 0; i < n; i++) {
     const t = -(i / n) * Math.PI * 2;
     let wob = 1;
@@ -212,10 +217,10 @@ function blobPoints(
     const ey = rLat * wob * Math.sin(t);
     const lon = centerLon + (ex * cosT - ey * sinT);
     const lat = centerLat + (ex * sinT + ey * cosT);
-    // CONUS boundary clamp — keep polygon on land
+    // Boundary clamp — keep polygon on land
     out.push([
-      Math.max(-125, Math.min(-66, lon)),
-      Math.max(24, Math.min(50, lat)),
+      Math.max(minLon, Math.min(maxLon, lon)),
+      Math.max(minLat, Math.min(maxLat, lat)),
     ]);
   }
   return chaikinSmooth(out, 2);
@@ -236,14 +241,15 @@ function coastalSafeBlobPoints(
   harmonics: ShapeHarmonic[],
   bulges: ShapeBulge[],
   initialShrink = 1,
+  bbox?: [number, number, number, number],
 ): { coords: [number, number][]; shrink: number } {
   let shrink = initialShrink;
-  let coords = blobPoints(centerLat, centerLon, rLat * shrink, rLon * shrink, tiltDeg, n, harmonics, bulges);
+  let coords = blobPoints(centerLat, centerLon, rLat * shrink, rLon * shrink, tiltDeg, n, harmonics, bulges, bbox);
 
   for (let attempt = 0; attempt < 10; attempt++) {
     if (coords.every(pointIsOrganizedSafe)) return { coords, shrink };
     shrink *= 0.84;
-    coords = blobPoints(centerLat, centerLon, rLat * shrink, rLon * shrink, tiltDeg, n, harmonics, bulges);
+    coords = blobPoints(centerLat, centerLon, rLat * shrink, rLon * shrink, tiltDeg, n, harmonics, bulges, bbox);
   }
 
   return { coords, shrink };
@@ -503,7 +509,7 @@ function connectedOuterGroups(bands: ProbBand[], hazard: OutlookHazardKey): Prob
   return groups;
 }
 
-function outerEnvelope(group: ProbBand[], hazard: OutlookHazardKey): [number, number][] {
+function outerEnvelope(group: ProbBand[], hazard: OutlookHazardKey, bbox?: [number, number, number, number]): [number, number][] {
   if (group.length === 1) return group[0].coords;
 
   const cfg = outerMergeConfig(hazard);
@@ -549,17 +555,22 @@ function outerEnvelope(group: ProbBand[], hazard: OutlookHazardKey): [number, nu
     ));
   }
 
+  const minLon = bbox ? bbox[0] : -125;
+  const minLat = bbox ? bbox[1] : 24;
+  const maxLon = bbox ? bbox[2] : -66;
+  const maxLat = bbox ? bbox[3] : 50;
+
   const coords = smoothRadii.map((r, i): [number, number] => {
     const angle = (i / samples) * Math.PI * 2 - Math.PI;
     const lon = centerLon + (Math.cos(angle) * r) / lonScale;
     const lat = centerLat + Math.sin(angle) * r;
-    return [Math.max(-125, Math.min(-66, lon)), Math.max(24, Math.min(50, lat))];
+    return [Math.max(minLon, Math.min(maxLon, lon)), Math.max(minLat, Math.min(maxLat, lat))];
   });
 
   return normalizeExteriorRing(chaikinSmooth(coords, 1));
 }
 
-export function mergeOuterHazardBands(bands: ProbBand[], hazard: OutlookHazardKey): ProbBand[] {
+export function mergeOuterHazardBands(bands: ProbBand[], hazard: OutlookHazardKey, bbox?: [number, number, number, number]): ProbBand[] {
   const grouped = new Map<string, ProbBand[]>();
   bands.forEach((band) => {
     const key = `${band.threshold}:${band.significant === true ? 'sig' : 'base'}`;
@@ -570,7 +581,7 @@ export function mergeOuterHazardBands(bands: ProbBand[], hazard: OutlookHazardKe
     connectedOuterGroups(thresholdBands, hazard).map((group) => ({
       ...group[0],
       label: group[0].label.replace(' satellite', ''),
-      coords: outerEnvelope(group, hazard),
+      coords: outerEnvelope(group, hazard, bbox),
     }))
   ));
 
@@ -608,10 +619,21 @@ function hazardLobes(
   const driftCross = Math.sin(forecastHour * 0.055 * motion.rate + motion.phase) * (0.14 + front * 0.18) * driftFactor;
   const driftTilt = tiltDeg + Math.sin(motion.phase) * 8;
   const driftedCenter = offsetPoint(region.centerLat, region.centerLon, driftAlong, driftCross, driftTilt);
+
+  const minLon = region.bbox ? region.bbox[0] : -125;
+  const minLat = region.bbox ? region.bbox[1] : 24;
+  const maxLon = region.bbox ? region.bbox[2] : -66;
+  const maxLat = region.bbox ? region.bbox[3] : 50;
+
+  const centerLatMin = minLat + 1.0;
+  const centerLatMax = maxLat - 1.0;
+  const centerLonMin = minLon + 1.0;
+  const centerLonMax = maxLon - 1.0;
+
   const lobes: HazardLobe[] = [
     {
-      centerLat: clamp(driftedCenter.lat, 25, 49),
-      centerLon: clamp(driftedCenter.lon, -124, -68),
+      centerLat: clamp(driftedCenter.lat, centerLatMin, centerLatMax),
+      centerLon: clamp(driftedCenter.lon, centerLonMin, centerLonMax),
       along: 0,
       cross: 0,
       radiusScale: 1,
@@ -622,6 +644,8 @@ function hazardLobes(
       absorbStrength: 0,
     },
   ];
+
+  const cfg = getHazardConfig(hazard, region.centerLon > 110);
 
   const add = (
     along: number,
@@ -634,13 +658,13 @@ function hazardLobes(
     absorbStrength: number,
   ) => {
     const liveProbScale = probabilityScale * (0.74 + 0.42 * Math.sin(phase + harmonicPhase + front + motion.phase * 0.21));
-    if (peakProb * liveProbScale < HAZARD_CONFIGS[hazard].thresholds[0]) return;
+    if (peakProb * liveProbScale < cfg.thresholds[0]) return;
     const liveAlong = along * (0.84 + 0.36 * Math.sin(phase * (0.95 + motion.wobble * 0.18) + harmonicPhase));
     const liveCross = cross + Math.sin(phase * (1.35 + motion.rate * 0.28) + harmonicPhase + motion.phase * 0.31) * (0.55 + 0.45 * absorbStrength);
     const p = offsetPoint(driftedCenter.lat, driftedCenter.lon, liveAlong, liveCross, tiltDeg);
     lobes.push({
-      centerLat: clamp(p.lat, 25, 49),
-      centerLon: clamp(p.lon, -124, -68),
+      centerLat: clamp(p.lat, centerLatMin, centerLatMax),
+      centerLon: clamp(p.lon, centerLonMin, centerLonMax),
       along: liveAlong,
       cross: liveCross,
       radiusScale: radiusScale * (0.93 + 0.10 * Math.sin(phase * (1.08 + motion.rate * 0.16) + harmonicPhase + shear)),
@@ -674,6 +698,19 @@ function hazardLobes(
   return lobes;
 }
 
+export function getHazardConfig(hazard: OutlookHazardKey, isPhilippines: boolean = false): HazardConfig {
+  const base = HAZARD_CONFIGS[hazard];
+  if (hazard === 'thunder' && isPhilippines) {
+    return {
+      ...base,
+      thresholds: [0.30, 0.60, 0.90],
+      labels: ['30%', '60%', '90%'],
+    };
+  }
+  return base;
+}
+
+
 /**
  * Build probability bands for one hazard around a focus region.
  *
@@ -692,7 +729,8 @@ export function buildHazardBands(
   forecastHour = 0,
 ): ProbBand[] {
   if (peakProb <= 0) return [];
-  const cfg = HAZARD_CONFIGS[hazard];
+  const isPhil = region.centerLon > 110;
+  const cfg = getHazardConfig(hazard, isPhil);
   const activationFloor = 0.82;
   const active = cfg.thresholds
     .map((t, i) => ({ t, c: cfg.colors[i], l: cfg.labels[i] }))
@@ -707,6 +745,7 @@ export function buildHazardBands(
     : cfg.harmonics;
   const dynamicAspect = ingredientAspect(cfg.aspect, ingredients);
   const dynamicTilt = ingredientTilt(cfg.tilt, ingredients, forecastHour, motion);
+  const bbox = region.bbox;
 
   // Build bands as STACKED FILLED DISKS in order from largest radius (lowest
   // threshold) to smallest (highest threshold). When rendered in array order,
@@ -767,8 +806,9 @@ export function buildHazardBands(
           harmonics,
           bulges,
           organizedShrinkByLobe.get(lobeIndex) ?? 1,
+          bbox,
         )
-        : { coords: blobPoints(centerLat, centerLon, rLat, rLon, tilt, n, harmonics, bulges), shrink: 1 };
+        : { coords: blobPoints(centerLat, centerLon, rLat, rLon, tilt, n, harmonics, bulges, bbox), shrink: 1 };
       if (organized && !organizedShrinkByLobe.has(lobeIndex)) {
         organizedShrinkByLobe.set(lobeIndex, safe.shrink);
       }
@@ -1132,7 +1172,8 @@ export function buildArtifactSigBlob(
    */
   measuredBandRadius?: number,
 ): { coords: [number, number][] } | null {
-  const cfg = HAZARD_CONFIGS[hazard];
+  const isPhil = region ? region.centerLon > 110 : false;
+  const cfg = getHazardConfig(hazard, isPhil);
   if (cfg.sigThreshold === undefined) return null;
 
   // Per-hazard motion seed — different hazards' SIG cores morph out of
@@ -1272,6 +1313,8 @@ export function buildArtifactSigBlob(
     80,
     harmonics,
     bulges,
+    1,
+    region?.bbox,
   );
   return { coords };
 }

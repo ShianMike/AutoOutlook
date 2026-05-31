@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { HourSnapshot } from '../types/forecast';
+import type { ActiveRegion, HourSnapshot, PhilippineRegionPane } from '../types/forecast';
 import {
   HAZARD_CONFIGS,
+  getHazardConfig,
   buildHazardBands,
   mergeOuterHazardBands,
   thunderProbability,
@@ -13,6 +14,7 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import { buildHazards } from '../utils/hazardEngine';
 import { displayOutlookAreas } from '../utils/outlookAreaMotion';
+import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -21,7 +23,8 @@ interface HazardOutlookMapProps {
   hazard: OutlookHazardKey;
   title: string;
   sourceLabel?: string;
-  activeRegion?: 'conus' | 'philippines';
+  activeRegion?: ActiveRegion;
+  philippinePane?: PhilippineRegionPane;
 }
 
 interface UpperAirFeature {
@@ -55,12 +58,20 @@ interface TriplePointFeature {
   geometry: { type: 'LineString'; coordinates: [number, number][] };
 }
 
-export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel, activeRegion = 'conus' }: HazardOutlookMapProps) {
+export default function HazardOutlookMap({
+  snapshot,
+  hazard,
+  title,
+  sourceLabel,
+  activeRegion = 'conus',
+  philippinePane = 'national',
+}: HazardOutlookMapProps) {
   const isPhil = activeRegion === 'philippines';
-  const geoUrl = isPhil ? '/world-110m.json' : STATES_URL;
+  const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
+  const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
   const projection = isPhil ? 'geoMercator' : 'geoAlbers';
   const projectionConfig = isPhil
-    ? { center: [121.8, 12.5] as [number, number], scale: 2800 }
+    ? { center: activePhilippinePane.center, scale: activePhilippinePane.scale }
     : {
         rotate: [96, 0, 0] as [number, number, number],
         center: [0, 38] as [number, number],
@@ -68,7 +79,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel,
         scale: 1000,
       };
 
-  const cfg = HAZARD_CONFIGS[hazard];
+  const cfg = getHazardConfig(hazard, isPhil);
   const contourHour = snapshot?.forecastHour ?? 0;
 
   const peakProb = snapshot
@@ -98,7 +109,7 @@ export default function HazardOutlookMap({ snapshot, hazard, title, sourceLabel,
         );
       });
 
-      return mergeOuterHazardBands(areaBands, hazard);
+      return mergeOuterHazardBands(areaBands, hazard, snapshot?.region?.bbox);
     },
     [snapshot, hazard, peakProb, contourHour],
   );

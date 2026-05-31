@@ -80,6 +80,8 @@ class CategoryPostProcessResult:
 def gridded_features_from_fields(
     fields: Mapping[str, np.ndarray],
     forecast_hour: int,
+    lats: np.ndarray | None = None,
+    lons: np.ndarray | None = None,
 ) -> GriddedFeatures:
     """Convert selected HRRR fields into raw and normalized gridded model features."""
     cape = _field(fields, "cape")
@@ -125,6 +127,8 @@ def gridded_features_from_fields(
     raw = {key: _finite(raw_value, _default_for(key)) for key, raw_value in raw.items()}
     normalized = {key: normalize_feature(key, value) for key, value in raw.items()}
     matrix = np.column_stack([raw[name].reshape(-1) for name in FEATURE_NAMES]).astype(float)
+    if lons is not None and np.any(lons > 0):
+        raw["is_philippines"] = True
     return GriddedFeatures(raw=raw, normalized=normalized, matrix=matrix, shape=shape)
 
 
@@ -856,6 +860,84 @@ def apply_environmental_probability_caps(
         storm_modes=modes,
     )
 
+    philippines_land = np.zeros(shape, dtype=bool)
+    philippines_gust_buffer = np.zeros(shape, dtype=bool)
+    philippines_hail_buffer = np.zeros(shape, dtype=bool)
+    philippines_tornado_buffer = np.zeros(shape, dtype=bool)
+    philippines_domain = lat_grid is not None and lon_grid is not None and _is_philippines_grid(lat_grid, lon_grid)
+    if philippines_domain and lat_grid is not None and lon_grid is not None:
+        features.raw["is_philippines"] = True
+        philippines_land = _philippines_activity_land_mask(lat_grid, lon_grid)
+        cape_peak = np.maximum(mucape, mlcape)
+        tropical_moisture = (dewpoint >= 70.0) & (features.raw["pwatIn"] >= 1.35)
+        weak_tropical_pulse = (
+            philippines_land
+            & tropical_moisture
+            & (cape_peak >= 250.0)
+            & (cin > -175.0)
+            & ((shear < 25.0) | (storm_rel < 18.0))
+        )
+        organized_tropical = (
+            philippines_land
+            & tropical_moisture
+            & (cape_peak >= 750.0)
+            & (shear >= 25.0)
+            & (cin > -175.0)
+            & ((storm_rel >= 18.0) | (srh03 >= 100.0))
+        )
+        strong_organized_tropical = (
+            organized_tropical
+            & (cape_peak >= 1250.0)
+            & (shear >= 35.0)
+            & ((storm_rel >= 24.0) | (srh03 >= 150.0))
+            & (cin > -150.0)
+        )
+        exceptional_tropical = (
+            strong_organized_tropical
+            & (cape_peak >= 2200.0)
+            & (shear >= 45.0)
+            & ((storm_rel >= 30.0) | (srh03 >= 220.0))
+            & (cin > -125.0)
+        )
+        rotating_tropical = (
+            strong_organized_tropical
+            & (mlcape >= 500.0)
+            & (srh01 >= 100.0)
+            & (srh03 >= 150.0)
+            & (lcl <= 1500.0)
+        )
+
+        before_caps = {"tornado": tornado_cap.copy(), "hail": hail_cap.copy(), "wind": wind_cap.copy()}
+
+        tornado_cap = np.where(philippines_land, np.minimum(tornado_cap, 0.019), tornado_cap)
+        tornado_cap = np.where(rotating_tropical, np.maximum(tornado_cap, 0.049), tornado_cap)
+        tornado_cap = np.where(rotating_tropical & (srh01 >= 150.0) & (lcl <= 1250.0), np.maximum(tornado_cap, 0.099), tornado_cap)
+
+        hail_cap = np.where(philippines_land, np.minimum(hail_cap, 1.0), hail_cap)
+        hail_cap = np.where(organized_tropical & (mucape >= 1000.0) & (features.raw["hgt500"] <= 5900.0), np.maximum(hail_cap, 0.149), hail_cap)
+        hail_cap = np.where(strong_organized_tropical & (mucape >= 2000.0) & (features.raw["hgt500"] <= 5850.0), np.maximum(hail_cap, 0.299), hail_cap)
+        hail_cap = np.where(exceptional_tropical & (mucape >= 2500.0), np.maximum(hail_cap, 0.449), hail_cap)
+
+        wind_cap = np.where(philippines_land, np.minimum(wind_cap, 1.0), wind_cap)
+        wind_cap = np.where(weak_tropical_pulse, np.maximum(wind_cap, 0.099), wind_cap)
+        wind_cap = np.where(organized_tropical, np.maximum(wind_cap, 0.149), wind_cap)
+        wind_cap = np.where(strong_organized_tropical, np.maximum(wind_cap, 0.299), wind_cap)
+        wind_cap = np.where(exceptional_tropical, np.maximum(wind_cap, 0.449), wind_cap)
+
+        philippines_gust_buffer = (
+            philippines_land
+            & (before_caps["wind"] > wind_cap)
+        )
+        philippines_hail_buffer = (
+            philippines_land
+            & (before_caps["hail"] > hail_cap)
+        )
+        philippines_tornado_buffer = (
+            philippines_land
+            & (before_caps["tornado"] > tornado_cap)
+        )
+
+
 
     # Apply storm-mode-aware cap adjustments
     # Landspout: relax tornado cap to 0.049 if active
@@ -1064,6 +1146,8 @@ def apply_environmental_probability_caps(
 
     report = {
         "environmentalCapsApplied": True,
+        "philippinesRegionalCalibrationApplied": philippines_domain,
+        "philippinesGustBufferCells": int(np.sum(philippines_gust_buffer)) if philippines_domain else 0,
         "modelCategoryCap": SPC_RISK_LABELS[model_cap],
         "rawProbabilityMax": _probability_max(raw),
         "cappedProbabilityMax": _probability_max(capped),
@@ -1237,11 +1321,26 @@ def category_grid_from_probabilities(
     )
     category_cap = _model_category_cap(model_metadata)
     severe_ord = np.minimum(severe_ord, category_cap)
-    tstm_mask = (
-        (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 250.0)
-        & (features.raw["sfcDewpointF"] >= 48.0)
-        & (features.raw["cin"] > -225.0)
-    )
+    is_ph_grid = False
+    if features.raw.get("is_philippines") or features.shape == (73, 57):
+        is_ph_grid = True
+    elif model_metadata and isinstance(model_metadata, dict):
+        model_version = str(model_metadata.get("version", "")).lower()
+        if "ecmwf" in model_version or "philippines" in model_version:
+            is_ph_grid = True
+
+    if is_ph_grid:
+        tstm_mask = (
+            (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 1000.0)
+            & (features.raw["sfcDewpointF"] >= 65.0)
+            & (features.raw["cin"] >= -150.0)
+        )
+    else:
+        tstm_mask = (
+            (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 250.0)
+            & (features.raw["sfcDewpointF"] >= 48.0)
+            & (features.raw["cin"] > -225.0)
+        )
     return np.where(severe_ord > 0, severe_ord, np.where(tstm_mask, 1, 0)).astype(np.int16)
 
 
@@ -1537,8 +1636,8 @@ def hazard_probability_shapes_from_grids(
             grid >= SPC_RISK_LABELS.index("MRGL"),
         ),
         "thunder": (
-            _thunder_probability_from_category_grid(grid),
-            _THUNDER_PROBABILITY_THRESHOLDS,
+            _thunder_probability_from_category_grid(grid, lat_grid, lon_grid),
+            (0.30, 0.60, 0.90) if _is_philippines_grid(lat_grid, lon_grid) else _THUNDER_PROBABILITY_THRESHOLDS,
             grid >= SPC_RISK_LABELS.index("TSTM"),
         ),
     }
@@ -1923,8 +2022,23 @@ def _threshold_masks_with_hierarchy(
     return masks
 
 
-def _thunder_probability_from_category_grid(category_grid: np.ndarray) -> np.ndarray:
+def _thunder_probability_from_category_grid(
+    category_grid: np.ndarray,
+    lat_grid: np.ndarray = None,
+    lon_grid: np.ndarray = None,
+) -> np.ndarray:
     grid = np.asarray(category_grid, dtype=np.int16)
+    is_phil = lat_grid is not None and lon_grid is not None and _is_philippines_grid(lat_grid, lon_grid)
+    if is_phil:
+        return np.where(
+            grid >= SPC_RISK_LABELS.index("ENH"),
+            0.90,
+            np.where(
+                grid >= SPC_RISK_LABELS.index("MRGL"),
+                0.60,
+                np.where(grid >= SPC_RISK_LABELS.index("TSTM"), 0.30, 0.0),
+            ),
+        )
     return np.where(
         grid >= SPC_RISK_LABELS.index("ENH"),
         0.70,
@@ -2872,6 +2986,8 @@ def _component_has_high_end_support(features: GriddedFeatures, component: np.nda
 
 
 def _rough_conus_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    if _is_philippines_grid(lat_grid, lon_grid):
+        return _philippines_land_mask(lat_grid, lon_grid)
     # Coarse coastline-following polygon used only to damp isolated offshore
     # artifacts. It is intentionally conservative and not a cartographic mask.
     conus_ring = [
@@ -2975,6 +3091,14 @@ def _texas_mexico_border_mrgl_cap_mask(lat_grid: np.ndarray, lon_grid: np.ndarra
 
 
 def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
+    if _is_philippines_grid(lat_grid, lon_grid):
+        offshore = ~_philippines_land_mask(lat_grid, lon_grid, buffer_deg=0.3)
+        return {
+            "philippinesOffshore": offshore,
+            "gulfOfMexico": offshore,
+            "floridaGulf": np.zeros_like(lat_grid, dtype=bool),
+            "atlanticOcean": np.zeros_like(lat_grid, dtype=bool),
+        }
     return {
         "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid),
         "floridaGulf": _florida_gulf_offshore_mask(lat_grid, lon_grid),
@@ -2983,6 +3107,10 @@ def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[s
 
 
 def _strict_category_cap_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
+    if _is_philippines_grid(lat_grid, lon_grid):
+        return {
+            "texasMexicoBorder": np.zeros_like(lat_grid, dtype=bool),
+        }
     return {
         "texasMexicoBorder": _texas_mexico_border_mrgl_cap_mask(lat_grid, lon_grid),
     }
@@ -3377,3 +3505,108 @@ def _signed_ring_area(coords: list[list[float]]) -> float:
 
 def _round_nested(values: np.ndarray, digits: int = 3) -> list[list[float]]:
     return np.round(np.asarray(values, dtype=float), digits).tolist()
+
+
+_philippines_land_polygon = None
+_philippines_land_polygon_lock = threading.Lock()
+
+
+def _load_philippines_land_polygon() -> Any:
+    global _philippines_land_polygon
+    if _philippines_land_polygon is not None:
+        return _philippines_land_polygon
+    with _philippines_land_polygon_lock:
+        if _philippines_land_polygon is not None:
+            return _philippines_land_polygon
+        import json
+        import os
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(base_dir, "public", "philippines-provinces.json")
+        if not os.path.exists(path):
+            path = os.path.join(os.getcwd(), "public", "philippines-provinces.json")
+            
+        with open(path, "r") as f:
+            topo = json.load(f)
+            
+        transform = topo["transform"]
+        scale = transform["scale"]
+        translate = transform["translate"]
+        arcs = topo["arcs"]
+        
+        decoded_arcs = []
+        for arc in arcs:
+            x, y = 0, 0
+            decoded_arc = []
+            for pt in arc:
+                x += pt[0]
+                y += pt[1]
+                real_x = x * scale[0] + translate[0]
+                real_y = y * scale[1] + translate[1]
+                decoded_arc.append((real_x, real_y))
+            decoded_arcs.append(decoded_arc)
+            
+        polygons = []
+        for geom in topo["objects"]["default"]["geometries"]:
+            g_type = geom["type"]
+            g_arcs = geom["arcs"]
+            
+            if g_type == "Polygon":
+                poly_rings = []
+                for ring in g_arcs:
+                    coords = []
+                    for arc_idx in ring:
+                        if arc_idx < 0:
+                            arc_coords = decoded_arcs[~arc_idx][::-1]
+                        else:
+                            arc_coords = decoded_arcs[arc_idx]
+                        
+                        if not coords:
+                            coords.extend(arc_coords)
+                        else:
+                            coords.extend(arc_coords[1:])
+                    if len(coords) >= 4:
+                        poly_rings.append(coords)
+                if poly_rings:
+                    polygons.append(Polygon(poly_rings[0], poly_rings[1:]))
+                    
+            elif g_type == "MultiPolygon":
+                for poly in g_arcs:
+                    poly_rings = []
+                    for ring in poly:
+                        coords = []
+                        for arc_idx in ring:
+                            if arc_idx < 0:
+                                arc_coords = decoded_arcs[~arc_idx][::-1]
+                            else:
+                                arc_coords = decoded_arcs[arc_idx]
+                            
+                            if not coords:
+                                coords.extend(arc_coords)
+                            else:
+                                coords.extend(arc_coords[1:])
+                        if len(coords) >= 4:
+                            poly_rings.append(coords)
+                    if poly_rings:
+                        polygons.append(Polygon(poly_rings[0], poly_rings[1:]))
+                        
+        _philippines_land_polygon = unary_union(polygons)
+        return _philippines_land_polygon
+
+
+def _is_philippines_grid(lat_grid: np.ndarray, lon_grid: np.ndarray) -> bool:
+    return lat_grid is not None and lon_grid is not None and np.any(lon_grid > 0)
+
+
+def _philippines_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray, buffer_deg: float = 0.0) -> np.ndarray:
+    poly = _load_philippines_land_polygon()
+    if buffer_deg > 0:
+        poly = poly.buffer(buffer_deg)
+    import shapely.vectorized
+    return shapely.vectorized.contains(poly, lon_grid, lat_grid)
+
+
+def _philippines_activity_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    return _philippines_land_mask(lat_grid, lon_grid, buffer_deg=0.0)

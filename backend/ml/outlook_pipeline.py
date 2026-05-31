@@ -163,9 +163,9 @@ def run_pipeline(
     if working_dir.exists():
         shutil.rmtree(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
-    hours = resolve_forecast_hours(forecast_hours)
+    hours = resolve_forecast_hours(forecast_hours, model_name=model_name)
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=False)
-    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
+    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy, model_name=model_name)
     effective_min_successful = min(max(1, int(min_successful_hours)), len(hours))
     range_workers = _resolve_worker_count(max_workers, DEFAULT_RANGE_WORKERS)
     grid_stride = _resolve_grid_stride(grid_stride)
@@ -432,14 +432,14 @@ def run_incremental_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "hours").mkdir(parents=True, exist_ok=True)
-    hours = resolve_forecast_hours(forecast_hours)
+    hours = resolve_forecast_hours(forecast_hours, model_name=model_name)
     if process_forecast_hours is None:
         process_requested_hours = list(hours)
     else:
         process_requested_hours = _resolve_process_forecast_hours(process_forecast_hours, hours)
     requested_force_hours = set(process_requested_hours)
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=True)
-    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy)
+    required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy, model_name=model_name)
     hour_workers = _resolve_worker_count(hour_workers, DEFAULT_HOUR_WORKERS)
     range_workers = _resolve_worker_count(range_workers if range_workers is not None else max_workers, DEFAULT_RANGE_WORKERS)
     grid_stride = _resolve_grid_stride(grid_stride)
@@ -991,7 +991,7 @@ def _build_hour_artifact(
     model: Mapping[str, Any],
     tile_stride: int,
 ) -> dict[str, Any]:
-    features = gridded_features_from_fields(fetched.fields, forecast_hour)
+    features = gridded_features_from_fields(fetched.fields, forecast_hour, lats=fetched.lats, lons=fetched.lons)
     raw_probabilities = predictor(features)
     if raw_probabilities is None:
         raise RuntimeError("ML hazard model returned no gridded probabilities")
@@ -2141,7 +2141,7 @@ def _write_json(path: Path, payload: Any) -> None:
 def _json_default(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
-    if isinstance(value, (np.floating, np.integer)):
+    if isinstance(value, np.generic):
         return value.item()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
@@ -2167,14 +2167,23 @@ def _parse_iso(value: Any) -> datetime | None:
 def resolve_forecast_hours(
     forecast_hours: Iterable[int] | None = None,
     all_hours: bool = False,
+    model_name: str = "hrrr",
 ) -> list[int]:
     if all_hours and forecast_hours is not None:
         raise ValueError("--all-hours cannot be combined with --forecast-hours")
-    selected = ALL_FORECAST_HOURS if all_hours else (FORECAST_HOURS if forecast_hours is None else forecast_hours)
-    hours = sorted({int(hour) for hour in selected})
-    invalid = [hour for hour in hours if hour < 0 or hour > 48]
-    if invalid:
-        raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
+    if model_name == "ecmwf":
+        default_hours = list(range(0, 91, 3))
+        selected = default_hours if (forecast_hours is None) else forecast_hours
+        hours = sorted({int(hour) for hour in selected})
+        invalid = [hour for hour in hours if hour < 0 or hour > 90]
+        if invalid:
+            raise ValueError(f"Forecast hours must be in 0..90: {invalid}")
+    else:
+        selected = ALL_FORECAST_HOURS if all_hours else (FORECAST_HOURS if forecast_hours is None else forecast_hours)
+        hours = sorted({int(hour) for hour in selected})
+        invalid = [hour for hour in hours if hour < 0 or hour > 48]
+        if invalid:
+            raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
     if not hours:
         raise ValueError("At least one forecast hour is required")
     return hours
@@ -2184,11 +2193,12 @@ def resolve_required_forecast_hour(
     forecast_hours: Iterable[int],
     require_complete_hour: int | None = None,
     cycle_policy: str = DEFAULT_CYCLE_POLICY,
+    model_name: str = "hrrr",
 ) -> int:
     if require_complete_hour is not None:
         required = int(require_complete_hour)
     elif cycle_policy == "complete-48":
-        required = 48
+        required = 90 if model_name == "ecmwf" else 48
     elif cycle_policy == "latest-startable":
         required = 0
     else:
@@ -2196,8 +2206,10 @@ def resolve_required_forecast_hour(
         if not hours:
             raise ValueError("At least one forecast hour is required")
         required = max(hours)
-    if required < 0 or required > 48:
-        raise ValueError(f"Required complete HRRR forecast hour must be in 0..48: {required}")
+    max_hour = 90 if model_name == "ecmwf" else 48
+    if required < 0 or required > max_hour:
+        model_upper = model_name.upper()
+        raise ValueError(f"Required complete {model_upper} forecast hour must be in 0..{max_hour}: {required}")
     return required
 
 

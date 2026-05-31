@@ -84,10 +84,57 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.5',
+    codename: 'Brutalist UI Refactor & Hazard Diagnostics',
+    date: '2026-05-31',
+    status: 'CURRENT',
+    summary:
+      'Refactors operator dashboard layout, integrates unified control dropdowns, enhances the Hazard Probability Board with comprehensive hover diagnostics, replaces all emojis with custom SVGs, and refines flood risk formulation to incorporate multi-variable soil and drainage profiles.',
+    highlights: [
+      'Operator Control Row: Unified active region, hazard view, and export options into a clean, drop-down single-row interface',
+      'Hazard Probability Board: Redesigned diagnostic cards with custom parameter-specific description tooltips',
+      'SVG Asset Integration: Replaced all legacy text/unicode emojis with beautiful, themed vector graphics for all weather symbols',
+      'Advanced Flood Hazard Engine: Expanded flood hazard formula to balance PWAT with soil saturation, runoff factors, and local terrain slope',
+      'Tactile Close Controls: Added manual dismiss actions to the export overlay for improved operator control',
+    ],
+    changes: [
+      {
+        kind: 'IMPROVE',
+        title: 'Unified single-row dropdown controls',
+        body: 'Reorganized the active region, forecast type, hazard view, and export actions into a single compact control row. The control layout adapts dynamically and places native drop-down arrows perfectly inline.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Dashboard layout reorganization',
+        body: 'Moved the convective type row below the primary forecast map to establish a logical top-to-bottom spatial hierarchy.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Completely emoji-free brutalist SVG system',
+        body: 'Scrubbed all legacy unicode emojis from UI modules, replacing them with high-fidelity custom SVG indicators for winds, hail, tornadoes, and general thunderstorms.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Refactored flood risk formulation',
+        body: 'Upgraded the flood hazard logic from a simple PWAT-only threshold to an advanced multi-variable formulation incorporating soil moisture saturation, precipitation runoff factors, and topographic slopes.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Enhanced Hazard Probability Board & tooltips',
+        body: 'Re-engineered the hazard cards to present precise probability categories with detailed contextual explanations accessible via touch and hover tooltips.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Export overlay dismiss action',
+        body: 'Equipped the animated GIF export panel with a robust, styled close button to let operators easily return to the dashboard.',
+      },
+    ],
+  },
+  {
     version: 'v0.4',
     codename: 'US regional severe logic expansion',
     date: '2026-05-30',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'Implements comprehensive regional severe convective risk logic across the United States. Adds tailored forecasting engines for the Southeast (Dixie Alley, Florida, Gulf Coast), Midwest/Corn Belt, High Plains/Front Range, Northern Plains, Northeast/Appalachians, Desert Southwest, Intermountain West, Pacific Northwest, Great Basin, and California. Refines convective environment assessments with terrain wedge features, stabilization penalties, custom landspout shear/vorticity scales, and low-CAPE/high-shear configurations.',
     highlights: [
@@ -822,7 +869,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.4
+          AutoOutlook · Automated Convective Risk Intelligence · v0.5
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

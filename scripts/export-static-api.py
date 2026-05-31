@@ -69,7 +69,7 @@ def coerce_hours(value: object) -> list[int]:
             hour = int(item)
         except (TypeError, ValueError):
             continue
-        if 0 <= hour <= 48:
+        if 0 <= hour <= 90:
             hours.append(hour)
     return sorted(set(hours))
 
@@ -97,7 +97,11 @@ def import_artifact_server_helpers(artifact_dir: Path):
     os.environ.pop("AUTOOUTLOOK_ARTIFACT_BUCKET", None)
     os.environ.pop("AUTOOUTLOOK_ARTIFACT_PREFIX", None)
 
-    from backend import server  # noqa: PLC0415
+    import importlib
+    if "backend.server" in sys.modules:
+        server = importlib.reload(sys.modules["backend.server"])
+    else:
+        from backend import server  # noqa: PLC0415
 
     return server
 
@@ -170,10 +174,16 @@ def lightweight_probability_tiles(index: dict[str, Any]) -> dict[str, Any]:
 
 def validate_full_index(index: dict[str, Any]) -> None:
     ready = set(coerce_hours(index.get("readyForecastHours")))
-    if index.get("status") != "complete" or not FULL_INCREMENTAL_FORECAST_HOURS.issubset(ready):
-        missing = sorted(FULL_INCREMENTAL_FORECAST_HOURS - ready)
-        raise SystemExit(
-            "Refusing static export because artifacts are not a complete F00-F48 set. "
+    model = index.get("cycleDetection", {}).get("cyclePolicy", {}).get("model", "HRRR").upper()
+    if model == "ECMWF":
+        expected = set(range(0, 91, 3))
+    else:
+        expected = set(range(49))
+
+    if index.get("status") != "complete" or not expected.issubset(ready):
+        missing = sorted(expected - ready)
+        raise ValueError(
+            f"Refusing static export because artifacts are not a complete {model} set. "
             f"status={index.get('status')!r} missing={missing[:10]}"
         )
 
@@ -229,7 +239,43 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
 
 def main() -> None:
     args = parse_args()
-    export_static_api(args.artifact_dir, args.legacy_artifact_dir, args.output_dir)
+
+    # If the user passed default artifact directory, we attempt to export both models if they exist.
+    is_default_run = (args.artifact_dir == DEFAULT_ARTIFACT_DIR)
+
+    if is_default_run:
+        # 1. Export legacy/conus to output_dir (first, so it clears the root but keeps later subfolders)
+        if DEFAULT_ARTIFACT_DIR.exists():
+            try:
+                print("Exporting CONUS artifacts (legacy root)...")
+                export_static_api(DEFAULT_ARTIFACT_DIR, args.legacy_artifact_dir, args.output_dir)
+
+                print("Exporting CONUS artifacts (regional)...")
+                export_static_api(DEFAULT_ARTIFACT_DIR, args.legacy_artifact_dir, args.output_dir / "conus")
+            except ValueError as exc:
+                print(f"Warning: Skipping CONUS export: {exc}")
+        else:
+            print(f"CONUS artifacts dir not found: {DEFAULT_ARTIFACT_DIR}")
+
+        # 2. Export Philippines to output_dir / "philippines" (Commented out to exclude from artifact generation)
+        # ph_candidates = [
+        #     PROJECT_ROOT / "backend" / "artifacts" / "latest_incremental_ecmwf_complete",
+        # ]
+        # ph_dir = next((path for path in ph_candidates if path.exists()), ph_candidates[0])
+        # if ph_dir.exists():
+        #     try:
+        #         print("Exporting Philippines artifacts...")
+        #         export_static_api(ph_dir, args.legacy_artifact_dir, args.output_dir / "philippines")
+        #     except ValueError as exc:
+        #         print(f"Warning: Skipping Philippines export: {exc}")
+        # else:
+        #     print(f"Philippines artifacts dir not found: {ph_dir}")
+        pass
+    else:
+        try:
+            export_static_api(args.artifact_dir, args.legacy_artifact_dir, args.output_dir)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
 
 
 if __name__ == "__main__":

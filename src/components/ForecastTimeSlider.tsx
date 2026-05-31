@@ -64,7 +64,7 @@ export default function ForecastTimeSlider({
   const safeIndex = stops.length > 0 ? Math.max(0, Math.min(index, stops.length - 1)) : 0;
   const current = stops[safeIndex];
   const atStart = safeIndex <= 0;
-  const atEnd = stops.length === 0 || safeIndex >= stops.length - 1 || (current?.forecastHour ?? 0) >= 48;
+  const atEnd = stops.length === 0 || safeIndex >= stops.length - 1;
   const isHourly = stops.length > 24;
   const holdDelayRef = useRef<number | null>(null);
   const holdIntervalRef = useRef<number | null>(null);
