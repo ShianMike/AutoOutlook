@@ -240,7 +240,7 @@ function Hero() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v0.7 · OPS HARDENING</RetroBadge>
+            <RetroBadge tone="paper">v0.7.1 · CALIBRATION</RetroBadge>
           </div>
 
           <h1 className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
@@ -258,7 +258,7 @@ function Hero() {
             AutoOutlook ingests the latest extended-range model cycle, derives the severe-weather ingredient deck,
             runs gated tornado / hail / wind probability heads, and publishes
             SPC-style risk polygons + probability tiles for forecast hours <span className="font-mono font-bold text-ink">f00–f48</span>.
-            v0.7 hardens scheduled refreshes, release metadata, repository hygiene, and community standards while keeping SPC QC visible.
+            v0.7.1 verifies regional mesoscale logic, dryline and frontal gradients, and prolongs dashboard view-change transitions for maximum tactility.
           </p>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -820,7 +820,7 @@ function FinalCTA() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v0.7</RetroBadge>
+            <RetroBadge tone="amber">v0.7.1</RetroBadge>
           </div>
 
           <h2
@@ -870,7 +870,7 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.7
+          AutoOutlook · Automated Convective Risk Intelligence · v0.7.1
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>

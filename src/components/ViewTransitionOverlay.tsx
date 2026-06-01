@@ -32,7 +32,7 @@ const VIEW_META: Record<TransitionView, ViewMeta> = {
       '> RESUME PROVIDER CHAIN',
       '> RENDER LANDING DECK',
       '> BIND NAV CONTROLS',
-      '> READY · v0.7',
+      '> READY · v0.7.1',
     ],
   },
   dashboard: {
@@ -70,14 +70,14 @@ const VIEW_META: Record<TransitionView, ViewMeta> = {
     brand: 'Patch',
     brandAccent: 'Notes',
     title: 'Loading patch notes',
-    subtitle: 'v0.6 → v0.7 · release ladder',
+    subtitle: 'v0.7 → v0.7.1 · release ladder',
     badge: '◢ CHANGELOG',
     tone: 'lime',
     lines: [
       '> INDEX RELEASES',
-      '> DIFF v0.6 → v0.7',
+      '> DIFF v0.7 → v0.7.1',
       '> RESOLVE CHANGE KINDS',
-      '> READY · v0.7 CURRENT',
+      '> READY · v0.7.1 CURRENT',
     ],
   },
 };
@@ -104,9 +104,9 @@ const TONE_CLASSES: Record<AccentTone, { fg: string; bg: string; ring: string; b
 };
 
 // Total visible duration of the overlay before unmount.
-const TOTAL_MS = 980;
+const TOTAL_MS = 2500;
 // When the exit fade should start.
-const EXIT_AT_MS = 700;
+const EXIT_AT_MS = 2100;
 
 interface ViewTransitionOverlayProps {
   view: TransitionView;
@@ -230,7 +230,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
               <li
                 key={`${cycle}-${idx}`}
                 className="animate-boot-line opacity-0"
-                style={{ animationDelay: `${110 + idx * 90}ms` }}
+                style={{ animationDelay: `${110 + idx * 300}ms` }}
               >
                 {line}
               </li>
@@ -273,7 +273,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
             <span className={`inline-block h-1.5 w-1.5 animate-pulse-dot ${tone.bg}`} aria-hidden />
             STAND BY
           </span>
-          <span>v0.7 · STREAM OK</span>
+          <span>v0.7.1 · STREAM OK</span>
         </div>
       </div>
     </div>
@@ -288,10 +288,10 @@ function CornerMarks() {
   const cls = 'absolute h-3 w-3 border-paper';
   return (
     <>
-      <span aria-hidden className={`${cls} left-1.5 top-1.5 border-l-2 border-t-2 animate-corner-spin origin-top-left`} />
-      <span aria-hidden className={`${cls} right-1.5 top-1.5 border-r-2 border-t-2 animate-corner-spin origin-top-right`} />
-      <span aria-hidden className={`${cls} bottom-1.5 left-1.5 border-b-2 border-l-2 animate-corner-spin origin-bottom-left`} />
-      <span aria-hidden className={`${cls} bottom-1.5 right-1.5 border-b-2 border-r-2 animate-corner-spin origin-bottom-right`} />
+      <span aria-hidden className={`${cls} left-1.5 top-1.5 border-l-2 border-t-2`} />
+      <span aria-hidden className={`${cls} right-1.5 top-1.5 border-r-2 border-t-2`} />
+      <span aria-hidden className={`${cls} bottom-1.5 left-1.5 border-b-2 border-l-2`} />
+      <span aria-hidden className={`${cls} bottom-1.5 right-1.5 border-b-2 border-r-2`} />
     </>
   );
 }

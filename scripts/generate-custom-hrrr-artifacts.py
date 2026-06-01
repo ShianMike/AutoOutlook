@@ -207,6 +207,7 @@ def main() -> None:
         ),
         continue_on_hour_failure=not args.stop_on_hour_failure,
         publish_gcs_bucket=None,
+        verify_spc=True,
     )
     update_custom_metadata(args.output_dir, args.include_hgt500)
 

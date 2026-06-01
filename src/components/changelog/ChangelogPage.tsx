@@ -84,10 +84,40 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.7.1',
+    codename: 'Regional Calibration & Enhanced UI Tactility',
+    date: '2026-06-01',
+    status: 'CURRENT',
+    summary:
+      'This release introduces comprehensive regional logic calibration for mesoscale convective outlooks across CONUS, and optimizes operator dashboard transitions with heavier, more tactile loading intervals.',
+    highlights: [
+      'Regional logic verified: Evaluated CAD wedge interactions, high-based dryness, dryline bounds, and terrain-forced cold pool transitions',
+      'Tactile UI transition overlays: Increased dashboard view-switch loading sequence durations to provide a robust, brutalist operator feel',
+      'Unified risk calibrations: Fully calibrated gridded hazard margins matching live operator counts for Slight and Marginal zones',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Calibrated regional dryline and frontal gradients',
+        body: 'Verified that Plains convective boundary setups (dryline, triple point, and warm fronts) properly evaluate horizontal dewpoint gradients under robust shear profiles.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Tactile dashboard loading screens',
+        body: 'Prolonged the transition loading animation durations in the operator control center, shifting from short screen flashes to robust, deliberate load states.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Updated release log for v0.7.1',
+        body: 'Added v0.7.1 release notes to the interactive operator changelog, downgrading v0.7 to stable.',
+      },
+    ],
+  },
+  {
     version: 'v0.7',
     codename: 'Better Risk Categories & Reliable Refresh',
     date: '2026-06-01',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release makes the forecast categories behave more like a normal forecaster would expect. AutoOutlook should show fewer broad Marginal risk areas when the setup is weak, while still allowing real Slight risk areas to appear when the storm environment supports them. It also improves scheduled refresh reliability and updates the project release details for v0.7.0.',
     highlights: [

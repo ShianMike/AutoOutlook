@@ -732,7 +732,12 @@ def apply_environmental_probability_caps(
 
     hail_cap = np.ones(shape, dtype=float)
     hail_cap = _cap_where(hail_cap, (mucape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
-    hail_cap = _cap_where(hail_cap, (mucape < 1000.0) & (shear < 32.0), _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
+    hail_cap_cond = (
+        ((shear < 30.0) & (mucape < 2000.0))
+        | ((mucape < 800.0) & (shear < 40.0))
+        | ((mucape < 1200.0) & (shear < 34.0))
+    )
+    hail_cap = _cap_where(hail_cap, hail_cap_cond, _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
     hail_cap = _cap_where(hail_cap, (mucape < 1500.0) | (shear < 38.0), 0.29, reason_counts, "weakKinematics")
     hail_cap = _cap_where(hail_cap, (mucape < 2500.0) | (shear < 45.0), 0.44, reason_counts, "weakInstability")
     hail_cap = _cap_where(hail_cap, (mucape < 3200.0) | (shear < 50.0), 0.59, reason_counts, "weakInstability")
@@ -753,7 +758,12 @@ def apply_environmental_probability_caps(
 
     wind_cap = np.ones(shape, dtype=float)
     wind_cap = _cap_where(wind_cap, (mlcape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
-    wind_cap = _cap_where(wind_cap, (mlcape < 1000.0) & (shear < 32.0), _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
+    wind_cap_cond = (
+        ((shear < 30.0) & (mlcape < 2000.0))
+        | ((mlcape < 800.0) & (shear < 40.0))
+        | ((mlcape < 1200.0) & (shear < 34.0))
+    )
+    wind_cap = _cap_where(wind_cap, wind_cap_cond, _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
     wind_cap = _cap_where(
         wind_cap,
         (storm_rel < 24.0) & (shear < 42.0),
@@ -1281,7 +1291,7 @@ def category_grid_from_probabilities(
     severe_ord = np.maximum.reduce([tornado, hail, wind])
     organized_severe_mask = (
         (features.raw["mucape"] >= 500.0)
-        & (features.raw["sfcDewpointF"] >= 50.0)
+        & (features.raw["sfcDewpointF"] >= 52.0)
         & (features.raw["shear06Kt"] >= 25.0)
         & (features.raw["cin"] > -225.0)
     )
@@ -1316,7 +1326,8 @@ def category_grid_from_probabilities(
         & (features.raw["cin"] > -150.0)
     )
     severe_ord = np.where(organized_severe_mask, severe_ord, 0)
-    severe_ord = np.where(severe_kinematic_mask, severe_ord, np.minimum(severe_ord, 2))
+    kinematic_clamp = np.where(features.raw["mucape"] >= 1500.0, 2, 1)
+    severe_ord = np.where(severe_kinematic_mask, severe_ord, np.minimum(severe_ord, kinematic_clamp))
     severe_ord = np.where(
         significant_severe_mask & significant_kinematic_mask,
         severe_ord,

@@ -92,7 +92,7 @@ export default {
         'overlay-in': 'overlayIn 180ms ease-out forwards',
         'overlay-out': 'overlayOut 280ms ease-in forwards',
         'panel-in': 'panelIn 320ms cubic-bezier(0.2, 0.85, 0.35, 1.05) forwards',
-        'load-bar': 'loadBar 780ms cubic-bezier(0.32, 0, 0.34, 1) forwards',
+        'load-bar': 'loadBar 1900ms cubic-bezier(0.32, 0, 0.34, 1) forwards',
         'radar-sweep': 'radarSweep 1.6s linear infinite',
         'corner-spin': 'cornerSpin 700ms ease-out forwards',
         'boot-line': 'bootLine 360ms ease-out forwards',
