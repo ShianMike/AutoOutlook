@@ -2,7 +2,9 @@ name: Refresh static AutoOutlook artifacts
 
 on:
   schedule:
-    - cron: '30 * * * *'
+    # Matches the former Windows Task Scheduler cycle-aligned times:
+    # 01:30Z, 07:30Z, 13:30Z, and 19:30Z.
+    - cron: '30 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       force_deploy:
@@ -18,8 +20,9 @@ permissions:
   contents: read
 
 env:
-  AUTOOUTLOOK_HOUR_WORKERS: ${{ vars.AUTOOUTLOOK_HOUR_WORKERS || '2' }}
-  AUTOOUTLOOK_RANGE_WORKERS: ${{ vars.AUTOOUTLOOK_RANGE_WORKERS || '2' }}
+  AUTOOUTLOOK_HOUR_WORKERS: ${{ vars.AUTOOUTLOOK_HOUR_WORKERS || '3' }}
+  AUTOOUTLOOK_RANGE_WORKERS: ${{ vars.AUTOOUTLOOK_RANGE_WORKERS || '4' }}
+  AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES: ${{ vars.AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES || '2097152' }}
   AUTOOUTLOOK_GRID_STRIDE: ${{ vars.AUTOOUTLOOK_GRID_STRIDE || '3' }}
   AUTOOUTLOOK_TILE_STRIDE: ${{ vars.AUTOOUTLOOK_TILE_STRIDE || '1' }}
   AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
@@ -30,6 +33,12 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    env:
+      AUTOOUTLOOK_REPO_DIR: ${{ github.workspace }}
+      AUTOOUTLOOK_VENV_DIR: ${{ github.workspace }}/.venv
+      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
+      AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ github.workspace }}/backend/cache/hrrr_selected
+      AUTOOUTLOOK_LOG_DIR: ${{ github.workspace }}/.autooutlook/logs
 
     steps:
       - name: Check out source
@@ -48,90 +57,14 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Install Python dependencies
-        run: python -m pip install -r backend/requirements.txt
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Bootstrap runtime hazard models
-        run: python -m backend.ml.bootstrap_models
-
-      - name: Detect latest complete HRRR cycle
-        id: cycle
-        shell: bash
-        run: |
-          python scripts/detect-hrrr-cycle.py --require-forecast-hour 48 > cycle.json
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          payload = json.load(open("cycle.json", encoding="utf-8"))
-          print(f"cycle={payload.get('cycle', '')}")
-          print(f"cycle_time_iso={payload.get('cycleTimeISO', '')}")
-          PY
-
-      - name: Check deployed cycle
-        id: deployed
-        shell: bash
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import os
-          import urllib.request
-
-          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
-          expected = "${{ steps.cycle.outputs.cycle_time_iso }}"
-          force = "${{ github.event.inputs.force_deploy || 'false' }}".lower() == "true"
-          should_generate = True
-          reason = "production index unavailable"
-          if force:
-              reason = "manual force_deploy requested"
-          else:
-              try:
-                  with urllib.request.urlopen(url, timeout=20) as response:
-                      payload = json.load(response)
-                  ready = payload.get("readyForecastHours") or []
-                  if payload.get("cycleTimeISO") == expected and payload.get("status") == "complete" and len(ready) >= 49:
-                      should_generate = False
-                      reason = "production already has this complete cycle"
-                  else:
-                      reason = f"production cycle is {payload.get('cycleTimeISO')!r}, expected {expected!r}"
-              except Exception as exc:
-                  reason = f"production index check failed: {exc}"
-          print(f"should_generate={'true' if should_generate else 'false'}")
-          print(f"reason={reason}")
-          PY
-
-      - name: Skip unchanged cycle
-        if: steps.deployed.outputs.should_generate == 'false'
-        run: echo "${{ steps.deployed.outputs.reason }}"
-
-      - name: Generate incremental artifacts
-        if: steps.deployed.outputs.should_generate == 'true'
-        run: |
-          python -m backend.ml.outlook_pipeline `
-            --incremental `
-            --all-hours `
-            --cycle-policy complete-requested `
-            --output-dir backend/artifacts/latest_incremental `
-            --cache-dir backend/cache/hrrr_selected `
-            --hour-workers "$env:AUTOOUTLOOK_HOUR_WORKERS" `
-            --range-workers "$env:AUTOOUTLOOK_RANGE_WORKERS" `
-            --grid-stride "$env:AUTOOUTLOOK_GRID_STRIDE" `
-            --tile-stride "$env:AUTOOUTLOOK_TILE_STRIDE"
+      - name: Refresh and deploy static artifacts
         shell: pwsh
-
-      - name: Build frontend
-        if: steps.deployed.outputs.should_generate == 'true'
-        run: npm run build
-
-      - name: Export static API
-        if: steps.deployed.outputs.should_generate == 'true'
-        run: python scripts/export-static-api.py
-
-      - name: Deploy to Cloudflare Pages
-        if: steps.deployed.outputs.should_generate == 'true'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=${{ env.CLOUDFLARE_PAGES_BRANCH }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          $arguments = @("-SkipEnvFile")
+          if ("${{ github.event.inputs.force_deploy || 'false' }}".ToLowerInvariant() -eq "true") {
+            $arguments += "-Force"
+          }
+          ./scripts/windows/refresh-autooutlook.ps1 @arguments

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipEnvFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,16 @@ function Require-Env {
         throw "Missing required environment variable: $Name"
     }
     return $value
+}
+
+function Get-DefaultDataRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOOUTLOOK_DATA_DIR)) {
+        return $env:AUTOOUTLOOK_DATA_DIR
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        return (Join-Path $env:ProgramData "AutoOutlook")
+    }
+    return (Join-Path $script:RepoDir ".autooutlook")
 }
 
 function Invoke-Step {
@@ -211,22 +222,32 @@ function Remove-LocalHrrrCache {
 }
 
 $envFile = [Environment]::GetEnvironmentVariable("AUTOOUTLOOK_ENV_FILE", "Process")
-if ([string]::IsNullOrWhiteSpace($envFile)) {
-    $envFile = Join-Path $env:ProgramData "AutoOutlook\refresh.env"
+if (-not $SkipEnvFile) {
+    if ([string]::IsNullOrWhiteSpace($envFile)) {
+        if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
+            throw "AUTOOUTLOOK_ENV_FILE is required when ProgramData is unavailable. Use -SkipEnvFile in CI."
+        }
+        $envFile = Join-Path $env:ProgramData "AutoOutlook\refresh.env"
+    }
+    Import-EnvFile -Path $envFile
+}
+else {
+    Write-Host "Skipping env file import; using process environment."
 }
 
-Import-EnvFile -Path $envFile
 Require-Env "CLOUDFLARE_ACCOUNT_ID" | Out-Null
 Require-Env "CLOUDFLARE_API_TOKEN" | Out-Null
 
 $script:RepoDir = if ($env:AUTOOUTLOOK_REPO_DIR) { $env:AUTOOUTLOOK_REPO_DIR } else { (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
-$script:VenvDir = if ($env:AUTOOUTLOOK_VENV_DIR) { $env:AUTOOUTLOOK_VENV_DIR } else { Join-Path $env:ProgramData "AutoOutlook\.venv" }
-$script:StateDir = if ($env:AUTOOUTLOOK_STATE_DIR) { $env:AUTOOUTLOOK_STATE_DIR } else { Join-Path $env:ProgramData "AutoOutlook\state" }
-$logDir = if ($env:AUTOOUTLOOK_LOG_DIR) { $env:AUTOOUTLOOK_LOG_DIR } else { Join-Path $env:ProgramData "AutoOutlook\logs" }
-$hrrrCacheDir = if ($env:AUTOOUTLOOK_HRRR_CACHE_DIR) { $env:AUTOOUTLOOK_HRRR_CACHE_DIR } else { Join-Path $env:ProgramData "AutoOutlook\cache\hrrr_selected" }
+$defaultDataRoot = Get-DefaultDataRoot
+$script:VenvDir = if ($env:AUTOOUTLOOK_VENV_DIR) { $env:AUTOOUTLOOK_VENV_DIR } else { Join-Path $defaultDataRoot ".venv" }
+$script:StateDir = if ($env:AUTOOUTLOOK_STATE_DIR) { $env:AUTOOUTLOOK_STATE_DIR } else { Join-Path $defaultDataRoot "state" }
+$logDir = if ($env:AUTOOUTLOOK_LOG_DIR) { $env:AUTOOUTLOOK_LOG_DIR } else { Join-Path $defaultDataRoot "logs" }
+$hrrrCacheDir = if ($env:AUTOOUTLOOK_HRRR_CACHE_DIR) { $env:AUTOOUTLOOK_HRRR_CACHE_DIR } else { Join-Path $defaultDataRoot "cache\hrrr_selected" }
 
-$env:AUTOOUTLOOK_HOUR_WORKERS = if ($env:AUTOOUTLOOK_HOUR_WORKERS) { $env:AUTOOUTLOOK_HOUR_WORKERS } else { "2" }
-$env:AUTOOUTLOOK_RANGE_WORKERS = if ($env:AUTOOUTLOOK_RANGE_WORKERS) { $env:AUTOOUTLOOK_RANGE_WORKERS } else { "2" }
+$env:AUTOOUTLOOK_HOUR_WORKERS = if ($env:AUTOOUTLOOK_HOUR_WORKERS) { $env:AUTOOUTLOOK_HOUR_WORKERS } else { "3" }
+$env:AUTOOUTLOOK_RANGE_WORKERS = if ($env:AUTOOUTLOOK_RANGE_WORKERS) { $env:AUTOOUTLOOK_RANGE_WORKERS } else { "4" }
+$env:AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES = if ($env:AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES) { $env:AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES } else { "2097152" }
 $env:AUTOOUTLOOK_GRID_STRIDE = if ($env:AUTOOUTLOOK_GRID_STRIDE) { $env:AUTOOUTLOOK_GRID_STRIDE } else { "3" }
 $env:AUTOOUTLOOK_TILE_STRIDE = if ($env:AUTOOUTLOOK_TILE_STRIDE) { $env:AUTOOUTLOOK_TILE_STRIDE } else { "1" }
 $env:AUTOOUTLOOK_PRODUCTION_INDEX_URL = if ($env:AUTOOUTLOOK_PRODUCTION_INDEX_URL) { $env:AUTOOUTLOOK_PRODUCTION_INDEX_URL } else { "https://autooutlook.tech/api/outlook/incremental" }
@@ -235,7 +256,9 @@ $env:CLOUDFLARE_PAGES_BRANCH = if ($env:CLOUDFLARE_PAGES_BRANCH) { $env:CLOUDFLA
 
 New-Item -ItemType Directory -Force -Path $script:StateDir, $logDir, $hrrrCacheDir | Out-Null
 
-$mutex = [Threading.Mutex]::new($false, "Global\AutoOutlookStaticRefresh")
+$isWindowsPlatform = $PSVersionTable.PSEdition -eq "Desktop" -or (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue).Value
+$mutexName = if ($isWindowsPlatform) { "Global\AutoOutlookStaticRefresh" } else { "AutoOutlookStaticRefresh" }
+$mutex = [Threading.Mutex]::new($false, $mutexName)
 if (-not $mutex.WaitOne(0)) {
     Write-Host "Another AutoOutlook refresh is already running; exiting."
     exit 0

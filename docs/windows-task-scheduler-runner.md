@@ -1,5 +1,7 @@
 # Windows Task Scheduler Runner
 
+This is now a fallback runner. The scheduled GitHub Action uses `scripts/windows/refresh-autooutlook.ps1` directly with the same `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z` schedule and fast selected-field fetch settings.
+
 This is the temporary free runner for AutoOutlook on the local Windows machine. It replaces the GitHub Actions scheduler with a Windows scheduled task that:
 
 1. Detects the latest complete HRRR cycle.
@@ -104,6 +106,12 @@ Start-ScheduledTask -TaskName "AutoOutlook Static Refresh"
 ```
 
 Stop scheduling:
+
+```powershell
+Disable-ScheduledTask -TaskName "AutoOutlook Static Refresh"
+```
+
+Remove the task completely:
 
 ```powershell
 Unregister-ScheduledTask -TaskName "AutoOutlook Static Refresh" -Confirm:$false

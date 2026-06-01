@@ -6,13 +6,13 @@ This migration removes Google Cloud from the public serving path and from the sc
 
 - Cloudflare Pages serves the Vite build and the `autooutlook.tech` custom domain.
 - A Cloudflare Pages Function handles `/api/*` and maps those routes to static files generated under `dist/_api`.
-- A scheduled runner runs the HRRR/XGBoost artifact job. GitHub Actions can do this, but `docs/windows-task-scheduler-runner.md` is the fastest free local fallback and `docs/oracle-always-free-runner.md` is the preferred no-GitHub-billing cloud path.
+- GitHub Actions runs the HRRR/XGBoost artifact job on the same cycle-aligned schedule and fast selected-field fetch profile that the Windows Task Scheduler runner used. `docs/windows-task-scheduler-runner.md` is now only a local fallback, and `docs/oracle-always-free-runner.md` remains the preferred no-GitHub-billing cloud path.
 - The runner deploys only when a newer complete F00-F48 HRRR cycle is available, keeping Cloudflare Pages deploys below the Free plan's 500/month limit.
 - No public request triggers HRRR downloads, model inference, polygon generation, or preview generation.
 
 ## Required Accounts
 
-- GitHub repository with Actions enabled, a local Windows Task Scheduler runner configured with `docs/windows-task-scheduler-runner.md`, or an Oracle Always Free VM configured with `docs/oracle-always-free-runner.md`.
+- GitHub repository with Actions enabled, or an Oracle Always Free VM configured with `docs/oracle-always-free-runner.md` if Actions minutes become a problem.
 - Cloudflare Free account with a Pages project.
 - Cloudflare API token with Pages deploy permission.
 
