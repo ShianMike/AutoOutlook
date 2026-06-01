@@ -162,7 +162,24 @@ jobs:
       - name: Bootstrap runtime hazard models
         run: python -m backend.ml.bootstrap_models
 
+      - name: Show shard assignment
+        run: |
+          python - <<'PY'
+          from backend.ml.outlook_pipeline import (
+              cloud_run_task_shard_from_env,
+              resolve_cloud_run_task_forecast_hours,
+              resolve_forecast_hours,
+          )
+
+          shard = cloud_run_task_shard_from_env()
+          hours = resolve_forecast_hours(all_hours=True)
+          assigned = resolve_cloud_run_task_forecast_hours(hours, shard)
+          label = "none" if shard is None else f"{shard.index}/{shard.count}"
+          print(f"shard={label} hours={','.join(f'F{hour:02d}' for hour in assigned)}")
+          PY
+
       - name: Generate shard hours
+        timeout-minutes: 30
         run: |
           python -m backend.ml.outlook_pipeline \
             --incremental \

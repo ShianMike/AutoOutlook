@@ -435,6 +435,13 @@ def fetch_selected_hrrr_hour_with_metadata(
 
         chunks_by_start: dict[int, bytes] = {}
         worker_count = max(1, min(max_workers, len(fetch_ranges)))
+        print(
+            f"[hrrr selected] F{ref.forecast_hour:02d} "
+            f"records={len(records)} selectedRanges={len(ranges)} "
+            f"fetchRanges={len(fetch_ranges)} workers={worker_count} "
+            f"selectedBytes={int(sum(end - start + 1 for start, end in ranges))}",
+            flush=True,
+        )
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {executor.submit(_fetch_range, session, ref.grib_url, start, end): (start, end) for start, end in fetch_ranges}
             for future in as_completed(futures):
@@ -442,6 +449,12 @@ def fetch_selected_hrrr_hour_with_metadata(
                 chunks_by_start[start] = chunk
 
         chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
+        print(
+            f"[hrrr selected] F{ref.forecast_hour:02d} "
+            f"fetchedRanges={len(chunks_by_start)}/{len(fetch_ranges)} "
+            f"fetchedBytes={sum(len(chunk) for chunk in chunks)}",
+            flush=True,
+        )
         messages = decode_grib2(b"".join(chunks))
         from .hrrr_filter import _messages_to_fields
 
@@ -492,14 +505,25 @@ def _content_length(session: requests.Session, url: str) -> int | None:
 
 
 def _fetch_range(session: requests.Session, url: str, start: int, end: int) -> tuple[int, bytes]:
-    response = _request_with_backoff(
-        session,
-        "GET",
-        url,
-        headers={"Range": f"bytes={start}-{end}"},
-        timeout=90,
-        retries=3,
-    )
+    if isinstance(session, requests.Session):
+        request_session = requests.Session()
+        request_session.headers.update(session.headers)
+        close_session = True
+    else:
+        request_session = session
+        close_session = False
+    try:
+        response = _request_with_backoff(
+            request_session,
+            "GET",
+            url,
+            headers={"Range": f"bytes={start}-{end}"},
+            timeout=90,
+            retries=3,
+        )
+    finally:
+        if close_session:
+            request_session.close()
     response.raise_for_status()
     expected_length = end - start + 1
     if response.status_code == 200 and len(response.content) > expected_length + 1024:

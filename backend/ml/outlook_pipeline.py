@@ -870,6 +870,10 @@ def _process_incremental_hour(
     session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0 incremental-hour"
     try:
         fetch_started = time.perf_counter()
+        print(
+            f"[incremental fetch start] F{forecast_hour:02d} idx={ref.idx_url}",
+            flush=True,
+        )
         fetched = _fetch_one_hour(
             ref,
             session,
@@ -882,6 +886,14 @@ def _process_incremental_hour(
             model_name=model_name,
         )
         fetch_ms = int((time.perf_counter() - fetch_started) * 1000)
+        print(
+            f"[incremental fetch done] F{forecast_hour:02d} "
+            f"fetch={fetch_ms}ms "
+            f"cache={str(fetched.metadata.get('cacheHit')).lower()} "
+            f"shape={fetched.metadata.get('gridShape')} "
+            f"bytes={fetched.metadata.get('selectedByteCount')}",
+            flush=True,
+        )
 
         build_started = time.perf_counter()
         built = _build_hour_artifact(cycle, forecast_hour, fetched, predictor, model, tile_stride)
