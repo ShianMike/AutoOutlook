@@ -35,6 +35,10 @@ function Require-Env {
     return $value
 }
 
+function Test-WindowsPlatform {
+    return $PSVersionTable.PSEdition -eq "Desktop" -or [bool](Get-Variable -Name IsWindows -ErrorAction SilentlyContinue).Value
+}
+
 function Get-DefaultDataRoot {
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOOUTLOOK_DATA_DIR)) {
         return $env:AUTOOUTLOOK_DATA_DIR
@@ -43,6 +47,18 @@ function Get-DefaultDataRoot {
         return (Join-Path $env:ProgramData "AutoOutlook")
     }
     return (Join-Path $script:RepoDir ".autooutlook")
+}
+
+function Join-RepoPath {
+    param([string[]]$Parts)
+    return [System.IO.Path]::Combine([string[]](@($script:RepoDir) + $Parts))
+}
+
+function Get-VenvPythonExecutable {
+    if (Test-WindowsPlatform) {
+        return (Join-Path $script:VenvDir "Scripts\python.exe")
+    }
+    return (Join-Path $script:VenvDir "bin/python")
 }
 
 function Invoke-Step {
@@ -79,7 +95,7 @@ function Get-PythonExecutable {
         return $configured
     }
 
-    $venvPython = Join-Path $script:VenvDir "Scripts\python.exe"
+    $venvPython = Get-VenvPythonExecutable
     if (Test-Path -LiteralPath $venvPython) {
         return $venvPython
     }
@@ -99,13 +115,13 @@ function Get-PythonExecutable {
 
 function Ensure-PythonEnvironment {
     $basePython = Get-PythonExecutable
-    $venvPython = Join-Path $script:VenvDir "Scripts\python.exe"
+    $venvPython = Get-VenvPythonExecutable
     if (-not (Test-Path -LiteralPath $venvPython)) {
         New-Item -ItemType Directory -Force -Path $script:VenvDir | Out-Null
         Invoke-NativeCommand $basePython @("-m", "venv", $script:VenvDir)
     }
 
-    $requirementsPath = Join-Path $script:RepoDir "backend\requirements.txt"
+    $requirementsPath = Join-RepoPath @("backend", "requirements.txt")
     $stateHashPath = Join-Path $script:StateDir "requirements.sha256"
     $currentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $requirementsPath).Hash
     $previousHash = if (Test-Path -LiteralPath $stateHashPath) { Get-Content -LiteralPath $stateHashPath -Raw } else { "" }
@@ -120,7 +136,7 @@ function Ensure-PythonEnvironment {
 }
 
 function Ensure-NodeDependencies {
-    $packageLockPath = Join-Path $script:RepoDir "package-lock.json"
+    $packageLockPath = Join-RepoPath @("package-lock.json")
     $stateHashPath = Join-Path $script:StateDir "package-lock.sha256"
     $nodeModulesPath = Join-Path $script:RepoDir "node_modules"
     $currentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $packageLockPath).Hash
@@ -197,18 +213,18 @@ function Remove-GeneratedDirectory {
 }
 
 function Remove-LocalDeployOutputs {
-    $artifactsRoot = Join-Path $script:RepoDir "backend\artifacts"
+    $artifactsRoot = Join-RepoPath @("backend", "artifacts")
     Remove-GeneratedDirectory `
         -Path (Join-Path $artifactsRoot "latest_incremental") `
-        -ExpectedPath (Join-Path $script:RepoDir "backend\artifacts\latest_incremental") `
+        -ExpectedPath (Join-RepoPath @("backend", "artifacts", "latest_incremental")) `
         -Label "incremental artifacts"
     Remove-GeneratedDirectory `
         -Path (Join-Path $artifactsRoot "latest_incremental_complete") `
-        -ExpectedPath (Join-Path $script:RepoDir "backend\artifacts\latest_incremental_complete") `
+        -ExpectedPath (Join-RepoPath @("backend", "artifacts", "latest_incremental_complete")) `
         -Label "complete incremental artifacts"
     Remove-GeneratedDirectory `
-        -Path (Join-Path $script:RepoDir "dist") `
-        -ExpectedPath (Join-Path $script:RepoDir "dist") `
+        -Path (Join-RepoPath @("dist")) `
+        -ExpectedPath (Join-RepoPath @("dist")) `
         -Label "Cloudflare deploy bundle"
 }
 
@@ -243,7 +259,7 @@ $defaultDataRoot = Get-DefaultDataRoot
 $script:VenvDir = if ($env:AUTOOUTLOOK_VENV_DIR) { $env:AUTOOUTLOOK_VENV_DIR } else { Join-Path $defaultDataRoot ".venv" }
 $script:StateDir = if ($env:AUTOOUTLOOK_STATE_DIR) { $env:AUTOOUTLOOK_STATE_DIR } else { Join-Path $defaultDataRoot "state" }
 $logDir = if ($env:AUTOOUTLOOK_LOG_DIR) { $env:AUTOOUTLOOK_LOG_DIR } else { Join-Path $defaultDataRoot "logs" }
-$hrrrCacheDir = if ($env:AUTOOUTLOOK_HRRR_CACHE_DIR) { $env:AUTOOUTLOOK_HRRR_CACHE_DIR } else { Join-Path $defaultDataRoot "cache\hrrr_selected" }
+$hrrrCacheDir = if ($env:AUTOOUTLOOK_HRRR_CACHE_DIR) { $env:AUTOOUTLOOK_HRRR_CACHE_DIR } else { [System.IO.Path]::Combine($defaultDataRoot, "cache", "hrrr_selected") }
 
 $env:AUTOOUTLOOK_HOUR_WORKERS = if ($env:AUTOOUTLOOK_HOUR_WORKERS) { $env:AUTOOUTLOOK_HOUR_WORKERS } else { "3" }
 $env:AUTOOUTLOOK_RANGE_WORKERS = if ($env:AUTOOUTLOOK_RANGE_WORKERS) { $env:AUTOOUTLOOK_RANGE_WORKERS } else { "4" }
@@ -256,7 +272,7 @@ $env:CLOUDFLARE_PAGES_BRANCH = if ($env:CLOUDFLARE_PAGES_BRANCH) { $env:CLOUDFLA
 
 New-Item -ItemType Directory -Force -Path $script:StateDir, $logDir, $hrrrCacheDir | Out-Null
 
-$isWindowsPlatform = $PSVersionTable.PSEdition -eq "Desktop" -or (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue).Value
+$isWindowsPlatform = Test-WindowsPlatform
 $mutexName = if ($isWindowsPlatform) { "Global\AutoOutlookStaticRefresh" } else { "AutoOutlookStaticRefresh" }
 $mutex = [Threading.Mutex]::new($false, $mutexName)
 if (-not $mutex.WaitOne(0)) {
