@@ -1,6 +1,6 @@
 # Windows Task Scheduler Runner
 
-This is now a fallback runner. The scheduled GitHub Action uses `scripts/windows/refresh-autooutlook.ps1` directly with the same `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z` schedule and fast selected-field fetch settings.
+This is now a fallback runner. The scheduled GitHub Action uses the same cycle-aligned `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z` primary schedule, with backup triggers 15 minutes later in case GitHub drops a scheduled event.
 
 This is the temporary free runner for AutoOutlook on the local Windows machine. It replaces the GitHub Actions scheduler with a Windows scheduled task that:
 
@@ -68,7 +68,7 @@ Then rerun the installer to register the cycle-aligned task:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1
 ```
 
-By default, the task runs at `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z`, which is one hour and thirty minutes after the `00Z`, `06Z`, `12Z`, and `18Z` HRRR cycles. On a UTC+8 Windows timezone, that appears in Task Scheduler as `09:30`, `15:30`, `21:30`, and `03:30` local time.
+By default, the Windows task runs at `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z`, which is one hour and thirty minutes after the `00Z`, `06Z`, `12Z`, and `18Z` HRRR cycles. On a UTC+8 Windows timezone, that appears in Task Scheduler as `09:30`, `15:30`, `21:30`, and `03:30` local time. The GitHub Actions workflow also has backup triggers at `01:45Z`, `07:45Z`, `13:45Z`, and `19:45Z`; the workflow freshness gate skips the backup when the primary run already deployed the cycle.
 
 To override the UTC run times:
 

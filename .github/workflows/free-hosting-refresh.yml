@@ -5,6 +5,9 @@ on:
     # Matches the former Windows Task Scheduler cycle-aligned times:
     # 01:30Z, 07:30Z, 13:30Z, and 19:30Z.
     - cron: '30 1,7,13,19 * * *'
+    # Backup trigger for GitHub scheduler drops. Workflow-level concurrency
+    # prevents overlap; the production freshness gate skips if the primary ran.
+    - cron: '45 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       force_deploy:
