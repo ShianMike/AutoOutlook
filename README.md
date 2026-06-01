@@ -1,10 +1,45 @@
-  # AutoOutlook
+# AutoOutlook
 
 **Automated Convective Risk Intelligence**
 
-A fully automated severe-weather outlook dashboard and backend artifact pipeline. The live dashboard loads the latest HRRR-derived forecast bundle, while the deployable pipeline can generate SPC-style HRRR/XGBoost map artifacts for forecast hours `0..48` without user input.
+[![Refresh static AutoOutlook artifacts](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml/badge.svg)](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml)
 
-Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shadows, bold cards, scanline overlays, monospace accents).
+AutoOutlook is an open-source severe-weather outlook dashboard and artifact pipeline. It turns selected HRRR model fields into SPC-style risk products, hazard probability grids, verification summaries, and a public React dashboard.
+
+- **Live dashboard:** <https://autooutlook.tech>
+- **Primary maintainer:** [ShianMike](https://github.com/ShianMike)
+- **Current focus:** reproducible automated convective-risk products for forecast hours `F00-F48`
+- **Status:** active early-stage OSS; APIs and generated products are experimental and not a substitute for official weather warnings
+
+![AutoOutlook dashboard preview](public/autooutlook-embed.png)
+
+## Why this matters
+
+Severe-weather model guidance is often hard to inspect end to end: raw GRIB2 files are large, forecast products are scattered, and generated risk areas need verification against trusted references. AutoOutlook aims to make that workflow easier to reproduce and maintain by:
+
+- fetching only selected HRRR GRIB2 fields through byte-range filtering;
+- deriving severe-weather ingredients and ML-ready feature grids;
+- generating risk polygons, hazard probability tiles, metadata, preview images, and verification artifacts;
+- serving finished artifacts through public API routes without forcing visitors to trigger expensive model work;
+- comparing generated outlook artifacts against official SPC Day 1 data after predictions are written.
+
+## What AutoOutlook does
+
+- Builds deployable outlook artifacts for `F00-F48` from the latest available extended HRRR cycle.
+- Runs a Vite + React dashboard for forecast-hour playback, hazard boards, environmental ingredients, readiness, model audit state, and SPC verification.
+- Uses a three-tier provider chain: generated artifacts / Python backend, Open-Meteo browser fallback, then deterministic mock data.
+- Supports cost-controlled static and API hosting through Cloudflare Pages with scheduled artifact refreshes.
+- Keeps a leakage guard between model prediction and verification: official SPC outlook data is used only after prediction artifacts are generated.
+
+## Repository health
+
+- Public GitHub repository for the full frontend, backend, scheduler, and documentation.
+- Active maintenance includes forecast artifact generation, API response contracts, frontend inspection tools, scheduler reliability, and deployment documentation.
+- Contributions are welcome for weather-data ingestion, verification, security hardening, documentation, and frontend inspection workflows.
+
+## Safety and scope
+
+AutoOutlook is a research and visualization project. It should not be used as the sole source for emergency decisions. For operational forecasts, warnings, and watches, use official products from the National Weather Service, Storm Prediction Center, and local weather authorities.
 
 ## Stack
 
@@ -15,6 +50,8 @@ Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shad
   2. **Open-Meteo** (browser-side) — free GFS-Seamless JSON endpoints used as an automatic fallback if the backend isn't running.
   3. **Mock** — deterministic Plains severe-weather day used when both live providers fail.
 - **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest available extended HRRR cycle, processes forecast hours `0..48`, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
+
+Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shadows, bold cards, scanline overlays, monospace accents).
 
 ## Run
 
