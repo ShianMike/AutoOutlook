@@ -229,7 +229,12 @@ function Remove-LocalDeployOutputs {
 }
 
 function Remove-LocalHrrrCache {
-    $expectedCacheDir = Join-Path $env:ProgramData "AutoOutlook\cache\hrrr_selected"
+    $expectedCacheDir = if ($env:AUTOOUTLOOK_HRRR_CACHE_DIR) {
+        $env:AUTOOUTLOOK_HRRR_CACHE_DIR
+    }
+    else {
+        [System.IO.Path]::Combine((Get-DefaultDataRoot), "cache", "hrrr_selected")
+    }
     Remove-GeneratedDirectory `
         -Path $hrrrCacheDir `
         -ExpectedPath $expectedCacheDir `
@@ -334,7 +339,8 @@ try {
             "deploy",
             "dist",
             "--project-name=$env:CLOUDFLARE_PAGES_PROJECT",
-            "--branch=$env:CLOUDFLARE_PAGES_BRANCH"
+            "--branch=$env:CLOUDFLARE_PAGES_BRANCH",
+            "--commit-dirty=true"
         )
     }
 
