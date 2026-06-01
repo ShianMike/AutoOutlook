@@ -177,7 +177,7 @@ jobs:
             --no-spc-verify
 
       - name: Upload shard hours
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hours-shard-${{ matrix.shard }}
           path: backend/artifacts/latest_incremental/hours
@@ -221,7 +221,7 @@ jobs:
         run: npm ci
 
       - name: Download sharded hours
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: hours-shard-*
           path: backend/artifacts/latest_incremental/hours
