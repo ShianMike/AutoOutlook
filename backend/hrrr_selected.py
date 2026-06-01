@@ -14,7 +14,6 @@ import numpy as np
 import requests
 
 from .grib2 import decode_grib2
-from .hrrr_filter import _messages_to_fields
 
 HRRR_BASE_URL = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 EXTENDED_CYCLE_HOURS = (0, 6, 12, 18)
@@ -444,6 +443,8 @@ def fetch_selected_hrrr_hour_with_metadata(
 
         chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
         messages = decode_grib2(b"".join(chunks))
+        from .hrrr_filter import _messages_to_fields
+
         lats, lons, fields = _messages_to_fields(messages, require_cape="cape" in required_field_keys_tuple)
         lats, lons, fields = downsample_hrrr_grid(lats, lons, fields, grid_stride)
         validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
