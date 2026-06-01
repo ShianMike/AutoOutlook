@@ -366,6 +366,10 @@ Once `trainingRows >= 5000` and schema checks pass, `/api/forecast` will automat
 - `docs/retro-ui.md` — neo-brutalist / RetroUI design system: color tokens, typography, borders/shadows, motion, primitives, anti-rules.
 - `docs/hazard-outlooks.md` — hazard probability rendering system: dual artifact / rule-based paths, probability band ladder, and the offset + morphing SIG (significant severe) layer.
 
+## License
+
+AutoOutlook is released under the MIT License. See `LICENSE` for details.
+
 ## Out of scope
 
 Skew-T, hodograph, raw data tables, manual inputs, dropdowns, search, station selectors, uploads, editable fields, rawinsonde-style tabs, glassmorphism, generic SaaS dashboard look.

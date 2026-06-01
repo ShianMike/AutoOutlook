@@ -51,4 +51,6 @@ For documentation-only changes, a focused proofread is usually enough. For backe
 
 ## License
 
-This repository does not currently declare an open-source license. Until a license is added by the maintainer, ask before reusing the code outside normal GitHub contribution workflows.
+AutoOutlook is released under the MIT License. See `LICENSE` for the full license text.
+
+By contributing to this repository, you agree that your contributions are provided under the same MIT License.
