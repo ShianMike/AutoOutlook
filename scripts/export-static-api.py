@@ -60,6 +60,13 @@ def copy_if_exists(source: Path, target: Path) -> bool:
     return True
 
 
+def copy_first_existing(sources: list[Path], target: Path) -> Path | None:
+    for source in sources:
+        if copy_if_exists(source, target):
+            return source
+    return None
+
+
 def coerce_hours(value: object) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -225,8 +232,14 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
         legacy_dir=legacy_artifact_dir,
     ))
 
-    copy_if_exists(legacy_artifact_dir / "verification_summary.json", output_dir / "outlook" / "verification.json")
-    copy_if_exists(legacy_artifact_dir / "spc_day1_cat.geojson", output_dir / "outlook" / "spc-day1-category.geojson")
+    copy_first_existing(
+        [artifact_dir / "verification_summary.json", legacy_artifact_dir / "verification_summary.json"],
+        output_dir / "outlook" / "verification.json",
+    )
+    copy_first_existing(
+        [artifact_dir / "spc_day1_cat.geojson", legacy_artifact_dir / "spc_day1_cat.geojson"],
+        output_dir / "outlook" / "spc-day1-category.geojson",
+    )
     copy_if_exists(legacy_artifact_dir / "preview.png", output_dir / "outlook" / "preview.png")
 
     for forecast_hour in coerce_hours(index.get("readyForecastHours")):

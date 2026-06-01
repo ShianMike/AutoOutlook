@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import importlib.util
 import os
 import tempfile
 import threading
@@ -3507,6 +3508,91 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         self.assertEqual(complete_index["status"], "complete")
         self.assertEqual(complete_index["readyForecastHours"], [0, 1])
+
+    def test_incremental_pipeline_writes_spc_verification_for_complete_snapshot(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(_ref, _session):
+            return lats, lons, small_fields()
+
+        def fake_predict(features):
+            return {
+                "tornado": np.zeros(features.shape, dtype=float),
+                "hail": np.zeros(features.shape, dtype=float),
+                "wind": np.full(features.shape, 0.08, dtype=float),
+            }
+
+        def fake_spc(_session, output_dir):
+            self.assertIsNotNone(output_dir)
+            assert output_dir is not None
+            self.assertTrue((output_dir / "hours" / "f00" / "probability_tile.json").exists())
+            return {
+                "day1Url": "https://spc.example/day1",
+                "geojsonZipUrl": "https://spc.example/day1.zip",
+                "fetchedAtISO": "2024-05-04T13:15:00Z",
+                "categoryGeojson": fake_spc_geojson(),
+            }
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            output_dir = Path(tmp) / "latest_incremental"
+            run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+                verify_spc=True,
+                spc_fetch_fn=fake_spc,
+            )
+
+            index = json.loads((output_dir / "index.json").read_text(encoding="utf-8"))
+            summary = json.loads((output_dir / "verification_summary.json").read_text(encoding="utf-8"))
+            complete_dir = Path(tmp) / "latest_incremental_complete"
+            complete_index = json.loads((complete_dir / "index.json").read_text(encoding="utf-8"))
+            complete_summary = json.loads((complete_dir / "verification_summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(index["spcVerification"]["spcFetchedAtISO"], "2024-05-04T13:15:00Z")
+        self.assertTrue(index["spcVerification"]["spcFetchedAfterPredictionArtifacts"])
+        self.assertEqual(summary["verificationGridSource"], "incremental_probability_tiles")
+        self.assertEqual(summary["verificationForecastHours"], [0, 1])
+        self.assertEqual(complete_index["spcVerification"]["spcFetchedAtISO"], "2024-05-04T13:15:00Z")
+        self.assertEqual(complete_summary["spcFetchedAtISO"], "2024-05-04T13:15:00Z")
+
+    def test_static_export_prefers_incremental_spc_verification_artifacts(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "latest_incremental_complete"
+            legacy_dir = root / "latest"
+            output_dir = root / "out"
+            artifact_dir.mkdir()
+            legacy_dir.mkdir()
+            (artifact_dir / "verification_summary.json").write_text(json.dumps({"source": "incremental"}), encoding="utf-8")
+            (legacy_dir / "verification_summary.json").write_text(json.dumps({"source": "legacy"}), encoding="utf-8")
+
+            copied = export_module.copy_first_existing(
+                [artifact_dir / "verification_summary.json", legacy_dir / "verification_summary.json"],
+                output_dir / "outlook" / "verification.json",
+            )
+            payload = json.loads((output_dir / "outlook" / "verification.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(copied, artifact_dir / "verification_summary.json")
+        self.assertEqual(payload["source"], "incremental")
 
     def test_complete_snapshot_publish_avoids_directory_moves(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

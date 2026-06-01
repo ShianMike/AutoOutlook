@@ -422,6 +422,8 @@ def run_incremental_pipeline(
     detect_cycle_fn: CycleDetectFn | None = None,
     fetch_hour_fn: FetchHourFn | None = None,
     predictor_fn: PredictorFn | None = None,
+    verify_spc: bool = False,
+    spc_fetch_fn: Callable[[requests.Session, Path | None], dict[str, Any]] | None = None,
     publish_gcs_bucket: str | None = None,
     publish_gcs_prefix: str = "",
     model_name: str = "hrrr",
@@ -503,6 +505,7 @@ def run_incremental_pipeline(
             })
 
         artifact_changes = False
+        spc_verification: dict[str, Any] | None = None
 
         def write_index(status: str) -> dict[str, Any]:
             ready = sorted({int(hour) for hour in ready_hours})
@@ -545,6 +548,13 @@ def run_incremental_pipeline(
                 },
                 "latencyMs": int((time.perf_counter() - started) * 1000),
             }
+            if spc_verification is not None:
+                payload["spcVerification"] = spc_verification
+                payload["artifacts"] = {
+                    **payload["artifacts"],
+                    "verificationSummary": "verification_summary.json",
+                    "spcDay1Category": "spc_day1_cat.geojson",
+                }
             _write_json(output_dir / "index.json", payload)
             _write_json(output_dir / "metadata.json", payload)
             return payload
@@ -670,6 +680,17 @@ def run_incremental_pipeline(
             all_requested_ready = set(hours).issubset({int(hour) for hour in ready_hours})
             status = "complete" if all_requested_ready and stop_after_hour is None and not failed_hours else "partial"
             index = write_index(status)
+        if verify_spc and index.get("status") == "complete":
+            spc_verification = _write_incremental_spc_verification(
+                output_dir,
+                index,
+                cycle,
+                hours,
+                session,
+                spc_fetch_fn or fetch_current_spc_day1_category,
+            )
+            artifact_changes = True
+            index = write_index(str(index.get("status") or "complete"))
         complete_dir = _incremental_complete_output_dir(output_dir)
         if sharded_run:
             if publish_gcs_bucket and process_hours:
@@ -1540,6 +1561,83 @@ def _aggregate_for_spc_window(
         if valid <= valid_time < expire:
             selected.append(grid)
     return np.maximum.reduce(selected or category_grids)
+
+
+def _read_json_payload(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _tile_grid_payload(tile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    category_grid = np.asarray(tile.get("categoryOrdinal"), dtype=np.int16)
+    lats = np.asarray(tile.get("lats"), dtype=float)
+    lons = np.asarray(tile.get("lons"), dtype=float)
+    if category_grid.ndim != 2 or lats.shape != category_grid.shape or lons.shape != category_grid.shape:
+        raise ValueError("incremental probability tile is missing matching category/lats/lons grids")
+    return lats, lons, category_grid
+
+
+def _write_incremental_spc_verification(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    cycle: HrrrCycle,
+    requested_hours: Iterable[int],
+    session: requests.Session,
+    spc_fetch: Callable[[requests.Session, Path | None], dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        spc = spc_fetch(session, output_dir)
+        spc_geojson = spc.get("categoryGeojson")
+        if not isinstance(spc_geojson, Mapping):
+            raise ValueError("SPC Day 1 fetch did not return a category GeoJSON payload")
+
+        ready = set(_int_list(index.get("readyForecastHours")))
+        tile_lats: np.ndarray | None = None
+        tile_lons: np.ndarray | None = None
+        category_grids: list[np.ndarray] = []
+        verification_hours: list[int] = []
+        for forecast_hour in sorted({int(hour) for hour in requested_hours if int(hour) in ready}):
+            tile_path = output_dir / "hours" / f"f{forecast_hour:02d}" / "probability_tile.json"
+            tile = _read_json_payload(tile_path)
+            if not isinstance(tile, Mapping):
+                continue
+            hour_lats, hour_lons, category_grid = _tile_grid_payload(tile)
+            if tile_lats is None:
+                tile_lats = hour_lats
+                tile_lons = hour_lons
+            elif hour_lats.shape != tile_lats.shape or hour_lons.shape != tile_lons.shape:
+                raise ValueError(f"incremental probability tile shape mismatch for F{forecast_hour:02d}")
+            category_grids.append(category_grid)
+            verification_hours.append(forecast_hour)
+
+        if tile_lats is None or tile_lons is None or not category_grids:
+            raise ValueError("No ready incremental probability tiles were available for SPC verification")
+
+        verification_grid = _aggregate_for_spc_window(cycle, verification_hours, category_grids, spc_geojson)
+        summary = compare_prediction_to_spc(tile_lats, tile_lons, verification_grid, spc_geojson, None)
+        summary["spcDay1Url"] = spc.get("day1Url")
+        summary["spcGeojsonZipUrl"] = spc.get("geojsonZipUrl")
+        summary["spcFetchedAtISO"] = spc.get("fetchedAtISO")
+        summary["spcFetchedAfterPredictionArtifacts"] = True
+        summary["verificationGridSource"] = "incremental_probability_tiles"
+        summary["verificationForecastHours"] = verification_hours
+        summary["cycle"] = index.get("cycle")
+        summary["cycleTimeISO"] = index.get("cycleTimeISO")
+        summary["generatedAtISO"] = _now_iso()
+        _write_json(output_dir / "verification_summary.json", summary)
+        _write_json(output_dir / "spc_day1_cat.geojson", spc_geojson)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        summary = {
+            "error": f"{type(exc).__name__}: {exc}",
+            "spcFetchedAfterPredictionArtifacts": True,
+            "leakageGuard": "Current official SPC outlook is fetched only after prediction artifacts are generated.",
+            "verificationGridSource": "incremental_probability_tiles",
+            "cycle": index.get("cycle"),
+            "cycleTimeISO": index.get("cycleTimeISO"),
+            "generatedAtISO": _now_iso(),
+        }
+        _write_json(output_dir / "verification_summary.json", summary)
+        return summary
 
 
 def _render_preview(path: Path, lats: np.ndarray, lons: np.ndarray, category_grid: np.ndarray) -> Path | None:
@@ -2554,6 +2652,7 @@ def main() -> None:
                     force=args.force,
                     cycle_policy=cycle_policy,
                     require_complete_hour=args.require_complete_hour,
+                    verify_spc=not args.no_spc_verify,
                     publish_gcs_bucket=args.publish_gcs_bucket,
                     publish_gcs_prefix=args.publish_gcs_prefix,
                     model_name=args.model,
