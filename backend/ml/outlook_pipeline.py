@@ -478,14 +478,27 @@ def run_incremental_pipeline(
             )
             _cache_previous_incremental_cycle(output_dir)
             _clear_incremental_hour_artifacts(output_dir)
+        cycle_time_iso = cycle.cycle_time.isoformat().replace("+00:00", "Z")
+        disk_ready = [
+            hour
+            for hour in hours
+            if _incremental_hour_ready(output_dir, hour, cycle_time_iso=cycle_time_iso)
+        ]
+        if disk_ready:
+            print(
+                f"[incremental reuse] ready hours from disk: "
+                f"{','.join(f'F{hour:02d}' for hour in disk_ready)}",
+                flush=True,
+            )
+            ready_hours.extend(hour for hour in disk_ready if hour not in ready_hours)
         if existing_index is not None:
             existing_ready = [
                 hour for hour in _int_list(existing_index.get("readyForecastHours"))
-                if _incremental_hour_ready(output_dir, hour)
+                if _incremental_hour_ready(output_dir, hour, cycle_time_iso=cycle_time_iso)
             ]
             existing_ready = sorted({
                 *existing_ready,
-                *(hour for hour in hours if _incremental_hour_ready(output_dir, hour)),
+                *disk_ready,
             })
             existing_failed = [
                 item for item in existing_index.get("failedHours", [])

@@ -30,12 +30,166 @@ env:
   CLOUDFLARE_PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'master' }}
 
 jobs:
-  refresh:
+  preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 20
+    outputs:
+      should_generate: ${{ steps.gate.outputs.should_generate }}
+      reason: ${{ steps.gate.outputs.reason }}
+      cycle: ${{ steps.detect.outputs.cycle }}
+      cycle_time_iso: ${{ steps.detect.outputs.cycle_time_iso }}
+    env:
+      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install detector dependencies
+        run: python -m pip install --upgrade requests numpy
+
+      - name: Detect latest complete HRRR cycle
+        id: detect
+        run: |
+          mkdir -p "$AUTOOUTLOOK_STATE_DIR"
+          python scripts/detect-hrrr-cycle.py --require-forecast-hour 48 > "$AUTOOUTLOOK_STATE_DIR/cycle.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"cycle={cycle.get('cycle', '')}", file=output)
+              print(f"cycle_time_iso={cycle.get('cycleTimeISO', '')}", file=output)
+          print(json.dumps(cycle, indent=2))
+          PY
+
+      - name: Check production freshness
+        id: gate
+        env:
+          FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
+          expected = cycle.get("cycleTimeISO", "")
+          force = os.environ.get("FORCE_DEPLOY", "false").lower() == "true"
+          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
+
+          def write_outputs(should_generate: bool, reason: str) -> None:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  print(f"should_generate={str(should_generate).lower()}", file=output)
+                  print(f"reason={reason}", file=output)
+              print(reason)
+
+          if force:
+              write_outputs(True, "manual force requested")
+              raise SystemExit
+
+          try:
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  payload = json.load(response)
+              ready = payload.get("readyForecastHours") or []
+              ready_count = len(ready) if isinstance(ready, list) else 0
+              spc = payload.get("spcVerification") or {}
+              has_fresh_spc = bool(spc.get("spcFetchedAtISO")) and bool(spc.get("spcFetchedAfterPredictionArtifacts"))
+              complete = (
+                  payload.get("cycleTimeISO") == expected
+                  and payload.get("status") == "complete"
+                  and ready_count >= 49
+                  and has_fresh_spc
+              )
+              if complete:
+                  write_outputs(False, "production already has this complete cycle with SPC verification")
+              else:
+                  write_outputs(
+                      True,
+                      (
+                          f"production needs refresh: cycle={payload.get('cycleTimeISO')!r}, "
+                          f"expected={expected!r}, status={payload.get('status')!r}, "
+                          f"ready={ready_count}, spc={has_fresh_spc}"
+                      ),
+                  )
+          except Exception as exc:
+              write_outputs(True, f"production index check failed: {exc}")
+          PY
+
+  fetch-shards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: preflight
+    if: needs.preflight.outputs.should_generate == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6]
     env:
       AUTOOUTLOOK_REPO_DIR: ${{ github.workspace }}
-      AUTOOUTLOOK_VENV_DIR: ${{ github.workspace }}/.venv
+      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
+      AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ github.workspace }}/backend/cache/hrrr_selected
+      AUTOOUTLOOK_LOG_DIR: ${{ github.workspace }}/.autooutlook/logs
+      CLOUD_RUN_TASK_COUNT: 7
+      CLOUD_RUN_TASK_INDEX: ${{ matrix.shard }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r backend/requirements.txt
+
+      - name: Bootstrap runtime hazard models
+        run: python -m backend.ml.bootstrap_models
+
+      - name: Generate shard hours
+        run: |
+          python -m backend.ml.outlook_pipeline \
+            --incremental \
+            --all-hours \
+            --cycle-policy complete-requested \
+            --output-dir backend/artifacts/latest_incremental \
+            --cache-dir "$AUTOOUTLOOK_HRRR_CACHE_DIR" \
+            --hour-workers "$AUTOOUTLOOK_HOUR_WORKERS" \
+            --range-workers "$AUTOOUTLOOK_RANGE_WORKERS" \
+            --grid-stride "$AUTOOUTLOOK_GRID_STRIDE" \
+            --tile-stride "$AUTOOUTLOOK_TILE_STRIDE" \
+            --no-spc-verify
+
+      - name: Upload shard hours
+        uses: actions/upload-artifact@v4
+        with:
+          name: hours-shard-${{ matrix.shard }}
+          path: backend/artifacts/latest_incremental/hours
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: [preflight, fetch-shards]
+    if: needs.preflight.outputs.should_generate == 'true'
+    env:
+      AUTOOUTLOOK_REPO_DIR: ${{ github.workspace }}
       AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
       AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ github.workspace }}/backend/cache/hrrr_selected
       AUTOOUTLOOK_LOG_DIR: ${{ github.workspace }}/.autooutlook/logs
@@ -57,14 +211,85 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Refresh and deploy static artifacts
-        shell: pwsh
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Download sharded hours
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hours-shard-*
+          path: backend/artifacts/latest_incremental/hours
+          merge-multiple: true
+
+      - name: Bootstrap runtime hazard models
+        run: python -m backend.ml.bootstrap_models
+
+      - name: Finalize incremental artifacts
+        run: |
+          python -m backend.ml.outlook_pipeline \
+            --incremental \
+            --all-hours \
+            --cycle-policy complete-requested \
+            --output-dir backend/artifacts/latest_incremental \
+            --cache-dir "$AUTOOUTLOOK_HRRR_CACHE_DIR" \
+            --hour-workers "$AUTOOUTLOOK_HOUR_WORKERS" \
+            --range-workers "$AUTOOUTLOOK_RANGE_WORKERS" \
+            --grid-stride "$AUTOOUTLOOK_GRID_STRIDE" \
+            --tile-stride "$AUTOOUTLOOK_TILE_STRIDE"
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Export static API
+        run: python scripts/export-static-api.py
+
+      - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          $parameters = @{ SkipEnvFile = $true }
-          if ("${{ github.event.inputs.force_deploy || 'false' }}".ToLowerInvariant() -eq "true") {
-            $parameters.Force = $true
-          }
-          ./scripts/windows/refresh-autooutlook.ps1 @parameters
+          npx --yes wrangler@latest pages deploy dist \
+            --project-name="$CLOUDFLARE_PAGES_PROJECT" \
+            --branch="$CLOUDFLARE_PAGES_BRANCH" \
+            --commit-dirty=true
+
+      - name: Confirm deployed cycle
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          expected = "${{ needs.preflight.outputs.cycle_time_iso }}"
+          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
+          last_payload = None
+          for attempt in range(12):
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  payload = json.load(response)
+              last_payload = payload
+              ready = payload.get("readyForecastHours") or []
+              ready_count = len(ready) if isinstance(ready, list) else 0
+              spc = payload.get("spcVerification") or {}
+              has_fresh_spc = bool(spc.get("spcFetchedAtISO")) and bool(spc.get("spcFetchedAfterPredictionArtifacts"))
+              if (
+                  payload.get("cycleTimeISO") == expected
+                  and payload.get("status") == "complete"
+                  and ready_count >= 49
+                  and has_fresh_spc
+              ):
+                  print(f"confirmed {expected} with {ready_count} ready hours and SPC verification")
+                  raise SystemExit
+              print(
+                  f"waiting for deployed cycle attempt {attempt + 1}: "
+                  f"cycle={payload.get('cycleTimeISO')!r} status={payload.get('status')!r} "
+                  f"ready={ready_count} spc={has_fresh_spc}"
+              )
+              time.sleep(10)
+          raise SystemExit(f"deployed cycle was not confirmed: {last_payload!r}")
+          PY

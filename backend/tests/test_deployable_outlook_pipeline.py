@@ -4,6 +4,7 @@ import json
 import argparse
 import importlib.util
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -3474,6 +3475,79 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(after_skip, after_first)
         self.assertEqual(sorted(fetched_hours), [0, 0, 1])
 
+    def test_incremental_pipeline_finalizes_merged_shard_hours_without_refetching(self) -> None:
+        cycle = HrrrCycle("20240504", 12)
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+
+        def fake_detect(_session, _now):
+            return cycle
+
+        def fake_fetch(_ref, _session):
+            return lats, lons, small_fields()
+
+        def failing_fetch(ref, _session):
+            raise AssertionError(f"downloaded shard hour F{ref.forecast_hour:02d} should not be refetched")
+
+        def fake_predict(features):
+            probs = np.zeros(features.shape, dtype=float)
+            return {"tornado": probs, "hail": probs, "wind": probs}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.ml.outlook_pipeline.model_status",
+            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
+        ):
+            root = Path(tmp)
+            shard0 = root / "shard0"
+            shard1 = root / "shard1"
+            merged = root / "latest_incremental"
+
+            run_incremental_pipeline(
+                output_dir=shard0,
+                forecast_hours=[0, 1],
+                process_forecast_hours=[0],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+                verify_spc=False,
+            )
+            run_incremental_pipeline(
+                output_dir=shard1,
+                forecast_hours=[0, 1],
+                process_forecast_hours=[1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=fake_fetch,
+                predictor_fn=fake_predict,
+                verify_spc=False,
+            )
+
+            (merged / "hours").mkdir(parents=True)
+            shutil.copytree(shard0 / "hours" / "f00", merged / "hours" / "f00")
+            shutil.copytree(shard1 / "hours" / "f01", merged / "hours" / "f01")
+
+            index = run_incremental_pipeline(
+                output_dir=merged,
+                forecast_hours=[0, 1],
+                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
+                tile_stride=1,
+                detect_cycle_fn=fake_detect,
+                fetch_hour_fn=failing_fetch,
+                predictor_fn=fake_predict,
+                verify_spc=False,
+            )
+
+            complete_index = json.loads((root / "latest_incremental_complete" / "index.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(index["status"], "complete")
+        self.assertEqual(index["readyForecastHours"], [0, 1])
+        self.assertEqual(index["pendingForecastHours"], [])
+        self.assertEqual(complete_index["status"], "complete")
+        self.assertEqual(complete_index["readyForecastHours"], [0, 1])
+
     def test_incremental_pipeline_publishes_complete_snapshot_for_fallback(self) -> None:
         cycle = HrrrCycle("20240504", 12)
         lats = np.linspace(30.0, 34.0, 5)
@@ -3879,6 +3953,9 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 (directory / "probability_tile.json").write_text("{}", encoding="utf-8")
                 (directory / "upper_air_overlay.json").write_text("{}", encoding="utf-8")
                 (directory / "metadata.json").write_text(json.dumps({
+                    "forecastHour": 0,
+                    "cycleTimeISO": cycle.cycle_time.isoformat().replace("+00:00", "Z"),
+                    "validTimeISO": cycle.cycle_time.isoformat().replace("+00:00", "Z"),
                     "region": {"centerLat": 35.0, "centerLon": -97.0},
                     "ingredients": {},
                     "ingredientSample": {"gridRow": 0, "gridCol": 0},
