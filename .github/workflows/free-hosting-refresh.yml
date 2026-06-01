@@ -63,8 +63,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          $arguments = @("-SkipEnvFile")
+          $parameters = @{ SkipEnvFile = $true }
           if ("${{ github.event.inputs.force_deploy || 'false' }}".ToLowerInvariant() -eq "true") {
-            $arguments += "-Force"
+            $parameters.Force = $true
           }
-          ./scripts/windows/refresh-autooutlook.ps1 @arguments
+          ./scripts/windows/refresh-autooutlook.ps1 @parameters
