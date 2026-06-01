@@ -31,6 +31,17 @@ Severe-weather model guidance is often hard to inspect end to end: raw GRIB2 fil
 - Supports cost-controlled static and API hosting through Cloudflare Pages with scheduled artifact refreshes.
 - Keeps a leakage guard between model prediction and verification: official SPC outlook data is used only after prediction artifacts are generated.
 
+## Release package
+
+Tagged releases publish a container image to GitHub Container Registry:
+
+```powershell
+docker pull ghcr.io/shianmike/autooutlook:latest
+docker pull ghcr.io/shianmike/autooutlook:v0.6.0
+```
+
+The image contains the built React dashboard and Python backend service from the release tag.
+
 ## Repository health
 
 - Public GitHub repository for the full frontend, backend, scheduler, and documentation.

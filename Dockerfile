@@ -12,6 +12,12 @@ RUN npm run build
 FROM python:3.11-slim AS runtime
 WORKDIR /app
 
+LABEL org.opencontainers.image.title="AutoOutlook" \
+      org.opencontainers.image.description="Automated severe-weather risk intelligence from HRRR data with SPC-style outlook artifacts and a public React dashboard." \
+      org.opencontainers.image.source="https://github.com/ShianMike/AutoOutlook" \
+      org.opencontainers.image.url="https://autooutlook.tech" \
+      org.opencontainers.image.licenses="NOASSERTION"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     AUTOOUTLOOK_HOST=0.0.0.0 \
