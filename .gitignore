@@ -1,6 +1,9 @@
 node_modules
 dist
 dist-ssr
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
 *.local
 .vscode/*
 !.vscode/extensions.json
@@ -26,6 +29,7 @@ backend/artifacts/
 backend/cache/
 backend/hrrr_cache_selected/
 *.parquet
+*.zip
 .tmp/
 .codex-*.log
 .codex-last-image.txt
