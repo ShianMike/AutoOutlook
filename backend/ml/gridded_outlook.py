@@ -39,6 +39,14 @@ _PROBABILITY_COLORS = {
     "thunder": ("#c9a279", "#5cdde6", "#ef6055"),
 }
 
+# --- Tunable category-calibration constants ---
+# Probability ceiling applied to the MRGL-tier environmental cap for hail/wind.
+# Cells capped at this value cannot reach SLGT (which requires >= 0.15).
+_MRGL_PROBABILITY_CEILING = 0.14
+# Minimum 0-6 km bulk shear (kt) required by the severe_kinematic_mask.
+# Cells below this threshold are hard-clamped to at most MRGL (ordinal 2).
+_SEVERE_KINEMATIC_MIN_SHEAR = 30.0
+
 NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "forecastHour": (0.0, 48.0),
     "mlcape": (0.0, 4500.0),
@@ -724,7 +732,7 @@ def apply_environmental_probability_caps(
 
     hail_cap = np.ones(shape, dtype=float)
     hail_cap = _cap_where(hail_cap, (mucape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
-    hail_cap = _cap_where(hail_cap, (mucape < 1000.0) | (shear < 32.0), 0.14, reason_counts, "weakKinematics")
+    hail_cap = _cap_where(hail_cap, (mucape < 1000.0) & (shear < 32.0), _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
     hail_cap = _cap_where(hail_cap, (mucape < 1500.0) | (shear < 38.0), 0.29, reason_counts, "weakKinematics")
     hail_cap = _cap_where(hail_cap, (mucape < 2500.0) | (shear < 45.0), 0.44, reason_counts, "weakInstability")
     hail_cap = _cap_where(hail_cap, (mucape < 3200.0) | (shear < 50.0), 0.59, reason_counts, "weakInstability")
@@ -745,7 +753,7 @@ def apply_environmental_probability_caps(
 
     wind_cap = np.ones(shape, dtype=float)
     wind_cap = _cap_where(wind_cap, (mlcape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
-    wind_cap = _cap_where(wind_cap, (mlcape < 1000.0) | (shear < 32.0), 0.14, reason_counts, "weakKinematics")
+    wind_cap = _cap_where(wind_cap, (mlcape < 1000.0) & (shear < 32.0), _MRGL_PROBABILITY_CEILING, reason_counts, "weakKinematics")
     wind_cap = _cap_where(
         wind_cap,
         (storm_rel < 24.0) & (shear < 42.0),
@@ -1278,7 +1286,7 @@ def category_grid_from_probabilities(
         & (features.raw["cin"] > -225.0)
     )
     severe_kinematic_mask = (
-        (features.raw["shear06Kt"] >= 35.0)
+        (features.raw["shear06Kt"] >= _SEVERE_KINEMATIC_MIN_SHEAR)
         & (
             (features.raw["stormRelWindKt"] >= 24.0)
             | (features.raw["srh01"] >= 75.0)

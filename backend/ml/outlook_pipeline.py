@@ -1144,7 +1144,7 @@ def _forecast_category_from_grid(grid: np.ndarray) -> str:
         "NONE": 0,
         "TSTM": 1,
         "MRGL": 100,
-        "SLGT": 500,
+        "SLGT": 350,
         "ENH": 1200,
         "MDT": 2500,
         "HIGH": 4500,

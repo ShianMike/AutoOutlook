@@ -84,10 +84,89 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.7',
+    codename: 'Better Risk Categories & Reliable Refresh',
+    date: '2026-06-01',
+    status: 'CURRENT',
+    summary:
+      'This release makes the forecast categories behave more like a normal forecaster would expect. AutoOutlook should show fewer broad Marginal risk areas when the setup is weak, while still allowing real Slight risk areas to appear when the storm environment supports them. It also improves scheduled refresh reliability and updates the project release details for v0.7.0.',
+    highlights: [
+      'Fewer false Marginal areas: Weak storm setups are less likely to paint a broad MRGL risk area across the map',
+      'Better Slight risk detection: Compact but real SLGT areas can now survive the filters instead of getting downgraded',
+      'More balanced storm ingredients: Strong shear can now help a setup reach SLGT even when instability is only moderate',
+      'Regression tested: The new calibration path is covered by tests and the full 146-test deployable outlook suite passed',
+      'Backtest improved: A historical HRRR 06Z run raised SLGT coverage from about 92 cells to 718 cells after calibration',
+      'Refresh backup added: GitHub Actions now has a backup schedule if the normal refresh trigger is missed',
+      'Release cleanup: Code of Conduct, MIT license, ignore rules, package version, and GHCR defaults are updated for v0.7.0',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Marginal risk is less likely to be overdrawn',
+        body: 'AutoOutlook now only holds hail and wind probabilities down at the Marginal tier when both instability and wind shear are weak. If one ingredient is strong enough, the forecast can keep climbing toward Slight risk instead of being capped too early.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Very weak storm setups still stay low',
+        body: 'The lowest thunderstorm cap remains conservative. If instability is very weak or shear is extremely weak, the system keeps the risk near baseline thunderstorm level instead of creating unnecessary Marginal alerts.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Moderate shear can now support Slight risk',
+        body: 'The severe-weather shear check was relaxed from 35 kt to 30 kt. In plain terms, a setup with decent wind support no longer gets stuck at Marginal just because it misses the old stricter cutoff.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Small but real Slight risk areas are kept',
+        body: 'The system used to require a larger Slight area before keeping it. That minimum size was lowered, so compact but meaningful severe-weather zones can now stay visible on the map.',
+      },
+      {
+        kind: 'NEW',
+        title: 'New test protects the calibration change',
+        body: 'Added a regression test for the exact problem: moderate instability plus strong shear should be allowed to reach Slight risk for wind and hail, while the existing regional safety rules still behave the same.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Verified with tests and a historical backtest',
+        body: 'The deployable outlook test suite passed all 146 tests. A historical HRRR 06Z 20260530 backtest showed the calibration working: Slight risk coverage increased from about 92 cells to 718 cells, while broad Marginal overforecasting was reduced.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Backup refresh schedule',
+        body: 'Added a second GitHub Actions schedule as a backup. If the normal refresh is missed, the backup run gives the 00Z, 06Z, 12Z, and 18Z cycles another chance to publish fresh artifacts.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Refresh work stays split into smaller jobs',
+        body: 'The artifact refresh remains split into seven forecast-hour jobs before the final deploy step. That keeps one job from doing all the work and helps the refresh finish more reliably.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Missed 06Z schedule recovery',
+        body: 'Added the recovery note for the missed 06Z run: start the refresh manually, regenerate the latest HRRR artifacts, and confirm the deployed API is serving the fresh bundle.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Community standards added',
+        body: 'Added the project Code of Conduct, MIT License, and package license metadata so the GitHub community checklist is covered.',
+      },
+      {
+        kind: 'REMOVE',
+        title: 'Local operator files removed from tracking',
+        body: 'Moved local notes, environment examples, setup scripts, deployment instructions, and one-off helper scripts into the ignore list so they stay local and do not appear in release commits.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Release metadata bumped to v0.7.0',
+        body: 'Updated package metadata, lockfile metadata, GHCR publish defaults, transition copy, app footer text, docs header badge, and in-app changelog surfaces for v0.7.',
+      },
+    ],
+  },
+  {
     version: 'v0.6',
     codename: 'SPC QC Console & Overlay Compare',
     date: '2026-05-31',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'Promotes SPC Day 1 verification into a dedicated operator QC workflow. Adds AutoOutlook/SPC/overlay map comparison, rebuilds the verification panel around agreement, displacement, and category-ledger cards, and removes sidebar clutter from watch readiness, model telemetry, and previous-cycle trend experiments.',
     highlights: [
@@ -922,7 +1001,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.6
+          AutoOutlook · Automated Convective Risk Intelligence · v0.7
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

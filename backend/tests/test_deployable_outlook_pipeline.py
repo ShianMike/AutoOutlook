@@ -1883,6 +1883,55 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.nanmax(capped.probabilities["wind"])), 0.04)
 
 
+    def test_moderate_environment_can_reach_slgt(self) -> None:
+        """Verify that the AND-logic probability caps and relaxed kinematic mask
+        allow moderate severe environments (e.g. MUCAPE 900 + 32kt shear where
+        only one parameter is marginal) to reach SLGT when the ML model predicts
+        probabilities >= 0.15 for hail or wind.  Previously, OR-logic caps and a
+        35kt kinematic mask hard-clamped these cells to MRGL."""
+        shape = (3, 3)
+        fields = small_fields(shape)
+        # Moderate instability — MUCAPE just below 1000, but shear is strong
+        fields["cape_mu"] = np.full(shape, 900.0)
+        fields["cape_ml"] = np.full(shape, 800.0)
+        fields["cape"] = np.full(shape, 750.0)
+        fields["cin"] = np.full(shape, -30.0)
+        fields["cin_ml"] = np.full(shape, -30.0)
+        fields["td2m"] = np.full(shape, 290.0)   # dewpoint 62.3°F
+        fields["u500"] = np.full(shape, 35.0)     # shear ≈ 61.5kt (very strong, stormRelWindKt >= 24)
+        fields["srh01"] = np.full(shape, 120.0)
+        fields["srh03"] = np.full(shape, 200.0)
+
+        features = gridded_features_from_fields(fields, forecast_hour=12)
+        # ML model outputs probabilities above the SLGT threshold
+        probs = {
+            "tornado": np.full(shape, 0.01),
+            "hail": np.full(shape, 0.18),
+            "wind": np.full(shape, 0.16),
+        }
+
+        # Stage 1: environmental caps should NOT cap hail/wind to 0.14 because
+        # although MUCAPE < 1000, shear >= 32 (AND-logic requires BOTH marginal).
+        capped = apply_environmental_probability_caps(probs, features)
+        self.assertGreaterEqual(
+            float(np.nanmax(capped.probabilities["hail"])), 0.15,
+            "Hail should not be capped below SLGT threshold when shear is strong",
+        )
+        self.assertGreaterEqual(
+            float(np.nanmax(capped.probabilities["wind"])), 0.15,
+            "Wind should not be capped below SLGT threshold when shear is strong",
+        )
+
+        # Stage 2: category grid — the relaxed kinematic mask (30kt) should
+        # allow SLGT (ordinal 3) since shear ≈ 42.7kt > 30.
+        categories = category_grid_from_probabilities(capped.probabilities, features)
+        max_category = int(np.nanmax(categories))
+        self.assertGreaterEqual(
+            max_category,
+            SPC_RISK_LABELS.index("SLGT"),
+            "Moderate environments with strong shear should be able to reach SLGT",
+        )
+
     def test_category_probability_ceiling_keeps_tiles_consistent_with_final_categories(self) -> None:
         probabilities = {
             "tornado": np.array([[0.45, 0.45, 0.45, 0.45, 0.45]]),
