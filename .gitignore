@@ -35,3 +35,13 @@ backend/hrrr_cache_selected/
 .codex-last-image.txt
 scratch/
 backend/scratch/
+
+# Local/private operator notes and one-off deployment helpers
+.env.example
+FEATURE_TASKS.md
+instruction_deployment.md
+aws_setup.sh
+deploy_monitor.sh
+launch_gather.sh
+setup_vm.sh
+dev.ps1
