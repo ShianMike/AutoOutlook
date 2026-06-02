@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { toPng } from 'html-to-image';
-import type { ForecastBundle, HourSnapshot, ActiveRegion, PhilippineRegionPane } from '../types/forecast';
+import type { ForecastBundle, HourSnapshot, ActiveRegion } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
 import RetroPanel from './retro/RetroPanel';
 import RetroBadge from './retro/RetroBadge';
@@ -23,9 +23,6 @@ interface OutlookMapPanelProps {
   onIndexChange: (index: number) => void;
   setPlaying: (playing: boolean) => void;
   activeRegion: ActiveRegion;
-  setActiveRegion: (region: ActiveRegion) => void;
-  activePhilippinePane: PhilippineRegionPane;
-  setActivePhilippinePane: (pane: PhilippineRegionPane) => void;
 }
 
 type OutlookMode = 'levels' | 'hazards';
@@ -248,9 +245,6 @@ export default function OutlookMapPanel({
   onIndexChange,
   setPlaying,
   activeRegion,
-  setActiveRegion,
-  activePhilippinePane,
-  setActivePhilippinePane,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
   const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>('auto');
@@ -464,7 +458,7 @@ export default function OutlookMapPanel({
   return (
     <RetroPanel
       title={`F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h Automated Convective Outlook`}
-      eyebrow="03 / automated categorical + hazard outlook · auto-detected focus region"
+      eyebrow="01 / automated categorical + hazard outlook · auto-detected focus region"
       badge={<RetroBadge tone="paper">FCST · {hourLabel}</RetroBadge>}
       size="sm"
       className="[&>div]:p-2"
@@ -695,22 +689,7 @@ export default function OutlookMapPanel({
             </select>
           </div>
 
-          {/* Dropdown 2: Active Region */}
-          <div className="flex items-center gap-2">
-            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-              Region
-            </label>
-            <select
-              value={activeRegion}
-              onChange={(e) => setActiveRegion(e.target.value as ActiveRegion)}
-              disabled={isAnyExporting}
-              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
-            >
-              <option value="conus">CONUS (United States)</option>
-            </select>
-          </div>
-
-          {/* Dropdown 3: Hazard View (Conditional) */}
+          {/* Dropdown 2: Hazard View (Conditional) */}
           {mode === 'hazards' && (
             <div className="flex items-center gap-2 animate-fadeIn">
               <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
@@ -739,7 +718,7 @@ export default function OutlookMapPanel({
             </div>
           )}
 
-          {mode === 'levels' && activeRegion === 'conus' && (
+          {mode === 'levels' && (
             <div className="flex items-center gap-2 animate-fadeIn" data-spc-comparison-control="true">
               <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
                 SPC Compare
@@ -757,7 +736,7 @@ export default function OutlookMapPanel({
             </div>
           )}
 
-          {/* Dropdown 4: Exporter Options */}
+          {/* Dropdown 3: Exporter Options */}
           <div className="flex items-center gap-2 ml-auto">
             <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
               Export

@@ -20,6 +20,7 @@ import numpy as np
 
 from .features import FEATURE_NAMES
 from .inference import predict_ml_hazard_matrix
+from backend import metpy_diagnostics as diag
 
 SPC_RISK_LABELS = ("NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
 _MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
@@ -52,7 +53,13 @@ NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "mlcape": (0.0, 4500.0),
     "mucape": (0.0, 5000.0),
     "sbcape": (0.0, 4500.0),
+    "cape3km": (0.0, 500.0),
+    "cape180": (0.0, 4500.0),
     "cin": (-250.0, 0.0),
+    "cinSb": (-250.0, 0.0),
+    "cinMl": (-250.0, 0.0),
+    "cinMu": (-250.0, 0.0),
+    "cin180": (-250.0, 0.0),
     "sfcDewpointF": (35.0, 78.0),
     "pwatIn": (0.25, 2.3),
     "lclM": (250.0, 3000.0),
@@ -61,6 +68,13 @@ NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "srh03": (0.0, 650.0),
     "shear06Kt": (0.0, 90.0),
     "stormRelWindKt": (0.0, 55.0),
+    "stp": (0.0, 15.0),
+    "scp": (0.0, 20.0),
+    "ehi": (0.0, 10.0),
+    "ship": (0.0, 10.0),
+    "lapseRate700500CPerKm": (4.0, 10.0),
+    "freezingLevelM": (0.0, 6000.0),
+    "surfacePressurePa": (80000.0, 104000.0),
     "hgt500": (5200.0, 6000.0),
 }
 
@@ -94,9 +108,16 @@ def gridded_features_from_fields(
     """Convert selected HRRR fields into raw and normalized gridded model features."""
     cape = _field(fields, "cape")
     shape = cape.shape
-    mlcape = _field(fields, "cape_ml", cape * 0.85)
+    cape180 = _field(fields, "cape_180", cape * 0.85)
+    cape3km = _field(fields, "cape_3km", np.zeros(shape))
+    mlcape = _field(fields, "cape_ml", cape180)
     mucape = _field(fields, "cape_mu", np.maximum(cape, mlcape))
-    cin = _field(fields, "cin_ml", _field(fields, "cin", np.zeros(shape)))
+    
+    surface_cin = np.minimum(_field(fields, "cin", np.zeros(shape)), 0.0)
+    cin180 = np.minimum(_field(fields, "cin_180", surface_cin), 0.0)
+    cin_ml = np.minimum(_field(fields, "cin_ml", cin180), 0.0)
+    cin_mu = np.minimum(_field(fields, "cin_mu", cin_ml), 0.0)
+
     td2m = _field(fields, "td2m", np.full(shape, 283.15))
     t2m = _field(fields, "t2m", td2m + 8.0)
     pwat = _field(fields, "pwat", np.full(shape, 20.0))
@@ -113,12 +134,39 @@ def gridded_features_from_fields(
     lcl_m = np.clip(125.0 * np.maximum(t2m - td2m, 0.0), 100.0, 3500.0)
     pwat_in = np.clip(pwat / 25.4, 0.0, None)
 
+    comps = diag.composites(
+        cape=cape,
+        shear_kt=shear,
+        srh01=srh01,
+        cin=surface_cin,
+        td2m_K=td2m,
+        srh03=srh03,
+        mlcape=mlcape,
+        mucape=mucape,
+        lcl_m=lcl_m,
+        cin_mu=cin_mu,
+        surface_pressure_pa=_field(fields, "surface_pressure", np.full(shape, np.nan)),
+        t2m_K=t2m,
+        t850_K=_field(fields, "t850", np.full(shape, np.nan)),
+        t700_K=_field(fields, "t700", np.full(shape, np.nan)),
+        t500_K=_field(fields, "t500", np.full(shape, np.nan)),
+        hgt850_m=_field(fields, "hgt850", np.full(shape, np.nan)),
+        hgt700_m=_field(fields, "hgt700", np.full(shape, np.nan)),
+        hgt500_m=hgt500,
+    )
+
     raw = {
         "forecastHour": np.full(shape, float(forecast_hour), dtype=float),
         "mlcape": np.clip(mlcape, 0.0, None),
         "mucape": np.clip(mucape, 0.0, None),
         "sbcape": np.clip(cape, 0.0, None),
-        "cin": np.minimum(cin, 0.0),
+        "cape3km": np.clip(cape3km, 0.0, None),
+        "cape180": np.clip(cape180, 0.0, None),
+        "cin": cin_ml,
+        "cinSb": surface_cin,
+        "cinMl": cin_ml,
+        "cinMu": cin_mu,
+        "cin180": cin180,
         "sfcDewpointF": td_f,
         "sfcTempF": (t2m - 273.15) * 9.0 / 5.0 + 32.0,
         "u10": u10,
@@ -130,6 +178,13 @@ def gridded_features_from_fields(
         "srh03": srh03,
         "shear06Kt": shear,
         "stormRelWindKt": shear * 0.5,
+        "stp": comps["stp"],
+        "scp": comps["scp"],
+        "ehi": comps["ehi"],
+        "ship": comps["ship"],
+        "lapseRate700500CPerKm": comps["lapse_rate_700_500"],
+        "freezingLevelM": comps["freezing_level_m"],
+        "surfacePressurePa": _field(fields, "surface_pressure", np.full(shape, 101325.0)),
         "hgt500": hgt500,
     }
     raw = {key: _finite(raw_value, _default_for(key)) for key, raw_value in raw.items()}
@@ -2818,6 +2873,7 @@ def _default_for(name: str) -> float:
         "pwatIn": 0.8,
         "lclM": 1500.0,
         "moistureDepthM": 1500.0,
+        "surfacePressurePa": 101325.0,
         "hgt500": 5700.0,
     }
     return defaults.get(name, 0.0)
@@ -3013,7 +3069,8 @@ def _rough_conus_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.nda
         (-124.8, 48.8), (-124.4, 42.0), (-122.8, 38.5), (-118.2, 32.5),
         (-114.7, 32.4), (-111.0, 31.3), (-106.5, 31.7), (-103.0, 29.8),
         (-97.4, 25.9), (-90.5, 29.0), (-85.0, 29.6), (-82.8, 27.8),
-        (-81.2, 25.0), (-80.1, 25.0), (-80.0, 26.8), (-80.7, 29.0),
+        (-82.0, 25.5), (-81.9, 24.5), (-81.2, 24.6), (-80.4, 25.0),
+        (-80.1, 25.0), (-80.0, 26.8), (-80.7, 29.0),
         (-81.2, 31.0), (-77.8, 34.0), (-75.4, 36.5), (-74.0, 40.5),
         (-70.0, 43.7), (-67.0, 45.2), (-70.5, 47.2), (-82.5, 46.0),
         (-95.0, 49.0), (-124.8, 48.8),
@@ -3038,8 +3095,12 @@ def _gulf_min_land_lat(lon_grid: np.ndarray) -> np.ndarray:
         (-88.5, 30.0),
         (-86.0, 30.2),
         (-84.0, 29.9),
-        (-82.0, 28.5),
-        (-81.0, 27.0),
+        (-83.0, 29.0),
+        (-82.7, 28.0),
+        (-82.4, 27.0),
+        (-81.8, 26.0),
+        (-81.1, 25.1),
+        (-80.0, 25.0),
     ]
     return _interp_anchor(lon_grid, anchors)
 
@@ -3118,10 +3179,11 @@ def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[s
             "floridaGulf": np.zeros_like(lat_grid, dtype=bool),
             "atlanticOcean": np.zeros_like(lat_grid, dtype=bool),
         }
+    land = _rough_conus_land_mask(lat_grid, lon_grid)
     return {
-        "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid),
-        "floridaGulf": _florida_gulf_offshore_mask(lat_grid, lon_grid),
-        "atlanticOcean": _atlantic_ocean_offshore_mask(lat_grid, lon_grid),
+        "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid) & ~land,
+        "floridaGulf": _florida_gulf_offshore_mask(lat_grid, lon_grid) & ~land,
+        "atlanticOcean": _atlantic_ocean_offshore_mask(lat_grid, lon_grid) & ~land,
     }
 
 

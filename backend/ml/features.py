@@ -6,7 +6,7 @@ import json
 import math
 from typing import Any, Mapping
 
-FEATURE_SCHEMA_VERSION = "ml-features-v2-pure-ai"
+FEATURE_SCHEMA_VERSION = "ml-features-v4-parcel-cape-cin"
 HAZARD_KEYS = ("tornado", "hail", "wind")
 
 FEATURE_NAMES = (
@@ -14,7 +14,13 @@ FEATURE_NAMES = (
     "mlcape",
     "mucape",
     "sbcape",
+    "cape3km",
+    "cape180",
     "cin",
+    "cinSb",
+    "cinMl",
+    "cinMu",
+    "cin180",
     "sfcDewpointF",
     "pwatIn",
     "lclM",
@@ -23,6 +29,13 @@ FEATURE_NAMES = (
     "srh03",
     "shear06Kt",
     "stormRelWindKt",
+    "stp",
+    "scp",
+    "ehi",
+    "ship",
+    "lapseRate700500CPerKm",
+    "freezingLevelM",
+    "surfacePressurePa",
 )
 
 
@@ -41,7 +54,13 @@ def feature_vector(ingredients: Mapping[str, Any], forecast_hour: int | float) -
         _num(ingredients.get("mlcape")),
         _num(ingredients.get("mucape")),
         _num(ingredients.get("sbcape")),
+        _num(ingredients.get("cape3km")),
+        _num(ingredients.get("cape180")),
         _num(ingredients.get("cin")),
+        _num(ingredients.get("cinSb")),
+        _num(ingredients.get("cinMl")),
+        _num(ingredients.get("cinMu")),
+        _num(ingredients.get("cin180")),
         _num(ingredients.get("sfcDewpointF"), 50.0),
         _num(ingredients.get("pwatIn"), 0.8),
         _num(ingredients.get("lclM"), 1500.0),
@@ -50,6 +69,13 @@ def feature_vector(ingredients: Mapping[str, Any], forecast_hour: int | float) -
         _num(ingredients.get("srh03")),
         _num(ingredients.get("shear06Kt")),
         _num(ingredients.get("stormRelWindKt")),
+        _num(ingredients.get("stp")),
+        _num(ingredients.get("scp")),
+        _num(ingredients.get("ehi")),
+        _num(ingredients.get("ship")),
+        _num(ingredients.get("lapseRate700500CPerKm")),
+        _num(ingredients.get("freezingLevelM")),
+        _num(ingredients.get("surfacePressurePa")),
     ]
 
 

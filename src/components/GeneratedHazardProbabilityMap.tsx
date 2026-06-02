@@ -1,6 +1,6 @@
 import { Fragment, useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { ActiveRegion, HourSnapshot, PhilippineRegionPane, UpperAirVector } from '../types/forecast';
+import type { ActiveRegion, HourSnapshot, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import {
   artifactProbabilityShapesToFeatureCollection,
@@ -19,7 +19,6 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
-import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -32,7 +31,6 @@ interface GeneratedHazardProbabilityMapProps {
   artifacts: OutlookArtifacts | null;
   status: ArtifactStatus;
   activeRegion?: ActiveRegion;
-  philippinePane?: PhilippineRegionPane;
 }
 
 export function hasGeneratedHazardTile(
@@ -51,25 +49,21 @@ export default function GeneratedHazardProbabilityMap({
   artifacts,
   status,
   activeRegion = 'conus',
-  philippinePane = 'national',
 }: GeneratedHazardProbabilityMapProps) {
-  const isPhil = activeRegion === 'philippines';
-  const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
-  const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
-  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
-  const projectionConfig = isPhil
-    ? { center: activePhilippinePane.center, scale: activePhilippinePane.scale }
-    : {
-        rotate: [96, 0, 0] as [number, number, number],
-        center: [0, 38] as [number, number],
-        parallels: [29.5, 45.5] as [number, number],
-        scale: 1000,
-      };
+  void activeRegion;
+  const geoUrl = STATES_URL;
+  const projection = 'geoAlbers';
+  const projectionConfig = {
+    rotate: [96, 0, 0] as [number, number, number],
+    center: [0, 38] as [number, number],
+    parallels: [29.5, 45.5] as [number, number],
+    scale: 1000,
+  };
 
   const forecastHour = snapshot?.forecastHour;
   const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
   const displayForecastHour = tile?.forecastHour ?? forecastHour;
-  const cfg = getHazardConfig(hazard, isPhil);
+  const cfg = getHazardConfig(hazard);
   const vectorFeatureCollection = useMemo(
     () => artifactProbabilityShapesToFeatureCollection(tile, hazard),
     [tile, hazard],

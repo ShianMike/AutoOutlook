@@ -711,7 +711,7 @@ export function useOutlookArtifacts(
           status: message === 'artifact_missing' ? 'missing' : 'error',
           artifacts: null,
           message: message === 'artifact_missing'
-            ? `Generated ${activeRegion === 'philippines' ? 'ECMWF' : 'HRRR'}/XGBoost outlook artifacts are not available yet.`
+            ? 'Generated HRRR/XGBoost outlook artifacts are not available yet.'
             : `Generated outlook artifact fetch failed: ${message}`,
         };
         setState((previous) => preserveReadySelectedHour(previous, selectedForecastHour, nextState));

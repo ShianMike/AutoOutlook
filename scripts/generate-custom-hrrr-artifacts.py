@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-ttl-hours", type=float, default=DEFAULT_CACHE_TTL_HOURS)
     parser.add_argument("--hour-workers", type=int, default=DEFAULT_HOUR_WORKERS)
     parser.add_argument("--range-workers", type=int, default=DEFAULT_RANGE_WORKERS)
-    parser.add_argument("--grid-stride", type=int, default=3)
+    parser.add_argument("--grid-stride", type=int, default=2)
     parser.add_argument("--tile-stride", type=int, default=1)
     parser.add_argument("--forecast-hours", type=int, nargs="+", help="Explicit forecast hours. Overrides start/end valid times.")
     parser.add_argument("--force", action="store_true", help="Regenerate ready hours instead of reusing existing artifacts.")

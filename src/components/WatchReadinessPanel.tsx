@@ -156,7 +156,7 @@ export default function WatchReadinessPanel({ snapshot, artifacts, artifactStatu
   return (
     <RetroPanel
       title="Watch / Readiness Panel"
-      eyebrow="09 / Operational readiness indicators"
+      eyebrow="Operational readiness indicators"
     >
       <ul className="flex flex-col">
         {rows.map((r, i) => (

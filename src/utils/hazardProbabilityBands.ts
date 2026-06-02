@@ -645,7 +645,7 @@ function hazardLobes(
     },
   ];
 
-  const cfg = getHazardConfig(hazard, region.centerLon > 110);
+  const cfg = getHazardConfig(hazard);
 
   const add = (
     along: number,
@@ -698,16 +698,8 @@ function hazardLobes(
   return lobes;
 }
 
-export function getHazardConfig(hazard: OutlookHazardKey, isPhilippines: boolean = false): HazardConfig {
-  const base = HAZARD_CONFIGS[hazard];
-  if (hazard === 'thunder' && isPhilippines) {
-    return {
-      ...base,
-      thresholds: [0.30, 0.60, 0.90],
-      labels: ['30%', '60%', '90%'],
-    };
-  }
-  return base;
+export function getHazardConfig(hazard: OutlookHazardKey): HazardConfig {
+  return HAZARD_CONFIGS[hazard];
 }
 
 
@@ -729,8 +721,7 @@ export function buildHazardBands(
   forecastHour = 0,
 ): ProbBand[] {
   if (peakProb <= 0) return [];
-  const isPhil = region.centerLon > 110;
-  const cfg = getHazardConfig(hazard, isPhil);
+  const cfg = getHazardConfig(hazard);
   const activationFloor = 0.82;
   const active = cfg.thresholds
     .map((t, i) => ({ t, c: cfg.colors[i], l: cfg.labels[i] }))
@@ -1172,8 +1163,7 @@ export function buildArtifactSigBlob(
    */
   measuredBandRadius?: number,
 ): { coords: [number, number][] } | null {
-  const isPhil = region ? region.centerLon > 110 : false;
-  const cfg = getHazardConfig(hazard, isPhil);
+  const cfg = getHazardConfig(hazard);
   if (cfg.sigThreshold === undefined) return null;
 
   // Per-hazard motion seed — different hazards' SIG cores morph out of

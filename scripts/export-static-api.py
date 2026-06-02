@@ -277,19 +277,6 @@ def main() -> None:
         else:
             print(f"CONUS artifacts dir not found: {DEFAULT_ARTIFACT_DIR}")
 
-        # 2. Export Philippines to output_dir / "philippines" (Commented out to exclude from artifact generation)
-        # ph_candidates = [
-        #     PROJECT_ROOT / "backend" / "artifacts" / "latest_incremental_ecmwf_complete",
-        # ]
-        # ph_dir = next((path for path in ph_candidates if path.exists()), ph_candidates[0])
-        # if ph_dir.exists():
-        #     try:
-        #         print("Exporting Philippines artifacts...")
-        #         export_static_api(ph_dir, args.legacy_artifact_dir, args.output_dir / "philippines")
-        #     except ValueError as exc:
-        #         print(f"Warning: Skipping Philippines export: {exc}")
-        # else:
-        #     print(f"Philippines artifacts dir not found: {ph_dir}")
         pass
     else:
         try:

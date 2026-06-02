@@ -17,7 +17,6 @@ from typing import Any, Callable, Iterable, Mapping
 import numpy as np
 import requests
 
-from backend import metpy_diagnostics as diag
 from backend.hrrr_selected import (
     DEFAULT_CACHE_TTL_HOURS,
     DEFAULT_SELECTED_CACHE_DIR,
@@ -90,7 +89,7 @@ DEFAULT_CYCLE_POLICY = "complete-requested"
 DEFAULT_INCREMENTAL_CYCLE_POLICY = "latest-startable"
 DEFAULT_HOUR_WORKERS = _env_int("AUTOOUTLOOK_HOUR_WORKERS", 4)
 DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
-DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 4)
+DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 2)
 DEFAULT_GCS_LOCK_TTL_SECONDS = _env_int("AUTOOUTLOOK_RUN_LOCK_TTL_SECONDS", 5400)
 
 FetchHourFn = Callable[[HrrrHourRef, requests.Session], tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour]
@@ -1397,7 +1396,12 @@ def _point_sampled_ingredients(
     sbcape = _array_point(raw.get("sbcape"), i_lat, i_lon)
     mlcape = _array_point(raw.get("mlcape"), i_lat, i_lon, sbcape * 0.85)
     mucape = _array_point(raw.get("mucape"), i_lat, i_lon, max(sbcape, mlcape))
-    cin = _array_point(raw.get("cin"), i_lat, i_lon)
+    mlcin = _array_point(raw.get("cinMl"), i_lat, i_lon, _array_point(raw.get("cin"), i_lat, i_lon))
+    surface_cin = _array_point(raw.get("cinSb"), i_lat, i_lon, mlcin)
+    mucin = _array_point(raw.get("cinMu"), i_lat, i_lon, mlcin)
+    cape3km = _array_point(raw.get("cape3km"), i_lat, i_lon)
+    cape180 = _array_point(raw.get("cape180"), i_lat, i_lon, mlcape)
+    cin180 = _array_point(raw.get("cin180"), i_lat, i_lon, mlcin)
     td_f = _array_point(raw.get("sfcDewpointF"), i_lat, i_lon, 50.0)
     td2m = (td_f - 32.0) * 5.0 / 9.0 + 273.15
     lcl_m = _array_point(raw.get("lclM"), i_lat, i_lon, 1500.0)
@@ -1407,21 +1411,29 @@ def _point_sampled_ingredients(
     srh01 = _array_point(raw.get("srh01"), i_lat, i_lon)
     srh03 = _array_point(raw.get("srh03"), i_lat, i_lon, srh01 * 1.4)
     sr_wind = _array_point(raw.get("stormRelWindKt"), i_lat, i_lon, shear_kt * 0.5)
-    composites = diag.composites(
-        cape=np.array([sbcape]),
-        mlcape=np.array([mlcape]),
-        mucape=np.array([mucape]),
-        shear_kt=np.array([shear_kt]),
-        srh01=np.array([srh01]),
-        srh03=np.array([srh03]),
-        cin=np.array([cin]),
-        td2m_K=np.array([td2m]),
-    )
+    composites = {
+        "stp": _array_point(raw.get("stp"), i_lat, i_lon),
+        "scp": _array_point(raw.get("scp"), i_lat, i_lon),
+        "ehi": _array_point(raw.get("ehi"), i_lat, i_lon),
+        "ship": _array_point(raw.get("ship"), i_lat, i_lon),
+        "ship_available": _array_point(raw.get("shipAvailable"), i_lat, i_lon),
+        "tor_comp": _array_point(raw.get("tornadoComposite"), i_lat, i_lon),
+        "lapse_rate_700_500": _array_point(
+            raw.get("lapseRate700500CPerKm"), i_lat, i_lon
+        ),
+        "freezing_level_m": _array_point(raw.get("freezingLevelM"), i_lat, i_lon),
+        "mixing_ratio_gkg": _array_point(raw.get("mixingRatioGKg"), i_lat, i_lon),
+    }
     ingredients = _ingredients_at_point(
         sbcape,
         mlcape,
         mucape,
-        cin,
+        surface_cin,
+        mlcin,
+        mucin,
+        cape3km,
+        cape180,
+        cin180,
         td2m,
         t2m,
         pwat,
@@ -1429,7 +1441,7 @@ def _point_sampled_ingredients(
         srh01,
         srh03,
         sr_wind,
-        {key: float(value[0]) for key, value in composites.items()},
+        composites,
     )
     lat_grid, lon_grid = _lat_lon_grids(lats, lons)
     sample = {

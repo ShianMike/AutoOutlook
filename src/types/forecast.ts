@@ -4,8 +4,7 @@
 export type RiskCategory = 'TSTM' | 'MRGL' | 'SLGT' | 'ENH' | 'MOD' | 'HIGH';
 
 export type HazardKey = 'tornado' | 'hail' | 'wind' | 'flood';
-export type ActiveRegion = 'conus' | 'philippines';
-export type PhilippineRegionPane = 'national' | 'luzon' | 'visayas' | 'mindanao';
+export type ActiveRegion = 'conus';
 
 export type StormMode = 'discrete' | 'multicell' | 'linear' | 'mixed';
 export type SignalStrength = 'none' | 'weak' | 'moderate' | 'strong';
@@ -23,7 +22,13 @@ export interface Ingredients {
   mlcape: number;       // J/kg
   mucape: number;       // J/kg
   sbcape: number;       // J/kg
+  cape3km?: number;     // J/kg, 0-3 km AGL CAPE
+  cape180?: number;     // J/kg, 180-0 mb layer diagnostic
   cin: number;          // J/kg, negative
+  cinSb?: number;       // J/kg, surface-based CIN
+  cinMl?: number;       // J/kg, mixed-layer CIN
+  cinMu?: number;       // J/kg, most-unstable CIN
+  cin180?: number;      // J/kg, 180-0 mb layer diagnostic
   // Moisture
   sfcDewpointF: number;
   pwatIn: number;       // inches
@@ -44,7 +49,13 @@ export interface Ingredients {
   scp: number;
   ehi: number;
   ship: number;
+  shipAvailable?: boolean;
   tornadoComposite: number;
+  lapseRate700500CPerKm?: number;
+  freezingLevelM?: number;
+  surfacePressurePa?: number;
+  mixingRatioGKg?: number;
+  t500C?: number;
 }
 
 export interface HazardAssessment {
@@ -200,7 +211,6 @@ export interface ForecastProvider {
 
 // HRRR is hourly. Keep every hour through +48h available to the slider.
 export const HRRR_FORECAST_HOURS: number[] = Array.from({ length: 49 }, (_, i) => i);
-export const ECMWF_FORECAST_HOURS: number[] = Array.from({ length: 31 }, (_, i) => i * 3); // 0, 3, 6, ..., 90
 
 export const FORECAST_HOURS: number[] = HRRR_FORECAST_HOURS;
 export const FORECAST_HOUR_LABELS: Record<number, string> = Object.fromEntries(

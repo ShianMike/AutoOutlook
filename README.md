@@ -28,6 +28,7 @@ Severe-weather model guidance is often hard to inspect end to end: raw GRIB2 fil
 - Builds deployable outlook artifacts for `F00-F48` from the latest available extended HRRR cycle.
 - Runs a Vite + React dashboard for forecast-hour playback, hazard boards, environmental ingredients, readiness, model audit state, and SPC verification.
 - Uses a three-tier provider chain: generated artifacts / Python backend, Open-Meteo browser fallback, then deterministic mock data.
+- Computes research-grade STP, SCP, EHI, and SHIP ingredients when the selected HRRR fields support them; SHIP is marked unavailable instead of replaced with a proxy when pressure-level hail fields are missing. See [Research Formulations](docs/research-formulations.md).
 - Supports cost-controlled static and API hosting through Cloudflare Pages with scheduled artifact refreshes.
 - Keeps a leakage guard between model prediction and verification: official SPC outlook data is used only after prediction artifacts are generated.
 
@@ -37,7 +38,7 @@ Tagged releases publish a container image to GitHub Container Registry:
 
 ```powershell
 docker pull ghcr.io/shianmike/autooutlook:latest
-docker pull ghcr.io/shianmike/autooutlook:v0.7.1
+docker pull ghcr.io/shianmike/autooutlook:v0.8
 ```
 
 The image contains the built React dashboard and Python backend service from the release tag.
@@ -60,7 +61,7 @@ AutoOutlook is a research and visualization project. It should not be used as th
   1. **Python backend** (Flask + HRRR GRIB2 byte-range filtering + MetPy-style diagnostics) — pulls selected HRRR fields, derives severe-weather ingredients, and activates XGBoost hazard probabilities when model artifacts are valid.
   2. **Open-Meteo** (browser-side) — free GFS-Seamless JSON endpoints used as an automatic fallback if the backend isn't running.
   3. **Mock** — deterministic Plains severe-weather day used when both live providers fail.
-- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest available extended HRRR cycle, processes forecast hours `0..48`, writes GeoJSON/probability/metadata/preview artifacts, then fetches the current SPC Day 1 outlook only for verification.
+- **Deployable artifact pipeline**: `backend.ml.outlook_pipeline` detects the latest available extended HRRR cycle, processes forecast hours `0..48`, writes GeoJSON/probability/metadata/preview artifacts, computes research-grade composite predictors, then fetches the current SPC Day 1 outlook only for verification.
 
 Designed in a neo-brutalist / RetroUI aesthetic (thick borders, hard offset shadows, bold cards, scanline overlays, monospace accents).
 
@@ -133,7 +134,7 @@ Useful runtime controls for the incremental artifact pipeline:
 ```powershell
 $env:AUTOOUTLOOK_HOUR_WORKERS = "4"   # forecast hours processed in parallel
 $env:AUTOOUTLOOK_RANGE_WORKERS = "6"  # HRRR byte-range downloads per hour
-$env:AUTOOUTLOOK_GRID_STRIDE = "4"    # decoded-grid downsample stride
+$env:AUTOOUTLOOK_GRID_STRIDE = "2"    # decoded-grid downsample stride
 $env:AUTOOUTLOOK_TILE_STRIDE = "4"    # rendered probability-tile stride
 ```
 
@@ -200,8 +201,8 @@ When a release changes backend artifact-generation code or shared code used by t
 gcloud run jobs update autooutlook-artifact-refresh `
   --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
   --command sh `
-  --args "-c,python -m backend.ml.outlook_pipeline --incremental --all-hours --cycle-policy complete-requested --output-dir /tmp/autooutlook-artifacts/latest_incremental --cache-dir /tmp/autooutlook-cache/hrrr_selected --publish-gcs-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --gcs-lock-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --hour-workers 2 --range-workers 2 --grid-stride 3 --tile-stride 1" `
-  --set-env-vars "AUTOOUTLOOK_PUBLISH_GCS_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_RUN_LOCK_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_HOUR_WORKERS=2,AUTOOUTLOOK_RANGE_WORKERS=2,AUTOOUTLOOK_GRID_STRIDE=3,AUTOOUTLOOK_TILE_STRIDE=1" `
+  --args "-c,python -m backend.ml.outlook_pipeline --incremental --all-hours --cycle-policy complete-requested --output-dir /tmp/autooutlook-artifacts/latest_incremental --cache-dir /tmp/autooutlook-cache/hrrr_selected --publish-gcs-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --gcs-lock-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --hour-workers 2 --range-workers 2 --grid-stride 2 --tile-stride 1" `
+  --set-env-vars "AUTOOUTLOOK_PUBLISH_GCS_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_RUN_LOCK_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_HOUR_WORKERS=2,AUTOOUTLOOK_RANGE_WORKERS=2,AUTOOUTLOOK_GRID_STRIDE=2,AUTOOUTLOOK_TILE_STRIDE=1" `
   --remove-volume-mount /mnt/autooutlook-artifacts `
   --remove-volume artifacts `
   --region us-central1 `

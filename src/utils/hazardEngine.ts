@@ -166,8 +166,13 @@ function tornadoEval(ing: Ingredients): RawHazard {
 
 // ── Hail evaluation ─────────────────────────────────────────────────
 // Key SPC ingredients: MUCAPE (updraft strength), SHIP, deep-layer
-// shear, mid-level lapse rates (approximated via MUCAPE/MLCAPE gap).
+// shear, and real 700-500 mb lapse rates when pressure-level fields exist.
 function hailEval(ing: Ingredients): RawHazard {
+  const shipAvailable = ing.shipAvailable ?? ing.ship > 0;
+  const lapseRate = typeof ing.lapseRate700500CPerKm === 'number' && Number.isFinite(ing.lapseRate700500CPerKm)
+    ? ing.lapseRate700500CPerKm
+    : undefined;
+  const lapseAvailable = lapseRate !== undefined;
   // MUCAPE drives updraft strength — the engine that lofts hailstones
   // through the hail-growth zone above the freezing level.
   const muCapeTerm = Math.min(ing.mucape / 4000, 1) * 0.12;
@@ -179,9 +184,9 @@ function hailEval(ing: Ingredients): RawHazard {
     ? shipNorm * 0.045
     : 0.045 + Math.min((shipNorm - 1) / 2.5, 1) * 0.10;
   const shearTerm  = Math.min(ing.shear06Kt / 55, 1) * 0.08;
-  // Steep lapse rates (MUCAPE–MLCAPE gap indicates elevated instability
-  // and a deep hail-growth zone)
-  const lapseProxy = Math.min(Math.max(0, ing.mucape - ing.mlcape) / 1000, 1) * 0.03;
+  const lapseTerm = lapseAvailable
+    ? Math.min(Math.max(0, lapseRate - 6.0) / 2.0, 1) * 0.03
+    : 0;
   // Storm-relative wind supports hail residence time in the updraft
   const srWindTerm = Math.min(ing.stormRelWindKt / 50, 1) * 0.025;
   // Very moist BL → lower freezing level → less hail growth potential
@@ -190,7 +195,7 @@ function hailEval(ing: Ingredients): RawHazard {
   const hailEnvironmentGate =
     (ing.mucape >= 1250 ? 1 : 0.62) *
     (ing.shear06Kt >= 35 ? 1 : 0.70);
-  const raw = (muCapeTerm + shipTerm + shearTerm + lapseProxy + srWindTerm + modeBoost - moistDrag) *
+  const raw = (muCapeTerm + shipTerm + shearTerm + lapseTerm + srWindTerm + modeBoost - moistDrag) *
     initiationModifier(ing, 0.26) *
     hailEnvironmentGate;
   const probability = clamp01(raw);
@@ -205,7 +210,9 @@ function hailEval(ing: Ingredients): RawHazard {
 
   const supporting: string[] = [];
   if (ing.mucape >= 2000) supporting.push(`MUCAPE ${Math.round(ing.mucape)} J/kg`);
-  if (ing.ship >= 1)      supporting.push(`SHIP ${ing.ship.toFixed(1)}`);
+  if (shipAvailable && ing.ship >= 1) supporting.push(`SHIP ${ing.ship.toFixed(1)}`);
+  if (!shipAvailable) supporting.push('SHIP unavailable: missing pressure-level hail fields');
+  if (lapseAvailable && lapseRate >= 6.5) supporting.push(`700-500 mb lapse ${lapseRate.toFixed(1)} C/km`);
   if (ing.shear06Kt >= 35) supporting.push(`Sfc–500 shear ${Math.round(ing.shear06Kt)} kt`);
   if (ing.scp >= 2)       supporting.push(`SCP ${ing.scp.toFixed(1)}`);
   if (ing.stormRelWindKt >= 30) supporting.push(`SR-wind proxy ${Math.round(ing.stormRelWindKt)} kt`);

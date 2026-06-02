@@ -42,7 +42,7 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
       <div className={`flex items-center justify-between gap-3 border-b-[3px] border-ink px-4 py-1.5 ${isDarkChip ? 'bg-ink text-paper' : 'bg-paper text-ink'}`}>
         <div className="flex items-center gap-3">
           <span className="font-mono text-[10px] uppercase tracking-[0.3em] opacity-70">
-            Primary outlook
+            02 / Primary outlook
           </span>
           <span className="font-mono text-[11px] uppercase tracking-widest">
             {regionLabel}

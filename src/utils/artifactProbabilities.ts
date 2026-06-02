@@ -229,15 +229,8 @@ export function artifactThunderToFeatureCollection(
   if (!tile) return { type: 'FeatureCollection', features: [] };
   const features: ArtifactProbabilityFeature[] = [];
 
-  let centerLon = 0;
-  if (tile.lons && tile.lons.length > 0 && tile.lons[0]?.length > 0) {
-    const midRow = Math.floor(tile.lons.length / 2);
-    const midCol = Math.floor(tile.lons[midRow].length / 2);
-    centerLon = Number(tile.lons[midRow][midCol] ?? 0);
-  }
-  const isPhilippines = centerLon > 110;
-  const thresholds = isPhilippines ? [0.30, 0.60, 0.90] : THUNDER_THRESHOLDS;
-  const labels = isPhilippines ? ['30%', '60%', '90%'] : THUNDER_LABELS;
+  const thresholds = THUNDER_THRESHOLDS;
+  const labels = THUNDER_LABELS;
 
   for (let row = 0; row < tile.categoryOrdinal.length; row += 1) {
     for (let col = 0; col < tile.categoryOrdinal[row].length; col += 1) {

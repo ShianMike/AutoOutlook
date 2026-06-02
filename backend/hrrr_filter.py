@@ -4,14 +4,15 @@ This mirrors the working approach in the user's Model Forecast app: use the
 NOMADS HRRR 2D filter endpoint, then backtrack through earlier cycles when the
 latest hourly run does not contain the requested valid time.
 """
+
 from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -31,6 +32,7 @@ FULL_GRIB_PARAMS = [
     "var_CIN",
     "var_DPT",
     "var_HLCY",
+    "var_PRES",
     "var_PWAT",
     "var_TMP",
     "var_UGRD",
@@ -42,16 +44,24 @@ FULL_LEVEL_PARAMS = [
     "lev_2_m_above_ground",
     "lev_1000-0_m_above_ground",
     "lev_3000-0_m_above_ground",
+    "lev_0-3000_m_above_ground",
     "lev_90-0_mb_above_ground",
     "lev_180-0_mb_above_ground",
     "lev_255-0_mb_above_ground",
     "lev_entire_atmosphere_%28considered_as_a_single_layer%29",
     "lev_entire_atmosphere",
     "lev_10_m_above_ground",
+    "lev_850_mb",
+    "lev_700_mb",
     "lev_500_mb",
 ]
 FOCUS_GRIB_PARAMS = ["var_CAPE", "var_CIN", "var_DPT", "var_UGRD", "var_VGRD"]
-FOCUS_LEVEL_PARAMS = ["lev_surface", "lev_2_m_above_ground", "lev_10_m_above_ground", "lev_500_mb"]
+FOCUS_LEVEL_PARAMS = [
+    "lev_surface",
+    "lev_2_m_above_ground",
+    "lev_10_m_above_ground",
+    "lev_500_mb",
+]
 OVERLAY_500_GRIB_PARAMS = ["var_HGT", "var_UGRD", "var_VGRD"]
 OVERLAY_500_LEVEL_PARAMS = ["lev_500_mb"]
 HGT_PRESSURE_LEVELS_MB = (500, 700, 850, 1000)
@@ -59,7 +69,9 @@ HGT_PRESSURE_LEVELS_MB = (500, 700, 850, 1000)
 MAX_CELLS = 90_000
 MAX_SIDE = 380
 CACHE_TTL = 1800
-DEFAULT_OVERLAY_500_CACHE_DIR = Path(__file__).resolve().parent / "cache" / "hrrr_overlay_500mb"
+DEFAULT_OVERLAY_500_CACHE_DIR = (
+    Path(__file__).resolve().parent / "cache" / "hrrr_overlay_500mb"
+)
 OVERLAY_500_FIELD_KEYS = ("hgt500", "u500", "v500")
 
 _session = requests.Session()
@@ -99,7 +111,9 @@ def fetch_hrrr_grib_valid_time(
             messages = decode_grib2(grib_bytes)
             lats, lons, fields = _messages_to_fields(messages)
             lats, lons, fields = _crop_and_thin(lats, lons, fields, fbbox)
-            cycle_dt = datetime.strptime(f"{run_date}{run_cycle:02d}", "%Y%m%d%H").replace(tzinfo=timezone.utc)
+            cycle_dt = datetime.strptime(
+                f"{run_date}{run_cycle:02d}", "%Y%m%d%H"
+            ).replace(tzinfo=timezone.utc)
             valid_dt = cycle_dt + timedelta(hours=fhour)
             result = {
                 "model": "hrrr",
@@ -119,10 +133,18 @@ def fetch_hrrr_grib_valid_time(
         except FileNotFoundError as exc:
             errors.append(f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {exc}")
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {type(exc).__name__}: {exc}")
+            errors.append(
+                f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {type(exc).__name__}: {exc}"
+            )
 
-    detail = "; ".join(errors[-4:]) if errors else "no candidate HRRR run covers target valid time"
-    raise NomadsFetchError(f"HRRR GRIB filter unavailable for {target_dt.isoformat()}: {detail}")
+    detail = (
+        "; ".join(errors[-4:])
+        if errors
+        else "no candidate HRRR run covers target valid time"
+    )
+    raise NomadsFetchError(
+        f"HRRR GRIB filter unavailable for {target_dt.isoformat()}: {detail}"
+    )
 
 
 def fetch_hrrr_500mb_overlay_valid_time(
@@ -157,9 +179,15 @@ def fetch_hrrr_500mb_overlay_valid_time(
             lats, lons, fields = _messages_to_fields(messages, require_cape=False)
             missing = [key for key in OVERLAY_500_FIELD_KEYS if key not in fields]
             if missing:
-                raise ValueError("HRRR overlay payload missing fields: " + ", ".join(missing))
-            lats, lons, fields = _crop_and_stride(lats, lons, fields, fbbox, grid_stride)
-            cycle_dt = datetime.strptime(f"{run_date}{run_cycle:02d}", "%Y%m%d%H").replace(tzinfo=timezone.utc)
+                raise ValueError(
+                    "HRRR overlay payload missing fields: " + ", ".join(missing)
+                )
+            lats, lons, fields = _crop_and_stride(
+                lats, lons, fields, fbbox, grid_stride
+            )
+            cycle_dt = datetime.strptime(
+                f"{run_date}{run_cycle:02d}", "%Y%m%d%H"
+            ).replace(tzinfo=timezone.utc)
             valid_dt = cycle_dt + timedelta(hours=fhour)
             result = {
                 "model": "hrrr",
@@ -185,10 +213,18 @@ def fetch_hrrr_500mb_overlay_valid_time(
         except FileNotFoundError as exc:
             errors.append(f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {exc}")
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {type(exc).__name__}: {exc}")
+            errors.append(
+                f"{run_date}/{run_cycle:02d}z F{fhour:02d}: {type(exc).__name__}: {exc}"
+            )
 
-    detail = "; ".join(errors[-4:]) if errors else "no candidate HRRR run covers target valid time"
-    raise NomadsFetchError(f"Full-CONUS HRRR 500 mb overlay unavailable for {target_dt.isoformat()}: {detail}")
+    detail = (
+        "; ".join(errors[-4:])
+        if errors
+        else "no candidate HRRR run covers target valid time"
+    )
+    raise NomadsFetchError(
+        f"Full-CONUS HRRR 500 mb overlay unavailable for {target_dt.isoformat()}: {detail}"
+    )
 
 
 def _floor_hour(dt: datetime) -> datetime:
@@ -252,11 +288,15 @@ def _candidate_runs_for_valid_time(target_dt: datetime):
         cursor -= timedelta(hours=1)
 
 
-def _build_url(run_date: str, run_cycle: int, fhour: int, bbox: dict[str, float], profile: str) -> str:
+def _build_url(
+    run_date: str, run_cycle: int, fhour: int, bbox: dict[str, float], profile: str
+) -> str:
     parts = [
         FILTER_URL,
-        "?dir=", DIR_PATTERN.format(date=run_date),
-        "&file=", FILE_PATTERN.format(cycle=run_cycle, fhour=fhour),
+        "?dir=",
+        DIR_PATTERN.format(date=run_date),
+        "&file=",
+        FILE_PATTERN.format(cycle=run_cycle, fhour=fhour),
     ]
     if profile == "full":
         grib_params = FULL_GRIB_PARAMS
@@ -273,13 +313,15 @@ def _build_url(run_date: str, run_cycle: int, fhour: int, bbox: dict[str, float]
         parts.append(f"&{param}=on")
     for param in level_params:
         parts.append(f"&{param}=on")
-    parts.extend([
-        "&subregion=",
-        f"&toplat={bbox['lat_max']}",
-        f"&bottomlat={bbox['lat_min']}",
-        f"&leftlon={bbox['lon_min']}",
-        f"&rightlon={bbox['lon_max']}",
-    ])
+    parts.extend(
+        [
+            "&subregion=",
+            f"&toplat={bbox['lat_max']}",
+            f"&bottomlat={bbox['lat_min']}",
+            f"&leftlon={bbox['lon_min']}",
+            f"&rightlon={bbox['lon_max']}",
+        ]
+    )
     return "".join(parts)
 
 
@@ -308,7 +350,9 @@ def _download_grib(url: str, retries: int = 2) -> bytes:
     raise last_exc or RuntimeError("NOMADS GRIB download failed")
 
 
-def _messages_to_fields(messages: list[dict[str, Any]], require_cape: bool = True) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+def _messages_to_fields(
+    messages: list[dict[str, Any]], require_cape: bool = True
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     if not messages:
         raise ValueError("No GRIB messages decoded")
 
@@ -327,22 +371,30 @@ def _messages_to_fields(messages: list[dict[str, Any]], require_cape: bool = Tru
             fields["cape"] = vals
         elif cat == 7 and param == 7 and _is_surface(msg):
             fields["cin"] = -np.abs(vals)
-        elif cat == 7 and param == 6 and _is_pressure_depth_agl(msg, 18000.0):
+        elif cat == 7 and param == 6 and _is_pressure_depth_agl(msg, 9000.0):
             fields["cape_ml"] = vals
-        elif cat == 7 and param == 7 and _is_pressure_depth_agl(msg, 18000.0):
+        elif cat == 7 and param == 7 and _is_pressure_depth_agl(msg, 9000.0):
             fields["cin_ml"] = -np.abs(vals)
+        elif cat == 7 and param == 6 and _is_pressure_depth_agl(msg, 18000.0):
+            fields["cape_180"] = vals
+        elif cat == 7 and param == 7 and _is_pressure_depth_agl(msg, 18000.0):
+            fields["cin_180"] = -np.abs(vals)
         elif cat == 7 and param == 6 and _is_pressure_depth_agl(msg, 25500.0):
             fields["cape_mu"] = vals
         elif cat == 7 and param == 7 and _is_pressure_depth_agl(msg, 25500.0):
             fields["cin_mu"] = -np.abs(vals)
-        elif cat == 7 and param == 6 and _is_pressure_depth_agl(msg, 9000.0):
-            fields["cape_90"] = vals
-        elif cat == 7 and param == 7 and _is_pressure_depth_agl(msg, 9000.0):
-            fields["cin_90"] = -np.abs(vals)
+        elif cat == 7 and param == 6 and _is_height_agl(msg, 0.0):
+            fields["cape_3km"] = vals
         elif cat == 1 and param == 3:
             fields["pwat"] = vals
+        elif cat == 3 and param == 0 and _is_surface(msg):
+            fields["surface_pressure"] = vals
         elif cat == 0 and param == 0 and _is_height_agl(msg, 2.0):
             fields["t2m"] = vals
+        elif cat == 0 and param == 0:
+            pressure_mb = _pressure_mb(msg)
+            if pressure_mb in HGT_PRESSURE_LEVELS_MB:
+                fields[f"t{pressure_mb}"] = vals
         elif cat == 0 and param == 6 and _is_height_agl(msg, 2.0):
             fields["td2m"] = vals
         elif cat == 2 and param == 2 and _is_height_agl(msg, 10.0):
@@ -466,7 +518,9 @@ def _crop_and_stride(
     return lats_out, lons_out, fields_out
 
 
-def _overlay_cache_path(run_date: str, run_cycle: int, fhour: int, cache_dir: Path | str | None) -> Path | None:
+def _overlay_cache_path(
+    run_date: str, run_cycle: int, fhour: int, cache_dir: Path | str | None
+) -> Path | None:
     if cache_dir is None:
         return None
     return Path(cache_dir) / run_date / f"{run_cycle:02d}" / f"f{fhour:02d}.npz"
@@ -479,7 +533,10 @@ def _load_overlay_cache(path: Path, cache_ttl: int) -> dict[str, Any] | None:
         return None
     try:
         with np.load(path, allow_pickle=False) as data:
-            fields = {key: np.asarray(data[f"field__{key}"], dtype=float) for key in OVERLAY_500_FIELD_KEYS}
+            fields = {
+                key: np.asarray(data[f"field__{key}"], dtype=float)
+                for key in OVERLAY_500_FIELD_KEYS
+            }
             return {
                 "model": "hrrr",
                 "source": "HRRR",

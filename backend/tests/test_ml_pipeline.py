@@ -53,7 +53,13 @@ class MlPipelineTests(unittest.TestCase):
             "mlcape": 1500,
             "mucape": 2200,
             "sbcape": 1100,
+            "cape3km": 450,
+            "cape180": 1750,
             "cin": -75,
+            "cinSb": -40,
+            "cinMl": -75,
+            "cinMu": -90,
+            "cin180": -70,
             "sfcDewpointF": 68,
             "pwatIn": 1.35,
             "lclM": 900,
@@ -71,6 +77,9 @@ class MlPipelineTests(unittest.TestCase):
             "ehi": 1.7,
             "ship": 1.2,
             "tornadoComposite": 0.54,
+            "lapseRate700500CPerKm": 7.0,
+            "freezingLevelM": 3200.0,
+            "surfacePressurePa": 100500.0,
         }
         row = feature_row(ingredients, 18)
 
@@ -78,10 +87,19 @@ class MlPipelineTests(unittest.TestCase):
         self.assertEqual(len(row), len(FEATURE_NAMES))
         self.assertEqual(row["forecastHour"], 18.0)
         self.assertNotIn("initiationConf", row)
-        self.assertNotIn("stp", row)
-        self.assertNotIn("scp", row)
-        self.assertNotIn("ehi", row)
-        self.assertNotIn("ship", row)
+        self.assertEqual(row["cape3km"], 450.0)
+        self.assertEqual(row["cape180"], 1750.0)
+        self.assertEqual(row["cinSb"], -40.0)
+        self.assertEqual(row["cinMl"], -75.0)
+        self.assertEqual(row["cinMu"], -90.0)
+        self.assertEqual(row["cin180"], -70.0)
+        self.assertEqual(row["stp"], 2.3)
+        self.assertEqual(row["scp"], 5.1)
+        self.assertEqual(row["ehi"], 1.7)
+        self.assertEqual(row["ship"], 1.2)
+        self.assertEqual(row["lapseRate700500CPerKm"], 7.0)
+        self.assertEqual(row["freezingLevelM"], 3200.0)
+        self.assertEqual(row["surfacePressurePa"], 100500.0)
         self.assertNotIn("tornadoComposite", row)
         self.assertNotIn("frontSignalOrdinal", row)
         self.assertFalse(any(name.startswith("stormMode") for name in row))
@@ -173,6 +191,102 @@ class MlPipelineTests(unittest.TestCase):
         self.assertGreater(float(inhibited["stp"][0]), 0.25)
         self.assertLess(float(inhibited["stp"][0]), 0.45)
 
+    def test_fixed_layer_stp_matches_spc_term_clipping(self) -> None:
+        result = diag.composites(
+            cape=np.array([3000.0]),
+            mlcape=np.array([2500.0]),
+            mucape=np.array([2800.0]),
+            shear_kt=np.array([30.0 * diag.KT_PER_MS]),
+            srh01=np.array([225.0]),
+            srh03=np.array([300.0]),
+            cin=np.array([-125.0]),
+            td2m_K=np.array([293.15]),
+            t2m_K=np.array([301.15]),
+            lcl_m=np.array([1500.0]),
+        )
+
+        expected = 1.5 * 0.5 * 1.5 * 1.5 * 0.5
+        self.assertAlmostEqual(float(result["stp"][0]), expected, places=6)
+
+    def test_scp_uses_shear_gate_and_mu_cin_term(self) -> None:
+        weak_shear = diag.composites(
+            cape=np.array([2000.0]),
+            mucape=np.array([2000.0]),
+            shear_kt=np.array([9.5 * diag.KT_PER_MS]),
+            srh01=np.array([120.0]),
+            srh03=np.array([200.0]),
+            cin=np.array([-20.0]),
+            td2m_K=np.array([293.15]),
+        )
+        self.assertEqual(float(weak_shear["scp"][0]), 0.0)
+
+        inhibited = diag.composites(
+            cape=np.array([2000.0]),
+            mucape=np.array([2000.0]),
+            shear_kt=np.array([20.0 * diag.KT_PER_MS]),
+            srh01=np.array([120.0]),
+            srh03=np.array([200.0]),
+            cin=np.array([-20.0]),
+            cin_mu=np.array([-80.0]),
+            td2m_K=np.array([293.15]),
+        )
+        self.assertAlmostEqual(float(inhibited["scp"][0]), 4.0, places=6)
+
+    def test_ship_matches_spc_formula_when_required_fields_are_supplied(self) -> None:
+        td_k = 293.15
+        surface_pressure_pa = 100000.0
+        t500_k = 253.15
+        shear_ms = 20.0
+        result = diag.composites(
+            cape=np.array([2600.0]),
+            mucape=np.array([2600.0]),
+            shear_kt=np.array([shear_ms * diag.KT_PER_MS]),
+            srh01=np.array([100.0]),
+            srh03=np.array([160.0]),
+            cin=np.array([-20.0]),
+            td2m_K=np.array([td_k]),
+            t2m_K=np.array([293.15]),
+            surface_pressure_pa=np.array([surface_pressure_pa]),
+            t850_K=np.array([288.15]),
+            t700_K=np.array([273.15]),
+            t500_K=np.array([t500_k]),
+            hgt850_m=np.array([1500.0]),
+            hgt700_m=np.array([3000.0]),
+            hgt500_m=np.array([5600.0]),
+        )
+
+        td_c = td_k - 273.15
+        vapor_pressure_hpa = 6.112 * np.exp((17.67 * td_c) / (td_c + 243.5))
+        mixing_ratio = 621.97 * vapor_pressure_hpa / ((surface_pressure_pa / 100.0) - vapor_pressure_hpa)
+        expected = (
+            2600.0
+            * min(max(mixing_ratio, 11.0), 13.6)
+            * (20.0 / 2.6)
+            * 20.0
+            * shear_ms
+        ) / 42_000_000.0
+
+        self.assertAlmostEqual(float(result["lapse_rate_700_500"][0]), 20.0 / 2.6, places=6)
+        self.assertAlmostEqual(float(result["freezing_level_m"][0]), 3000.0, places=6)
+        self.assertAlmostEqual(float(result["mixing_ratio_gkg"][0]), mixing_ratio, places=6)
+        self.assertAlmostEqual(float(result["ship"][0]), expected, places=6)
+        self.assertEqual(float(result["ship_available"][0]), 1.0)
+
+    def test_ship_is_zero_when_hail_growth_zone_fields_are_missing(self) -> None:
+        result = diag.composites(
+            cape=np.array([2600.0]),
+            mucape=np.array([2600.0]),
+            shear_kt=np.array([40.0]),
+            srh01=np.array([100.0]),
+            srh03=np.array([160.0]),
+            cin=np.array([-20.0]),
+            td2m_K=np.array([293.15]),
+            surface_pressure_pa=np.array([100000.0]),
+        )
+
+        self.assertEqual(float(result["ship"][0]), 0.0)
+        self.assertEqual(float(result["ship_available"][0]), 0.0)
+
     def test_forcing_cap_and_mode_formulas_do_not_confuse_shear_with_forcing(self) -> None:
         self.assertEqual(_classify_cap(-10), "none")
         self.assertEqual(_classify_cap(-30), "weak")
@@ -191,7 +305,12 @@ class MlPipelineTests(unittest.TestCase):
             surface_cape=3000.0,
             mlcape=2500.0,
             mucape=3200.0,
-            cin=-175.0,
+            surface_cin=-60.0,
+            mlcin=-175.0,
+            mucin=-90.0,
+            cape3km=650.0,
+            cape180=2700.0,
+            cin180=-130.0,
             td2m_K=294.15,
             t2m_K=304.15,
             pwat_kg_m2=35.0,
@@ -245,7 +364,13 @@ class MlPipelineTests(unittest.TestCase):
             "mlcape": 1600.0,
             "mucape": 2100.0,
             "sbcape": 1400.0,
+            "cape3km": 450.0,
+            "cape180": 1700.0,
             "cin": -65.0,
+            "cinSb": -45.0,
+            "cinMl": -65.0,
+            "cinMu": -85.0,
+            "cin180": -60.0,
             "sfcDewpointF": 66.0,
             "pwatIn": 1.4,
             "lclM": 1000.0,
@@ -254,6 +379,13 @@ class MlPipelineTests(unittest.TestCase):
             "srh03": 210.0,
             "shear06Kt": 42.0,
             "stormRelWindKt": 23.0,
+            "stp": 1.4,
+            "scp": 3.6,
+            "ehi": 1.2,
+            "ship": 0.8,
+            "lapseRate700500CPerKm": 6.8,
+            "freezingLevelM": 3200.0,
+            "surfacePressurePa": 100000.0,
             "label_tornado": 1,
             "label_hail": 0,
             "label_wind": 1,

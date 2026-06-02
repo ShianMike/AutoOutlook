@@ -69,7 +69,7 @@ export default function EnvironmentalIngredientsGrid({ snapshot }: Environmental
   return (
     <RetroPanel
       title="Environmental Ingredients"
-      eyebrow="05 / HRRR fields + derived proxies"
+      eyebrow="04 / HRRR fields + derived proxies"
       badge={<FocusLocationBadge focus={focus} />}
     >
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

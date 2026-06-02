@@ -50,7 +50,7 @@ export default function VerificationPanel({ spcVerification }: VerificationPanel
   return (
     <RetroPanel
       title="System Calibration / SPC QC"
-      eyebrow="09 / Forecast verification against SPC Day 1"
+      eyebrow="07 / Forecast verification against SPC Day 1"
       scanline
     >
       <div className="grid gap-4">
@@ -233,7 +233,7 @@ function MissingVerificationPanel({ spcVerification }: { spcVerification?: SpcVe
   return (
     <RetroPanel
       title="System Calibration / SPC QC"
-      eyebrow="09 / Forecast verification against SPC Day 1"
+      eyebrow="07 / Forecast verification against SPC Day 1"
       scanline
     >
       <div className="border-[3px] border-ink bg-ink p-5 font-mono text-xs text-signal-lime shadow-retro">

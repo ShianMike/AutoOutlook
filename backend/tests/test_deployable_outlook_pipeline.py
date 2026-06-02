@@ -269,7 +269,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         self.assertTrue(descriptor_matches_selected(records[0][2]))
         self.assertFalse(descriptor_matches_selected(records[1][2]))
-        self.assertEqual(selected_ranges(records, 500), [(0, 99), (200, 299), (400, 499)])
+        self.assertEqual(selected_ranges(records, 500), [(0, 99), (200, 299), (300, 399), (400, 499)])
 
     def test_selected_hrrr_ranges_coalesce_adjacent_and_tiny_gaps(self) -> None:
         idx_text = "\n".join([
@@ -346,7 +346,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         fields = small_fields((6, 9))
 
         ds_lats, ds_lons, ds_fields = downsample_hrrr_grid(lats, lons, fields, stride=3)
-        validate_decoded_hrrr_fields(ds_lats, ds_lons, ds_fields)
+        validate_decoded_hrrr_fields(ds_lats, ds_lons, ds_fields, required_field_keys=sorted(fields.keys()))
 
         self.assertEqual(ds_lats.shape, (2,))
         self.assertEqual(ds_lons.shape, (3,))
@@ -359,24 +359,14 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         fields["t2m"] = np.full((5, 5), 999.0)
 
         with self.assertRaises(SelectedHrrrValidationError):
-            validate_decoded_hrrr_fields(lats, lons, fields)
+            validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys=sorted(fields.keys()))
 
     def test_forecast_hour_resolution_defaults_to_deployment_hours(self) -> None:
         self.assertEqual(resolve_forecast_hours(), list(PRODUCTION_FORECAST_HOURS))
         self.assertEqual(resolve_forecast_hours(all_hours=True), list(ALL_FORECAST_HOURS))
         self.assertEqual(resolve_forecast_hours([6, 0, 6]), [0, 6])
 
-    def test_ecmwf_defaults_to_f90_three_hourly(self) -> None:
-        self.assertEqual(
-            resolve_forecast_hours(model_name="ecmwf"),
-            list(range(0, 91, 3)),
-        )
-        self.assertEqual(
-            resolve_forecast_hours([0, 12, 48, 90], model_name="ecmwf"),
-            [0, 12, 48, 90],
-        )
-        with self.assertRaises(ValueError):
-            resolve_forecast_hours([93], model_name="ecmwf")
+
 
     def test_cycle_requirement_uses_requested_forecast_hours(self) -> None:
         hours = resolve_forecast_hours([0, 6, 12])
@@ -637,8 +627,9 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         fields = small_fields()
         features = gridded_features_from_fields(fields, forecast_hour=18)
 
+        from backend.ml.features import FEATURE_NAMES
         self.assertEqual(features.shape, (5, 5))
-        self.assertEqual(features.matrix.shape, (25, 13))
+        self.assertEqual(features.matrix.shape, (25, len(FEATURE_NAMES)))
         self.assertAlmostEqual(float(features.raw["forecastHour"][0, 0]), 18.0)
         self.assertGreater(float(features.raw["shear06Kt"][0, 0]), 0.0)
         self.assertGreater(float(features.raw["sfcDewpointF"][0, 0]), 60.0)
@@ -1994,7 +1985,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "hail": np.full((5, 5), 0.30),
             "wind": np.full((5, 5), 0.30),
         }
-        lats = np.linspace(25.5, 27.5, 5)
+        lats = np.linspace(24.0, 25.0, 5)
         lons = np.linspace(-94.0, -90.0, 5)
 
         processed = postprocess_category_grid(category_grid, probabilities, features, lats, lons)
@@ -2018,7 +2009,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "wind": np.full((5, 5), 0.30),
         }
         lats = np.linspace(24.2, 25.0, 5)
-        lons = np.linspace(-83.0, -81.0, 5)
+        lons = np.linspace(-85.0, -83.0, 5)
 
         processed = postprocess_category_grid(category_grid, probabilities, features, lats, lons)
 
@@ -3163,12 +3154,12 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         shape = (12, 12)
         cases = {
             "gulfOfMexico": (
-                np.linspace(25.5, 27.5, shape[0]),
+                np.linspace(24.0, 25.0, shape[0]),
                 np.linspace(-94.0, -90.0, shape[1]),
             ),
             "floridaGulf": (
                 np.linspace(24.2, 25.0, shape[0]),
-                np.linspace(-83.0, -81.0, shape[1]),
+                np.linspace(-85.0, -83.0, shape[1]),
             ),
             "atlanticOcean": (
                 np.linspace(30.0, 32.0, shape[0]),
@@ -4528,237 +4519,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(len(payload["hours"][0]["upperAirLines"]), 1)
             self.assertEqual(len(payload["hours"][0]["upperAirVectors"]), 1)
 
-    def test_server_serves_philippines_ecmwf_forecast_through_f90(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            default_dir = root / "latest_incremental"
-            artifact_dir = root / "latest_incremental_ecmwf"
-            default_dir.mkdir()
-            artifact_dir.mkdir()
-            ready_hours = [0, 48, 90]
-            (artifact_dir / "index.json").write_text(json.dumps({
-                "cycle": "ECMWF 00Z 20260505",
-                "cycleTimeISO": "2026-05-05T00:00:00Z",
-                "status": "complete",
-                "readyForecastHours": ready_hours,
-                "requestedForecastHours": ready_hours,
-                "model": {"active": True, "version": "ecmwf-unit"},
-            }), encoding="utf-8")
-            valid_times = {
-                0: "2026-05-05T00:00:00Z",
-                48: "2026-05-07T00:00:00Z",
-                90: "2026-05-08T18:00:00Z",
-            }
-            for hour in ready_hours:
-                hour_dir = artifact_dir / "hours" / f"f{hour:02d}"
-                hour_dir.mkdir(parents=True)
-                (hour_dir / "metadata.json").write_text(json.dumps({
-                    "forecastHour": hour,
-                    "validTimeISO": valid_times[hour],
-                    "categoryCounts": {"NONE": 10, "TSTM": 80},
-                    "region": {
-                        "label": "Philippines",
-                        "centerLat": 12.8797,
-                        "centerLon": 121.7740,
-                        "bbox": [116.5, 4.5, 127.0, 21.0],
-                        "states": [],
-                    },
-                    "probabilityStats": {
-                        "categoryConsistencyProbabilityMax": {
-                            "tornado": 0.0,
-                            "hail": 0.0,
-                            "wind": 0.04,
-                        },
-                    },
-                }), encoding="utf-8")
-                (hour_dir / "risk_polygons.geojson").write_text(json.dumps({
-                    "type": "FeatureCollection",
-                    "features": [],
-                }), encoding="utf-8")
-                (hour_dir / "probability_tile.json").write_text(json.dumps({
-                    "forecastHour": hour,
-                    "validTimeISO": valid_times[hour],
-                    "bbox": [116.5, 4.5, 127.0, 21.0],
-                    "probabilities": {"tornado": [], "hail": [], "wind": []},
-                }), encoding="utf-8")
-            from backend import server
 
-            with (
-                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", default_dir),
-                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", None),
-                patch.dict(os.environ, {
-                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
-                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
-                }),
-                patch.object(server, "build_bundle", side_effect=AssertionError("should not build live bundle")),
-            ):
-                server.cache.clear()
-                client = server.app.test_client()
-                forecast_response = client.get("/api/forecast?region=philippines")
-                tile_response = client.get("/api/outlook/incremental/hour/90/probability-tile?region=philippines")
-
-            self.assertEqual(forecast_response.status_code, 200)
-            payload = forecast_response.get_json()
-            self.assertEqual([hour["forecastHour"] for hour in payload["hours"]], ready_hours)
-            self.assertEqual(payload["hours"][-1]["forecastHour"], 90)
-            self.assertEqual(payload["hours"][-1]["region"]["label"], "Philippines")
-            self.assertEqual(payload["hours"][-1]["upperAirOverlay"]["domain"], "Philippines")
-            self.assertEqual(payload["cities"], [])
-            self.assertEqual(tile_response.status_code, 200)
-            self.assertEqual(tile_response.get_json()["forecastHour"], 90)
-
-    def test_artifact_forecast_bundle_uses_ecmwf_index_model_without_request_context(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            artifact_dir = Path(tmp) / "latest_incremental_ecmwf"
-            hour_dir = artifact_dir / "hours" / "f00"
-            hour_dir.mkdir(parents=True)
-            (artifact_dir / "index.json").write_text(json.dumps({
-                "cycle": "ECMWF 00Z 20260505",
-                "cycleTimeISO": "2026-05-05T00:00:00Z",
-                "status": "complete",
-                "readyForecastHours": [0],
-                "cycleDetection": {"cyclePolicy": {"model": "ECMWF"}},
-                "model": {"active": True, "version": "ecmwf-unit"},
-            }), encoding="utf-8")
-            (hour_dir / "metadata.json").write_text(json.dumps({
-                "forecastHour": 0,
-                "validTimeISO": "2026-05-05T00:00:00Z",
-                "categoryCounts": {"NONE": 10, "TSTM": 80},
-                "region": {
-                    "label": "Philippines",
-                    "centerLat": 12.8797,
-                    "centerLon": 121.7740,
-                    "bbox": [116.5, 4.5, 127.0, 21.0],
-                    "states": [],
-                },
-                "probabilityStats": {
-                    "categoryConsistencyProbabilityMax": {
-                        "tornado": 0.0,
-                        "hail": 0.0,
-                        "wind": 0.04,
-                    },
-                },
-            }), encoding="utf-8")
-            (hour_dir / "risk_polygons.geojson").write_text(json.dumps({
-                "type": "FeatureCollection",
-                "features": [],
-            }), encoding="utf-8")
-
-            from backend import server
-
-            with (
-                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
-                patch.dict(os.environ, {
-                    "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
-                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
-                }),
-            ):
-                payload = server._artifact_forecast_bundle()
-
-            self.assertIsNotNone(payload)
-            self.assertEqual(payload["providerNotes"].split("/XGBoost", 1)[0], "Generated ECMWF")
-            self.assertEqual(payload["cities"], [])
-            self.assertEqual(payload["hours"][0]["upperAirOverlay"]["domain"], "Philippines")
-
-    def test_ecmwf_cycle_detection(self) -> None:
-        from backend.ecmwf_selected import EcmwfCycle, latest_available_ecmwf_cycle
-        cycle = latest_available_ecmwf_cycle()
-        self.assertIsInstance(cycle, EcmwfCycle)
-        self.assertTrue(len(cycle.run_date) == 8)
-        self.assertIn(cycle.run_cycle, (0, 6, 12, 18))
-        self.assertIn("ECMWF", cycle.label)
-
-    def test_ecmwf_grib2_conversion_and_units(self) -> None:
-        # Mock GRIB2 decoded message payload
-        messages = [
-            {
-                "category": 7,
-                "parameter": 6,
-                "level_type": 1,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[1500.0, 1600.0], [1700.0, 1800.0]]),
-            },
-            {
-                "category": 7,
-                "parameter": 7,
-                "level_type": 1,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[-10.0, -20.0], [-30.0, -40.0]]),
-            },
-            {
-                "category": 0,
-                "parameter": 0,
-                "level_type": 103,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[298.0, 299.0], [300.0, 301.0]]),
-            },
-            {
-                "category": 0,
-                "parameter": 6,
-                "level_type": 103,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[292.0, 293.0], [294.0, 295.0]]),
-            },
-            {
-                "category": 2,
-                "parameter": 2,
-                "level_type": 103,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[5.0, 6.0], [7.0, 8.0]]),
-            },
-            {
-                "category": 2,
-                "parameter": 3,
-                "level_type": 103,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[10.0, 11.0], [12.0, 13.0]]),
-            },
-            {
-                "category": 2,
-                "parameter": 2,
-                "level_type": 100,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[20.0, 21.0], [22.0, 23.0]]),
-            },
-            {
-                "category": 2,
-                "parameter": 3,
-                "level_type": 100,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[30.0, 31.0], [32.0, 33.0]]),
-            },
-            {
-                "category": 3,
-                "parameter": 4, # Geopotential (z)
-                "level_type": 100,
-                "lats": np.array([12.0, 13.0]),
-                "lons": np.array([120.0, 121.0]),
-                "values": np.array([[56000.0, 56200.0], [56400.0, 56600.0]]),
-            },
-        ]
-        from backend.ecmwf_selected import _ecmwf_messages_to_fields
-        lats, lons, fields = _ecmwf_messages_to_fields(messages)
-
-        self.assertEqual(len(lats), 2)
-        self.assertEqual(len(lons), 2)
-        self.assertEqual(fields["cape"][0, 0], 1500.0)
-        self.assertEqual(fields["cin"][0, 0], -10.0)
-        self.assertEqual(fields["t2m"][0, 0], 298.0)
-        self.assertEqual(fields["td2m"][0, 0], 292.0)
-        self.assertEqual(fields["u10"][0, 0], 5.0)
-        self.assertEqual(fields["v10"][0, 0], 10.0)
-        self.assertEqual(fields["u500"][0, 0], 20.0)
-        self.assertEqual(fields["v500"][0, 0], 30.0)
-        # Geopotential converted to height: 56000 / 9.80665
-        self.assertAlmostEqual(fields["hgt500"][0, 0], 56000.0 / 9.80665, places=4)
 
 
 if __name__ == "__main__":

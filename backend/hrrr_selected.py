@@ -48,11 +48,13 @@ DEFAULT_RANGE_COALESCE_GAP_BYTES = _env_nonnegative_int("AUTOOUTLOOK_RANGE_COALE
 SELECTED_HRRR_TERMS = (
     ":CAPE:surface:",
     ":CIN:surface:",
+    ":CAPE:90-0 mb above ground:",
+    ":CIN:90-0 mb above ground:",
     ":CAPE:180-0 mb above ground:",
     ":CIN:180-0 mb above ground:",
     ":CAPE:255-0 mb above ground:",
     ":CIN:255-0 mb above ground:",
-    ":PWAT:entire atmosphere",
+    ":CAPE:0-3000 m above ground:",
     ":DPT:2 m above ground:",
     ":TMP:2 m above ground:",
     ":UGRD:10 m above ground:",
@@ -60,13 +62,28 @@ SELECTED_HRRR_TERMS = (
     ":UGRD:500 mb:",
     ":VGRD:500 mb:",
     ":HGT:500 mb:",
+    ":PWAT:entire atmosphere",
     ":HLCY:1000-0 m above ground:",
     ":HLCY:3000-0 m above ground:",
+    ":TMP:850 mb:",
+    ":TMP:700 mb:",
+    ":TMP:500 mb:",
+    ":HGT:850 mb:",
+    ":HGT:700 mb:",
+    ":HGT:1000 mb:",
+    ":PRES:surface:",
 )
 
 REQUIRED_HRRR_TERMS = (
     ":CAPE:surface:",
     ":CIN:surface:",
+    ":CAPE:90-0 mb above ground:",
+    ":CIN:90-0 mb above ground:",
+    ":CAPE:180-0 mb above ground:",
+    ":CIN:180-0 mb above ground:",
+    ":CAPE:255-0 mb above ground:",
+    ":CIN:255-0 mb above ground:",
+    ":CAPE:0-3000 m above ground:",
     ":DPT:2 m above ground:",
     ":TMP:2 m above ground:",
     ":UGRD:10 m above ground:",
@@ -78,7 +95,22 @@ REQUIRED_HRRR_TERMS = (
 
 OPTIONAL_HRRR_TERMS = tuple(term for term in SELECTED_HRRR_TERMS if term not in REQUIRED_HRRR_TERMS)
 
-REQUIRED_FIELD_KEYS = ("cape", "cin", "td2m", "t2m", "u10", "v10", "u500", "v500", "hgt500")
+REQUIRED_FIELD_KEYS = (
+    "cape",
+    "cin",
+    "cape_ml",
+    "cin_ml",
+    "cape_mu",
+    "cin_mu",
+    "cape_3km",
+    "td2m",
+    "t2m",
+    "u10",
+    "v10",
+    "u500",
+    "v500",
+    "hgt500",
+)
 
 
 @dataclass(frozen=True)
@@ -371,7 +403,9 @@ def fetch_selected_hrrr_hour_with_metadata(
     required_terms_tuple = tuple(required_terms)
     optional_terms_tuple = tuple(optional_terms)
     required_field_keys_tuple = tuple(required_field_keys)
-    cache_path = cache_path_for(ref, cache_dir) if cache_dir is not None else None
+    cache_path = cache_path_for(ref, cache_dir, grid_stride) if cache_dir is not None else None
+    grib_cache_path = grib_cache_path_for(ref, cache_dir) if cache_dir is not None else None
+    
     base_metadata = {
         "forecastHour": ref.forecast_hour,
         "runDate": ref.run_date,
@@ -385,12 +419,15 @@ def fetch_selected_hrrr_hour_with_metadata(
         "source": "hrrr_s3_byte_ranges",
     }
 
-    if not no_cache and cache_path is not None:
+    # First, try to load from stride-specific numpy cache
+    if not no_cache and cache_path is not None and cache_path.exists():
         cached = _load_cache(cache_path, cache_ttl_hours)
         if cached is not None:
             lats, lons, fields, cache_metadata = cached
             try:
-                validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
+                validate_decoded_hrrr_fields(
+                    lats, lons, fields, required_field_keys_tuple
+                )
             except SelectedHrrrValidationError:
                 cached = None
             else:
@@ -403,84 +440,132 @@ def fetch_selected_hrrr_hour_with_metadata(
                     "gridShape": list(_grid_shape(lats, lons, fields)),
                     "fetchLatencyMs": int((time.perf_counter() - started) * 1000),
                 }
-                return SelectedHrrrHour(lats=lats, lons=lons, fields=fields, metadata=metadata)
+                return SelectedHrrrHour(
+                    lats=lats, lons=lons, fields=fields, metadata=metadata
+                )
 
-    own_session = session is None
-    session = session or requests.Session()
-    session.headers.setdefault("User-Agent", "AutoOutlook-selected-hrrr/1.0")
-    try:
-        idx_response = _request_with_backoff(session, "GET", ref.idx_url, timeout=30)
-        if idx_response.status_code == 404:
-            raise FileNotFoundError(ref.idx_url)
-        idx_response.raise_for_status()
+    # Next, check if we have the raw GRIB bytes cached locally
+    grib_bytes = None
+    if not no_cache and grib_cache_path is not None and grib_cache_path.exists():
+        age_hours = (time.time() - grib_cache_path.stat().st_mtime) / 3600.0
+        if age_hours <= cache_ttl_hours:
+            try:
+                grib_bytes = grib_cache_path.read_bytes()
+                base_metadata["source"] = "local_grib_cache"
+                print(f"[hrrr selected] F{ref.forecast_hour:02d} loaded GRIB from local cache", flush=True)
+            except Exception:
+                grib_bytes = None
 
-        records = parse_idx(idx_response.text)
-        term_report = validate_idx_records(
-            records,
-            selected_terms_tuple,
-            required_terms_tuple,
-            optional_terms_tuple,
-        )
-        content_length = _content_length(session, ref.grib_url)
-        range_items = selected_record_ranges(records, content_length, selected_terms_tuple)
-        ranges = [(item.start, item.end) for item in range_items]
-        if not ranges:
-            raise ValueError(f"No selected HRRR records found in {ref.idx_url}")
-        coalesce_gap = (
-            DEFAULT_RANGE_COALESCE_GAP_BYTES
-            if range_coalesce_gap_bytes is None
-            else max(0, int(range_coalesce_gap_bytes))
-        )
-        fetch_ranges = coalesced_fetch_ranges(range_items, max_gap_bytes=coalesce_gap)
+    content_length = None
+    ranges = []
+    fetch_ranges = []
+    coalesce_gap = DEFAULT_RANGE_COALESCE_GAP_BYTES
+    term_report = {}
 
-        chunks_by_start: dict[int, bytes] = {}
-        worker_count = max(1, min(max_workers, len(fetch_ranges)))
-        print(
-            f"[hrrr selected] F{ref.forecast_hour:02d} "
-            f"records={len(records)} selectedRanges={len(ranges)} "
-            f"fetchRanges={len(fetch_ranges)} workers={worker_count} "
-            f"selectedBytes={int(sum(end - start + 1 for start, end in ranges))}",
-            flush=True,
-        )
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {executor.submit(_fetch_range, session, ref.grib_url, start, end): (start, end) for start, end in fetch_ranges}
-            for future in as_completed(futures):
-                start, chunk = future.result()
-                chunks_by_start[start] = chunk
+    if grib_bytes is None:
+        # Fetch from remote S3
+        own_session = session is None
+        session = session or requests.Session()
+        # Set up adapter for connection pooling & Keep-Alive to speed up fetch
+        from requests.adapters import HTTPAdapter
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers.setdefault("User-Agent", "AutoOutlook-selected-hrrr/1.0")
+        try:
+            idx_response = _request_with_backoff(session, "GET", ref.idx_url, timeout=30)
+            if idx_response.status_code == 404:
+                raise FileNotFoundError(ref.idx_url)
+            idx_response.raise_for_status()
 
-        chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
-        print(
-            f"[hrrr selected] F{ref.forecast_hour:02d} "
-            f"fetchedRanges={len(chunks_by_start)}/{len(fetch_ranges)} "
-            f"fetchedBytes={sum(len(chunk) for chunk in chunks)}",
-            flush=True,
-        )
-        messages = decode_grib2(b"".join(chunks))
-        from .hrrr_filter import _messages_to_fields
+            records = parse_idx(idx_response.text)
+            term_report = validate_idx_records(
+                records,
+                selected_terms_tuple,
+                required_terms_tuple,
+                optional_terms_tuple,
+            )
+            content_length = _content_length(session, ref.grib_url)
+            range_items = selected_record_ranges(
+                records, content_length, selected_terms_tuple
+            )
+            ranges = [(item.start, item.end) for item in range_items]
+            if not ranges:
+                raise ValueError(f"No selected HRRR records found in {ref.idx_url}")
+            coalesce_gap = (
+                DEFAULT_RANGE_COALESCE_GAP_BYTES
+                if range_coalesce_gap_bytes is None
+                else max(0, int(range_coalesce_gap_bytes))
+            )
+            fetch_ranges = coalesced_fetch_ranges(range_items, max_gap_bytes=coalesce_gap)
 
-        lats, lons, fields = _messages_to_fields(messages, require_cape="cape" in required_field_keys_tuple)
-        lats, lons, fields = downsample_hrrr_grid(lats, lons, fields, grid_stride)
-        validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
+            chunks_by_start: dict[int, bytes] = {}
+            worker_count = max(1, min(max_workers, len(fetch_ranges)))
+            print(
+                f"[hrrr selected] F{ref.forecast_hour:02d} "
+                f"records={len(records)} selectedRanges={len(ranges)} "
+                f"fetchRanges={len(fetch_ranges)} workers={worker_count} "
+                f"selectedBytes={int(sum(end - start + 1 for start, end in ranges))}",
+                flush=True,
+            )
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(_fetch_range, session, ref.grib_url, start, end): (
+                        start,
+                        end,
+                    )
+                    for start, end in fetch_ranges
+                }
+                for future in as_completed(futures):
+                    start, chunk = future.result()
+                    chunks_by_start[start] = chunk
 
-        metadata = {
-            **base_metadata,
-            **term_report,
-            "contentLength": content_length,
-            "selectedRangeCount": len(ranges),
-            "fetchRangeCount": len(fetch_ranges),
-            "rangeCoalesceGapBytes": coalesce_gap,
-            "selectedByteCount": int(sum(end - start + 1 for start, end in ranges)),
-            "fetchedByteCount": int(sum(end - start + 1 for start, end in fetch_ranges)),
-            "decodedFieldNames": sorted(fields),
-            "gridShape": list(_grid_shape(lats, lons, fields)),
-            "fetchLatencyMs": int((time.perf_counter() - started) * 1000),
-        }
-        if cache_path is not None and not no_cache:
-            _save_cache(cache_path, lats, lons, fields, metadata)
-        return SelectedHrrrHour(lats=lats, lons=lons, fields=fields, metadata=metadata)
-    finally:
-        if own_session:
-            session.close()
+            chunks = [chunks_by_start[start] for start, _ in sorted(fetch_ranges)]
+            grib_bytes = b"".join(chunks)
+            print(
+                f"[hrrr selected] F{ref.forecast_hour:02d} "
+                f"fetchedRanges={len(chunks_by_start)}/{len(fetch_ranges)} "
+                f"fetchedBytes={len(grib_bytes)}",
+                flush=True,
+            )
+
+            # Write the raw GRIB bytes to cache
+            if grib_cache_path is not None and not no_cache:
+                try:
+                    grib_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    grib_cache_path.write_bytes(grib_bytes)
+                except Exception as exc:
+                    print(f"[hrrr selected] warning: failed to write GRIB cache: {exc}", flush=True)
+
+        finally:
+            if own_session:
+                session.close()
+
+    messages = decode_grib2(grib_bytes)
+    from .hrrr_filter import _messages_to_fields
+
+    lats, lons, fields = _messages_to_fields(
+        messages, require_cape="cape" in required_field_keys_tuple
+    )
+    lats, lons, fields = downsample_hrrr_grid(lats, lons, fields, grid_stride)
+    validate_decoded_hrrr_fields(lats, lons, fields, required_field_keys_tuple)
+
+    metadata = {
+        **base_metadata,
+        **term_report,
+        "contentLength": content_length or len(grib_bytes),
+        "selectedRangeCount": len(ranges) if ranges else None,
+        "fetchRangeCount": len(fetch_ranges) if fetch_ranges else None,
+        "rangeCoalesceGapBytes": coalesce_gap,
+        "selectedByteCount": int(sum(end - start + 1 for start, end in ranges)) if ranges else None,
+        "fetchedByteCount": len(grib_bytes),
+        "decodedFieldNames": sorted(fields),
+        "gridShape": list(_grid_shape(lats, lons, fields)),
+        "fetchLatencyMs": int((time.perf_counter() - started) * 1000),
+    }
+    if cache_path is not None and not no_cache:
+        _save_cache(cache_path, lats, lons, fields, metadata)
+    return SelectedHrrrHour(lats=lats, lons=lons, fields=fields, metadata=metadata)
 
 
 def _idx_available(session: requests.Session, ref: HrrrHourRef) -> bool:
@@ -504,32 +589,28 @@ def _content_length(session: requests.Session, url: str) -> int | None:
     return None
 
 
-def _fetch_range(session: requests.Session, url: str, start: int, end: int) -> tuple[int, bytes]:
-    if isinstance(session, requests.Session):
-        request_session = requests.Session()
-        request_session.headers.update(session.headers)
-        close_session = True
-    else:
-        request_session = session
-        close_session = False
-    try:
-        response = _request_with_backoff(
-            request_session,
-            "GET",
-            url,
-            headers={"Range": f"bytes={start}-{end}"},
-            timeout=90,
-            retries=3,
-        )
-    finally:
-        if close_session:
-            request_session.close()
+def _fetch_range(
+    session: requests.Session, url: str, start: int, end: int
+) -> tuple[int, bytes]:
+    # Reuse the same session object (real or mock) to enable connection pooling & Keep-Alive.
+    response = _request_with_backoff(
+        session,
+        "GET",
+        url,
+        headers={"Range": f"bytes={start}-{end}"},
+        timeout=90,
+        retries=3,
+    )
     response.raise_for_status()
     expected_length = end - start + 1
     if response.status_code == 200 and len(response.content) > expected_length + 1024:
-        raise ValueError(f"Range request {start}-{end} returned a full GRIB-like payload")
+        raise ValueError(
+            f"Range request {start}-{end} returned a full GRIB-like payload"
+        )
     if len(response.content) > expected_length + 1024:
-        raise ValueError(f"Selected HRRR range {start}-{end} exceeded expected byte length")
+        raise ValueError(
+            f"Selected HRRR range {start}-{end} exceeded expected byte length"
+        )
     if not response.content.startswith(b"GRIB"):
         raise ValueError(f"Selected HRRR range {start}-{end} did not start with GRIB")
     return start, response.content
@@ -563,9 +644,26 @@ def _request_with_backoff(
     raise RuntimeError(f"{method} {url} failed without a response")
 
 
-def cache_path_for(ref: HrrrHourRef, cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR) -> Path:
+def cache_path_for(
+    ref: HrrrHourRef,
+    cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR,
+    grid_stride: int | None = None,
+) -> Path:
     root = Path(cache_dir or DEFAULT_SELECTED_CACHE_DIR)
-    return root / ref.run_date / f"{ref.run_cycle:02d}" / f"f{ref.forecast_hour:02d}.npz"
+    suffix = f"_stride{grid_stride}" if grid_stride is not None and grid_stride > 1 else ""
+    return (
+        root / ref.run_date / f"{ref.run_cycle:02d}" / f"f{ref.forecast_hour:02d}{suffix}.npz"
+    )
+
+
+def grib_cache_path_for(
+    ref: HrrrHourRef,
+    cache_dir: Path | str | None = DEFAULT_SELECTED_CACHE_DIR,
+) -> Path:
+    root = Path(cache_dir or DEFAULT_SELECTED_CACHE_DIR)
+    return (
+        root / ref.run_date / f"{ref.run_cycle:02d}" / f"f{ref.forecast_hour:02d}.grib2"
+    )
 
 
 def downsample_hrrr_grid(

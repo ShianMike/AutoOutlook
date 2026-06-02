@@ -4,14 +4,14 @@
 import type { Ingredients, StormMode, SignalStrength } from '../types/forecast';
 
 export function deriveSTP(args: {
-  mlcape: number;
+  sbcape: number;
   srh01: number;
   shear06Kt: number;
   lclM: number;
   cin: number;
 }): number {
-  const { mlcape, srh01, shear06Kt, lclM, cin } = args;
-  const cape = Math.min(mlcape / 1500, 1.5);
+  const { sbcape, srh01, shear06Kt, lclM, cin } = args;
+  const cape = Math.min(Math.max(0, sbcape) / 1500, 1.5);
   const srh  = Math.min(Math.max(0, srh01) / 150, 1.5);
   const shearMs = shear06Kt / 1.9438445;
   const shr = shearMs < 12.5 ? 0 : Math.min(shearMs / 20, 1.5);
@@ -24,13 +24,15 @@ export function deriveSCP(args: {
   mucape: number;
   srh03: number;
   shear06Kt: number;
+  cinMu?: number;
 }): number {
-  const { mucape, srh03, shear06Kt } = args;
+  const { mucape, srh03, shear06Kt, cinMu = 0 } = args;
   const cape = mucape / 1000;
   const srh = Math.max(0, srh03) / 50;
   const shearMs = shear06Kt / 1.9438445;
   const shr = shearMs < 10 ? 0 : Math.min(shearMs / 20, 1);
-  return Math.max(0, Math.min(cape * srh * shr, 12));
+  const cinTerm = cinMu > -40 ? 1 : Math.max(0, Math.min(1, -40 / Math.min(cinMu, -1e-6)));
+  return Math.max(0, Math.min(cape * srh * shr * cinTerm, 24));
 }
 
 export function deriveEHI(args: { mlcape: number; srh01: number }): number {
@@ -40,11 +42,41 @@ export function deriveEHI(args: { mlcape: number; srh01: number }): number {
 export function deriveSHIP(args: {
   mucape: number;
   shear06Kt: number;
-  // approximate inputs, real SHIP uses lapse rate and freezing level
+  mixingRatioGKg?: number;
+  lapseRate700500CPerKm?: number;
+  t500C?: number;
+  freezingLevelM?: number;
 }): number {
-  const cape = Math.min(args.mucape / 2500, 2);
-  const shr  = Math.min(args.shear06Kt / 30, 2);
-  return Math.max(0, cape * shr * 0.6);
+  const {
+    mucape,
+    shear06Kt,
+    mixingRatioGKg,
+    lapseRate700500CPerKm,
+    t500C,
+    freezingLevelM,
+  } = args;
+  if (
+    !Number.isFinite(mucape) ||
+    !Number.isFinite(shear06Kt) ||
+    !Number.isFinite(mixingRatioGKg) ||
+    !Number.isFinite(lapseRate700500CPerKm) ||
+    !Number.isFinite(t500C) ||
+    !Number.isFinite(freezingLevelM) ||
+    mucape <= 0
+  ) {
+    return 0;
+  }
+  const shearMs = shear06Kt / 1.9438445;
+  const mrTerm = Math.max(11, Math.min(13.6, mixingRatioGKg as number));
+  const shearTerm = Math.max(7, Math.min(27, shearMs));
+  const tempTerm = Math.max(-(t500C as number), 5.5);
+  const lapse = lapseRate700500CPerKm as number;
+  const freezing = freezingLevelM as number;
+  const base = (mucape * mrTerm * lapse * tempTerm * shearTerm) / 42000000;
+  const capeModifier = mucape < 1300 ? Math.max(0, Math.min(1, mucape / 1300)) : 1;
+  const lapseModifier = lapse < 5.8 ? Math.max(0, Math.min(1, lapse / 5.8)) : 1;
+  const freezingModifier = freezing < 2400 ? Math.max(0, Math.min(1, freezing / 2400)) : 1;
+  return Math.max(0, Math.min(8, base * capeModifier * lapseModifier * freezingModifier));
 }
 
 // ── Storm-mode classification ───────────────────────────────────────
@@ -111,15 +143,31 @@ export function fillIngredientComposites(base: Omit<Ingredients,
   'stp' | 'scp' | 'ehi' | 'ship' | 'tornadoComposite'
 >): Ingredients {
   const stp = deriveSTP({
-    mlcape: base.mlcape,
+    sbcape: base.sbcape,
     srh01: base.srh01,
     shear06Kt: base.shear06Kt,
     lclM: base.lclM,
-    cin: base.cin,
+    cin: base.cinSb ?? base.cin,
   });
-  const scp = deriveSCP({ mucape: base.mucape, srh03: base.srh03, shear06Kt: base.shear06Kt });
+  const scp = deriveSCP({
+    mucape: base.mucape,
+    srh03: base.srh03,
+    shear06Kt: base.shear06Kt,
+    cinMu: base.cinMu ?? base.cin,
+  });
   const ehi = deriveEHI({ mlcape: base.mlcape, srh01: base.srh01 });
-  const ship = deriveSHIP({ mucape: base.mucape, shear06Kt: base.shear06Kt });
+  const ship = deriveSHIP({
+    mucape: base.mucape,
+    shear06Kt: base.shear06Kt,
+    mixingRatioGKg: base.mixingRatioGKg,
+    lapseRate700500CPerKm: base.lapseRate700500CPerKm,
+    t500C: base.t500C,
+    freezingLevelM: base.freezingLevelM,
+  });
+  const shipAvailable = Number.isFinite(base.mixingRatioGKg)
+    && Number.isFinite(base.lapseRate700500CPerKm)
+    && Number.isFinite(base.t500C)
+    && Number.isFinite(base.freezingLevelM);
   const tornadoComposite = (stp * 0.6) + Math.max(0, base.srh01) / 200;
-  return { ...base, stp, scp, ehi, ship, tornadoComposite };
+  return { ...base, stp, scp, ehi, ship, shipAvailable, tornadoComposite };
 }

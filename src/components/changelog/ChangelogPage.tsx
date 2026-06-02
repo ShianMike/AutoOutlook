@@ -84,10 +84,52 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.8',
+    codename: 'Florida Land Mask Fix, Grid Stride 2 & Dashboard Alignment',
+    date: '2026-06-02',
+    status: 'CURRENT',
+    summary:
+      'This release expands the CONUS land mask to Southern Florida and the Keys, prevents strict ocean offshore suppressions on land grid cells, aligns dashboard widget eyebrows to their sidebar navigation index, and defaults the gridded risk pipeline to a denser gridStride of 2 with raw GRIB caching to keep dev fetches fast.',
+    highlights: [
+      'South Florida and Keys land mask correction: Expanded conus_ring bounds and updated offshore suppressions to prevent severe convective risks from being incorrectly cut off in Naples, Everglades, Cape Sable, Miami, and the Florida Keys.',
+      'Denser gridStride=2 default: Lowered the default pipeline grid stride from 4 to 2 to significantly reduce sharp corners and step edges in generated risk polygons.',
+      'Raw GRIB caching: Implemented local raw GRIB cache files (*.grib2) to bypass NOAA S3 byte-range downloads on repeated runs, keeping local development iteration extremely fast.',
+      'Unified dashboard index alignment: Corrected the numbered eyebrows on all primary dashboard widgets (01 through 08) to correspond exactly with the sidebar navigation button numbers.',
+      'Aligned test suites: Shifted test verification coordinate grids to keep them purely offshore, resolving land mask overlap collisions, and updated assertions dynamically.',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Enclosed South Florida and Keys in CONUS land mask',
+        body: 'Expanded the coarse land polygon boundary down to 24.5 N and updated the strict ocean offshore masks to subtract the land mask, preventing unconditional suppression of land coordinates.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Aligned dashboard component numbers with sidebar navigation',
+        body: 'Updated section eyebrows on the outlook map, hazard board, ingredients grid, risk timeline, discussion, verification, and system status widgets to match their respective nav buttons.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Calibrated pipeline grid stride to 2 with raw GRIB caching',
+        body: 'Decreased default grid stride from 4 to 2 across configuration systems, and introduced a raw GRIB2 caching layer to accelerate local dev execution times.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Offshore testing coordinates and assertions',
+        body: 'Updated backend test coordinates for Gulf and Florida Gulf testing boxes to remain strictly offshore and made features shape validations dynamic.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Bumped metadata and documentation versions to v0.8',
+        body: 'Updated package, lockfile, app footers, transit screens, and changelog deck to reflect version 0.8.',
+      },
+    ],
+  },
+  {
     version: 'v0.7.1',
     codename: 'Regional Calibration & Enhanced UI Tactility',
     date: '2026-06-01',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release introduces comprehensive regional logic calibration for mesoscale convective outlooks across CONUS, and optimizes operator dashboard transitions with heavier, more tactile loading intervals.',
     highlights: [
@@ -1031,7 +1073,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.7
+          AutoOutlook · Automated Convective Risk Intelligence · v0.8
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

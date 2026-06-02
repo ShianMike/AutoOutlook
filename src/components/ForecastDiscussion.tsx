@@ -52,7 +52,7 @@ export default function ForecastDiscussion({ snapshot }: ForecastDiscussionProps
   return (
     <RetroPanel
       title="Automated Forecast Discussion"
-      eyebrow={mlDriven ? '07 / Generated from ML hazard probabilities' : '07 / Generated from rule engines'}
+      eyebrow={mlDriven ? '06 / Generated from ML hazard probabilities' : '06 / Generated from rule engines'}
       badge={(
         <div className="flex flex-wrap items-center justify-end gap-2">
           <FocusLocationBadge focus={focus} />

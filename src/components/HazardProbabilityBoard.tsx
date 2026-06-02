@@ -26,7 +26,7 @@ export default function HazardProbabilityBoard({ snapshot, artifacts, artifactSt
   return (
     <RetroPanel
       title="Hazard Probability Board"
-      eyebrow="04 / Per-hazard automated estimate"
+      eyebrow="03 / Per-hazard automated estimate"
       badge={<FocusLocationBadge focus={focus} />}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

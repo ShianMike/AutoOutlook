@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { ActiveRegion, HourSnapshot, PhilippineRegionPane } from '../types/forecast';
+import type { ActiveRegion, HourSnapshot } from '../types/forecast';
 import {
   HAZARD_CONFIGS,
   getHazardConfig,
@@ -14,7 +14,6 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import { buildHazards } from '../utils/hazardEngine';
 import { displayOutlookAreas } from '../utils/outlookAreaMotion';
-import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -24,7 +23,6 @@ interface HazardOutlookMapProps {
   title: string;
   sourceLabel?: string;
   activeRegion?: ActiveRegion;
-  philippinePane?: PhilippineRegionPane;
 }
 
 interface UpperAirFeature {
@@ -64,22 +62,18 @@ export default function HazardOutlookMap({
   title,
   sourceLabel,
   activeRegion = 'conus',
-  philippinePane = 'national',
 }: HazardOutlookMapProps) {
-  const isPhil = activeRegion === 'philippines';
-  const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
-  const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
-  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
-  const projectionConfig = isPhil
-    ? { center: activePhilippinePane.center, scale: activePhilippinePane.scale }
-    : {
-        rotate: [96, 0, 0] as [number, number, number],
-        center: [0, 38] as [number, number],
-        parallels: [29.5, 45.5] as [number, number],
-        scale: 1000,
-      };
+  void activeRegion;
+  const geoUrl = STATES_URL;
+  const projection = 'geoAlbers';
+  const projectionConfig = {
+    rotate: [96, 0, 0] as [number, number, number],
+    center: [0, 38] as [number, number],
+    parallels: [29.5, 45.5] as [number, number],
+    scale: 1000,
+  };
 
-  const cfg = getHazardConfig(hazard, isPhil);
+  const cfg = getHazardConfig(hazard);
   const contourHour = snapshot?.forecastHour ?? 0;
 
   const peakProb = snapshot

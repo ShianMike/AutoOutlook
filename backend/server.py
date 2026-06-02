@@ -164,17 +164,11 @@ def _request_model() -> str:
         if model:
             return model
         region = request.args.get("region")
-        if region == "philippines":
-            return "ecmwf"
         if region == "conus":
             return "hrrr"
     except RuntimeError:
         pass
     return "hrrr"
-
-
-def _is_philippines_artifact_model(model: str | None) -> bool:
-    return model == "ecmwf"
 
 
 def _artifact_model_from_index(index: dict | None) -> str:
@@ -886,7 +880,7 @@ def _artifact_forecast_bundle():
     fetched_at_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     model = _artifact_model_from_index(index)
-    cities_list = [] if _is_philippines_artifact_model(model) else CONUS_CITIES
+    cities_list = CONUS_CITIES
     index_model = str(((index.get("cycleDetection") or {}).get("cyclePolicy") or {}).get("model") or "").upper()
     if "ECMWF" in index_model or model == "ecmwf":
         model_label = "ECMWF"
@@ -1105,30 +1099,15 @@ def _region_from_feature_collection(payload, category: str) -> dict:
             for feature in selected:
                 points.extend(_geojson_positions((feature.get("geometry") or {}).get("coordinates")))
 
-    model = _request_model()
-
-    if _is_philippines_artifact_model(model):
-        # Philippines bounds
-        min_lon_limit, max_lon_limit = 114.0, 128.0
-        min_lat_limit, max_lat_limit = 4.0, 22.0
-        fallback_region = {
-            "label": "Philippines",
-            "centerLat": 12.8797,
-            "centerLon": 121.7740,
-            "bbox": [115.0, 4.5, 126.5, 21.0],
-            "states": [],
-        }
-    else:
-        # CONUS bounds
-        min_lon_limit, max_lon_limit = -130.0, -60.0
-        min_lat_limit, max_lat_limit = 20.0, 55.0
-        fallback_region = {
-            "label": "Highlighted corridor",
-            "centerLat": 37.0,
-            "centerLon": -97.0,
-            "bbox": [-105.0, 30.0, -89.0, 43.0],
-            "states": [],
-        }
+    min_lon_limit, max_lon_limit = -130.0, -60.0
+    min_lat_limit, max_lat_limit = 20.0, 55.0
+    fallback_region = {
+        "label": "Highlighted corridor",
+        "centerLat": 37.0,
+        "centerLon": -97.0,
+        "bbox": [-105.0, 30.0, -89.0, 43.0],
+        "states": [],
+    }
 
     if not points:
         return fallback_region
@@ -1171,8 +1150,6 @@ def _geojson_positions(value) -> list[tuple[float, float]]:
 def _cities_for_region(region: dict, category: str) -> list[dict]:
     center_lat = float(region.get("centerLat", 37.0) or 37.0)
     center_lon = float(region.get("centerLon", -97.0) or -97.0)
-    if center_lon > 0:  # Philippines/Global region
-        return []
     ramp = ["TSTM", "MRGL", "SLGT", "ENH", "MOD", "HIGH"]
     peak = max(0, ramp.index(category) if category in ramp else 0)
     cities = []
@@ -1188,11 +1165,8 @@ def _cities_for_region(region: dict, category: str) -> list[dict]:
 
 
 def _empty_upper_air_overlay(forecast_hour: int, valid_time_iso: str, index: dict) -> dict:
-    model = _artifact_model_from_index(index)
-    domain = "Philippines" if _is_philippines_artifact_model(model) else "CONUS"
-
     return {
-        "domain": domain,
+        "domain": "CONUS",
         "level": "500mb",
         "fields": [],
         "gridStride": 0,

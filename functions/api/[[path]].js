@@ -27,7 +27,7 @@ function apiHeaders(cacheControl, contentType = 'application/json; charset=utf-8
 }
 
 function resolveStaticPath(pathname, region, model = null) {
-  const prefix = region === 'philippines' ? '/_api/philippines' : (region === 'conus' ? '/_api/conus' : '/_api');
+  const prefix = region === 'conus' ? '/_api/conus' : '/_api';
 
   const direct = STATIC_ROUTES.get(pathname);
   if (direct) {
@@ -38,7 +38,7 @@ function resolveStaticPath(pathname, region, model = null) {
   if (!match) return null;
 
   const forecastHour = Number.parseInt(match[1], 10);
-  const maxForecastHour = region === 'philippines' ? 90 : 48;
+  const maxForecastHour = 48;
   if (!Number.isFinite(forecastHour) || forecastHour < 0 || forecastHour > maxForecastHour) return null;
   const hour = `f${String(forecastHour).padStart(2, '0')}`;
   const name = match[2] === 'risk-polygons' ? 'risk-polygons.geojson' : `${match[2]}.json`;

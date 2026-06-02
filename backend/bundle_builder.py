@@ -4,6 +4,7 @@ Uses NOMADS HRRR GRIB-filter subsets to scan CONUS for the focus region,
 then fetches smaller regional HRRR anchor grids and interpolates hourly
 ingredients through +48h in the TS frontend's Ingredients shape.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,7 @@ from . import metpy_diagnostics as diag
 from .hrrr_filter import fetch_hrrr_500mb_overlay_valid_time, fetch_hrrr_grib_valid_time
 from .ml.inference import model_status, predict_ml_hazards
 from .nomads_pipeline import NomadsFetchError
-from .region_picker import pick_focus_region, _southern_border_multiplier
+from .region_picker import _southern_border_multiplier, pick_focus_region
 
 log = logging.getLogger(__name__)
 
@@ -45,27 +46,27 @@ SECONDARY_FOCUS_BOXES = [
 ]
 
 CONUS_CITIES = [
-    {"name": "Norman",          "lat": 35.22, "lon": -97.44},
-    {"name": "Oklahoma City",   "lat": 35.47, "lon": -97.52},
-    {"name": "Wichita",         "lat": 37.69, "lon": -97.34},
-    {"name": "Tulsa",           "lat": 36.15, "lon": -95.99},
-    {"name": "Amarillo",        "lat": 35.22, "lon": -101.83},
-    {"name": "Dallas",          "lat": 32.78, "lon": -96.80},
-    {"name": "Topeka",          "lat": 39.05, "lon": -95.68},
-    {"name": "Springfield",     "lat": 37.21, "lon": -93.30},
-    {"name": "Lubbock",         "lat": 33.58, "lon": -101.85},
-    {"name": "Joplin",          "lat": 37.08, "lon": -94.51},
-    {"name": "Memphis",         "lat": 35.15, "lon": -90.05},
-    {"name": "Little Rock",     "lat": 34.74, "lon": -92.29},
-    {"name": "St. Louis",       "lat": 38.63, "lon": -90.20},
-    {"name": "Nashville",       "lat": 36.16, "lon": -86.78},
-    {"name": "Atlanta",         "lat": 33.75, "lon": -84.39},
-    {"name": "Birmingham",      "lat": 33.52, "lon": -86.81},
-    {"name": "Chicago",         "lat": 41.88, "lon": -87.63},
-    {"name": "Indianapolis",    "lat": 39.77, "lon": -86.16},
-    {"name": "Omaha",           "lat": 41.26, "lon": -95.93},
-    {"name": "Denver",          "lat": 39.74, "lon": -104.99},
-    {"name": "Minneapolis",     "lat": 44.98, "lon": -93.27},
+    {"name": "Norman", "lat": 35.22, "lon": -97.44},
+    {"name": "Oklahoma City", "lat": 35.47, "lon": -97.52},
+    {"name": "Wichita", "lat": 37.69, "lon": -97.34},
+    {"name": "Tulsa", "lat": 36.15, "lon": -95.99},
+    {"name": "Amarillo", "lat": 35.22, "lon": -101.83},
+    {"name": "Dallas", "lat": 32.78, "lon": -96.80},
+    {"name": "Topeka", "lat": 39.05, "lon": -95.68},
+    {"name": "Springfield", "lat": 37.21, "lon": -93.30},
+    {"name": "Lubbock", "lat": 33.58, "lon": -101.85},
+    {"name": "Joplin", "lat": 37.08, "lon": -94.51},
+    {"name": "Memphis", "lat": 35.15, "lon": -90.05},
+    {"name": "Little Rock", "lat": 34.74, "lon": -92.29},
+    {"name": "St. Louis", "lat": 38.63, "lon": -90.20},
+    {"name": "Nashville", "lat": 36.16, "lon": -86.78},
+    {"name": "Atlanta", "lat": 33.75, "lon": -84.39},
+    {"name": "Birmingham", "lat": 33.52, "lon": -86.81},
+    {"name": "Chicago", "lat": 41.88, "lon": -87.63},
+    {"name": "Indianapolis", "lat": 39.77, "lon": -86.16},
+    {"name": "Omaha", "lat": 41.26, "lon": -95.93},
+    {"name": "Denver", "lat": 39.74, "lon": -104.99},
+    {"name": "Minneapolis", "lat": 44.98, "lon": -93.27},
 ]
 
 
@@ -79,18 +80,33 @@ def _detect_dims(ds: xr.Dataset) -> dict[str, str]:
     if "validtime" not in out:
         for c in ds.coords:
             n = str(c).lower()
-            if n.startswith("validtime") and not n.endswith("forecast") and ds.coords[c].size > 1:
+            if (
+                n.startswith("validtime")
+                and not n.endswith("forecast")
+                and ds.coords[c].size > 1
+            ):
                 out["validtime"] = c
                 break
     if "validtime" not in out:
         # fallback: any dim of size > 1 not in (reftime, latitude, longitude, isobaric, height_above_ground*)
         for d, sz in ds.sizes.items():
             ld = d.lower()
-            if sz > 1 and ld not in ("latitude", "longitude", "bounds_dim") and not ld.startswith("isobaric") and not ld.startswith("height") and ld != "reftime":
+            if (
+                sz > 1
+                and ld not in ("latitude", "longitude", "bounds_dim")
+                and not ld.startswith("isobaric")
+                and not ld.startswith("height")
+                and ld != "reftime"
+            ):
                 out["validtime"] = d
                 break
-    out["latitude"] = next((c for c in ds.coords if str(c).lower() in ("latitude", "lat", "y")), "latitude")
-    out["longitude"] = next((c for c in ds.coords if str(c).lower() in ("longitude", "lon", "x")), "longitude")
+    out["latitude"] = next(
+        (c for c in ds.coords if str(c).lower() in ("latitude", "lat", "y")), "latitude"
+    )
+    out["longitude"] = next(
+        (c for c in ds.coords if str(c).lower() in ("longitude", "lon", "x")),
+        "longitude",
+    )
     return out
 
 
@@ -138,7 +154,9 @@ def _grid_latlon(ds: xr.Dataset, dims: dict[str, str]) -> tuple[np.ndarray, np.n
     return np.asarray(lats), np.asarray(lons)
 
 
-def _nearest_grid_index(lats: np.ndarray, lons: np.ndarray, lat: float, lon: float) -> tuple[int, int]:
+def _nearest_grid_index(
+    lats: np.ndarray, lons: np.ndarray, lat: float, lon: float
+) -> tuple[int, int]:
     if lats.ndim == 1 and lons.ndim == 1:
         return int(np.argmin(np.abs(lats - lat))), int(np.argmin(np.abs(lons - lon)))
     dist = (lats - lat) ** 2 + (lons - lon) ** 2
@@ -175,7 +193,9 @@ def _normalize(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def _hour_indices(ds: xr.Dataset, dims: dict[str, str], base_time: datetime, hours: list[int]) -> list[int]:
+def _hour_indices(
+    ds: xr.Dataset, dims: dict[str, str], base_time: datetime, hours: list[int]
+) -> list[int]:
     vt_name = dims.get("validtime")
     if vt_name is None or vt_name not in ds.coords:
         n = ds.sizes.get(vt_name or "validtime", len(hours))
@@ -190,7 +210,9 @@ def _hour_indices(ds: xr.Dataset, dims: dict[str, str], base_time: datetime, hou
     return out
 
 
-def _max_available_hour(ds: xr.Dataset, dims: dict[str, str], base_time: datetime) -> float:
+def _max_available_hour(
+    ds: xr.Dataset, dims: dict[str, str], base_time: datetime
+) -> float:
     vt_name = dims.get("validtime")
     if vt_name is None or vt_name not in ds.coords:
         return max(FORECAST_HOURS)
@@ -201,7 +223,9 @@ def _max_available_hour(ds: xr.Dataset, dims: dict[str, str], base_time: datetim
     return max(0.0, (max_ts - base_time.timestamp()) / 3600.0)
 
 
-def _advect_region(region: dict[str, Any], hours_beyond: float, shear_kt: float, mode: str) -> dict[str, Any]:
+def _advect_region(
+    region: dict[str, Any], hours_beyond: float, shear_kt: float, mode: str
+) -> dict[str, Any]:
     if hours_beyond <= 0:
         return region
     speed = float(np.clip(shear_kt / 45.0, 0.4, 1.4))
@@ -221,17 +245,23 @@ def _advect_region(region: dict[str, Any], hours_beyond: float, shear_kt: float,
 
 def _classify_signal(value: float, thresholds: tuple[float, float, float]) -> str:
     s_weak, s_mod, s_strong = thresholds
-    if value >= s_strong:  return "strong"
-    if value >= s_mod:     return "moderate"
-    if value >= s_weak:    return "weak"
+    if value >= s_strong:
+        return "strong"
+    if value >= s_mod:
+        return "moderate"
+    if value >= s_weak:
+        return "weak"
     return "none"
 
 
 def _classify_cap(cin: float) -> str:
     a = abs(cin)
-    if a >= 150: return "strong"
-    if a >= 50:  return "moderate"
-    if a >= 15:  return "weak"
+    if a >= 150:
+        return "strong"
+    if a >= 50:
+        return "moderate"
+    if a >= 15:
+        return "weak"
     return "none"
 
 
@@ -265,20 +295,35 @@ def _initiation_confidence(front: str, cin: float, cape: float, td_f: float) -> 
     cap_relief = np.clip((200.0 + cin) / 150.0, 0.0, 1.0)
     moisture_factor = np.clip((td_f - 50.0) / 18.0, 0.0, 1.0)
     cape_floor = np.clip(cape / 1000.0, 0.0, 1.0)
-    return float(np.clip(
-        0.50 * forcing_factor +
-        0.30 * cap_relief +
-        0.10 * moisture_factor +
-        0.10 * cape_floor,
-        0.0,
-        1.0,
-    ))
+    return float(
+        np.clip(
+            0.50 * forcing_factor
+            + 0.30 * cap_relief
+            + 0.10 * moisture_factor
+            + 0.10 * cape_floor,
+            0.0,
+            1.0,
+        )
+    )
 
 
 def _ingredients_at_point(
-    surface_cape: float, mlcape: float, mucape: float, cin: float,
-    td2m_K: float, t2m_K: float, pwat_kg_m2: float,
-    shear_kt: float, srh01: float, srh03: float, sr_wind_kt: float,
+    surface_cape: float,
+    mlcape: float,
+    mucape: float,
+    surface_cin: float,
+    mlcin: float,
+    mucin: float,
+    cape3km: float,
+    cape180: float,
+    cin180: float,
+    td2m_K: float,
+    t2m_K: float,
+    pwat_kg_m2: float,
+    shear_kt: float,
+    srh01: float,
+    srh03: float,
+    sr_wind_kt: float,
     composites: dict[str, float],
     front_override: str | None = None,
     boundary_kind: str | None = None,
@@ -286,12 +331,17 @@ def _ingredients_at_point(
     sbcape = max(0.0, surface_cape) if np.isfinite(surface_cape) else 0.0
     mlcape = max(0.0, mlcape) if np.isfinite(mlcape) else sbcape * 0.85
     mucape = max(0.0, mucape) if np.isfinite(mucape) else max(sbcape, mlcape)
-    cin = min(0.0, cin) if np.isfinite(cin) else 0.0
+    surface_cin = min(0.0, surface_cin) if np.isfinite(surface_cin) else 0.0
+    mlcin = min(0.0, mlcin) if np.isfinite(mlcin) else surface_cin
+    mucin = min(0.0, mucin) if np.isfinite(mucin) else mlcin
+    cape3km = max(0.0, cape3km) if np.isfinite(cape3km) else 0.0
+    cape180 = max(0.0, cape180) if np.isfinite(cape180) else mlcape
+    cin180 = min(0.0, cin180) if np.isfinite(cin180) else mlcin
     td_F = (td2m_K - 273.15) * 9 / 5 + 32 if np.isfinite(td2m_K) else 50.0
     pwat_in = (pwat_kg_m2 / 25.4) if np.isfinite(pwat_kg_m2) else 0.8
     front = front_override or "none"
-    cap = _classify_cap(cin)
-    init_conf = _initiation_confidence(front, cin, mlcape, td_F)
+    cap = _classify_cap(mlcin)
+    init_conf = _initiation_confidence(front, mlcin, mlcape, td_F)
     storm_mode = _classify_storm_mode(shear_kt, srh03, front, boundary_kind)
     if np.isfinite(t2m_K) and np.isfinite(td2m_K):
         lcl_m = float(np.clip(125.0 * max(0.0, t2m_K - td2m_K), 100.0, 3500.0))
@@ -301,7 +351,13 @@ def _ingredients_at_point(
         "mlcape": float(mlcape),
         "mucape": float(mucape),
         "sbcape": float(sbcape),
-        "cin": float(cin),
+        "cape3km": float(cape3km),
+        "cape180": float(cape180),
+        "cin": float(mlcin),
+        "cinSb": float(surface_cin),
+        "cinMl": float(mlcin),
+        "cinMu": float(mucin),
+        "cin180": float(cin180),
         "sfcDewpointF": float(td_F),
         "pwatIn": float(pwat_in),
         "lclM": lcl_m,
@@ -314,11 +370,21 @@ def _ingredients_at_point(
         "initiationConf": init_conf,
         "stormMode": storm_mode,
         "capStrength": cap,
-        "stp":              float(composites["stp"]),
-        "scp":              float(composites["scp"]),
-        "ehi":              float(composites["ehi"]),
-        "ship":             float(composites["ship"]),
+        "stp": float(composites["stp"]),
+        "scp": float(composites["scp"]),
+        "ehi": float(composites["ehi"]),
+        "ship": float(composites["ship"]),
         "tornadoComposite": float(composites["tor_comp"]),
+        "lapseRate700500CPerKm": float(
+            np.nan_to_num(composites.get("lapse_rate_700_500", 0.0), nan=0.0)
+        ),
+        "freezingLevelM": float(
+            np.nan_to_num(composites.get("freezing_level_m", 0.0), nan=0.0)
+        ),
+        "mixingRatioGKg": float(
+            np.nan_to_num(composites.get("mixing_ratio_gkg", 0.0), nan=0.0)
+        ),
+        "shipAvailable": bool(float(composites.get("ship_available", 0.0)) >= 0.5),
     }
 
 
@@ -330,9 +396,19 @@ def _valid_iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _array_point(arr: np.ndarray, i_lat: int, i_lon: int, default: float = 0.0) -> float:
+def _array_point(
+    arr: np.ndarray | None, i_lat: int, i_lon: int, default: float = 0.0
+) -> float:
+    if arr is None:
+        return default
     arr = np.asarray(arr, dtype=float)
-    if arr.ndim != 2 or i_lat < 0 or i_lon < 0 or i_lat >= arr.shape[0] or i_lon >= arr.shape[1]:
+    if (
+        arr.ndim != 2
+        or i_lat < 0
+        or i_lon < 0
+        or i_lat >= arr.shape[0]
+        or i_lon >= arr.shape[1]
+    ):
         return default
     value = float(arr[i_lat, i_lon])
     return value if np.isfinite(value) else default
@@ -342,7 +418,9 @@ def _surrogate_srh_from_shear(shear_field: np.ndarray) -> np.ndarray:
     return np.clip((np.asarray(shear_field, dtype=float) - 15.0) * 6.0, 0.0, 300.0)
 
 
-def _norm_field(field: np.ndarray, lo_pct: float = 55.0, hi_pct: float = 96.0) -> np.ndarray:
+def _norm_field(
+    field: np.ndarray, lo_pct: float = 55.0, hi_pct: float = 96.0
+) -> np.ndarray:
     arr = np.asarray(field, dtype=float)
     finite = arr[np.isfinite(arr)]
     if finite.size < 8:
@@ -390,12 +468,19 @@ def _surface_boundary_focus(
         return None
 
     td_f = (td - 273.15) * 9 / 5 + 32
-    finite = np.isfinite(td_f) & np.isfinite(cape) & np.isfinite(lat_grid) & np.isfinite(lon_grid)
+    finite = (
+        np.isfinite(td_f)
+        & np.isfinite(cape)
+        & np.isfinite(lat_grid)
+        & np.isfinite(lon_grid)
+    )
     if not np.any(finite):
         return None
 
     grad_y, grad_x = np.gradient(_finite_fill(td_f, 50.0))
-    lon_step = float(np.nanmedian(np.diff(lon_grid, axis=1))) if lon_grid.shape[1] > 1 else 1.0
+    lon_step = (
+        float(np.nanmedian(np.diff(lon_grid, axis=1))) if lon_grid.shape[1] > 1 else 1.0
+    )
     east_moistening = np.maximum(grad_x * (1 if lon_step >= 0 else -1), 0.0)
     dew_gradient = np.hypot(grad_x, grad_y)
 
@@ -410,19 +495,21 @@ def _surface_boundary_focus(
 
     center_lat = float(region["centerLat"])
     center_lon = float(region["centerLon"])
-    distance = np.sqrt(((lat_grid - center_lat) / 2.6) ** 2 + ((lon_grid - center_lon) / 3.8) ** 2)
+    distance = np.sqrt(
+        ((lat_grid - center_lat) / 2.6) ** 2 + ((lon_grid - center_lon) / 3.8) ** 2
+    )
     focus_weight = np.exp(-0.5 * distance * distance)
     upstream_weight = np.clip((center_lon - lon_grid + 1.2) / 5.0, 0.0, 1.0)
 
     score = (
-        _norm_field(dew_gradient) * 0.32 +
-        _norm_field(east_moistening) * 0.26 +
-        _norm_field(convergence, 60.0, 97.0) * 0.16 +
-        _norm_field(cape, 50.0, 94.0) * 0.14 +
-        focus_weight * 0.12
+        _norm_field(dew_gradient) * 0.32
+        + _norm_field(east_moistening) * 0.26
+        + _norm_field(convergence, 60.0, 97.0) * 0.16
+        + _norm_field(cape, 50.0, 94.0) * 0.14
+        + focus_weight * 0.12
     )
     score *= np.where(td_f >= 52, 1.0, 0.45)
-    score *= (0.72 + upstream_weight * 0.28)
+    score *= 0.72 + upstream_weight * 0.28
     score *= _southern_border_multiplier(lat_grid, lon_grid)
     score = np.where(finite, score, -np.inf)
 
@@ -438,8 +525,19 @@ def _surface_boundary_focus(
     lat = float(lat_grid[i_lat, i_lon])
     dryline_states = {"TX", "OK", "KS", "NE", "SD", "ND", "CO", "NM", "WY", "MT"}
     plains = any(state in dryline_states for state in region.get("states", []))
-    dryline_like = plains and lon <= center_lon + 0.7 and float(east_moistening[i_lat, i_lon]) >= np.nanpercentile(east_moistening[finite], 70)
-    kind = "triple-point" if dryline_like and confidence >= 0.46 else "dryline" if dryline_like else "frontal"
+    dryline_like = (
+        plains
+        and lon <= center_lon + 0.7
+        and float(east_moistening[i_lat, i_lon])
+        >= np.nanpercentile(east_moistening[finite], 70)
+    )
+    kind = (
+        "triple-point"
+        if dryline_like and confidence >= 0.46
+        else "dryline"
+        if dryline_like
+        else "frontal"
+    )
     return {
         "kind": kind,
         "lat": lat,
@@ -471,6 +569,10 @@ def _hour_payload_from_fields(
     mlcape_field: np.ndarray | None,
     mucape_field: np.ndarray | None,
     mlcin_field: np.ndarray | None,
+    mucin_field: np.ndarray | None,
+    cape3km_field: np.ndarray | None,
+    cape180_field: np.ndarray | None,
+    cin180_field: np.ndarray | None,
     td_field: np.ndarray,
     t2m_field: np.ndarray | None,
     pwat_field: np.ndarray,
@@ -481,26 +583,77 @@ def _hour_payload_from_fields(
     upper_air_vectors: list[dict[str, Any]] | None = None,
     u10_field: np.ndarray | None = None,
     v10_field: np.ndarray | None = None,
+    surface_pressure_field: np.ndarray | None = None,
+    t850_field: np.ndarray | None = None,
+    t700_field: np.ndarray | None = None,
+    t500_field: np.ndarray | None = None,
+    hgt850_field: np.ndarray | None = None,
+    hgt700_field: np.ndarray | None = None,
+    hgt500_field: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    model_region = pick_focus_region(cape_field, shear_field, td_field, lats, lons_norm, cin_field)
+    model_region = pick_focus_region(
+        cape_field, shear_field, td_field, lats, lons_norm, cin_field
+    )
     i_lat, i_lon = _nearest_grid_index(
         lats, lons_norm, model_region["centerLat"], model_region["centerLon"]
     )
 
     surface_cape = _array_point(cape_field, i_lat, i_lon)
-    mlcape = _array_point(mlcape_field, i_lat, i_lon, surface_cape * 0.85) if mlcape_field is not None else surface_cape * 0.85
-    mucape = _array_point(mucape_field, i_lat, i_lon, max(surface_cape, mlcape)) if mucape_field is not None else max(surface_cape, mlcape)
-    cin = _array_point(mlcin_field, i_lat, i_lon) if mlcin_field is not None else _array_point(cin_field, i_lat, i_lon)
+    mlcape = (
+        _array_point(mlcape_field, i_lat, i_lon, surface_cape * 0.85)
+        if mlcape_field is not None
+        else surface_cape * 0.85
+    )
+    mucape = (
+        _array_point(mucape_field, i_lat, i_lon, max(surface_cape, mlcape))
+        if mucape_field is not None
+        else max(surface_cape, mlcape)
+    )
+    surface_cin = _array_point(cin_field, i_lat, i_lon)
+    mlcin = (
+        _array_point(mlcin_field, i_lat, i_lon)
+        if mlcin_field is not None
+        else surface_cin
+    )
+    mucin = (
+        _array_point(mucin_field, i_lat, i_lon)
+        if mucin_field is not None
+        else mlcin
+    )
+    cape3km = (
+        _array_point(cape3km_field, i_lat, i_lon)
+        if cape3km_field is not None
+        else 0.0
+    )
+    cape180 = (
+        _array_point(cape180_field, i_lat, i_lon)
+        if cape180_field is not None
+        else mlcape
+    )
+    cin180 = (
+        _array_point(cin180_field, i_lat, i_lon)
+        if cin180_field is not None
+        else mlcin
+    )
     td2m = _array_point(td_field, i_lat, i_lon, 285.0)
-    t2m = _array_point(t2m_field, i_lat, i_lon, td2m + 8.0) if t2m_field is not None else td2m + 8.0
+    t2m = (
+        _array_point(t2m_field, i_lat, i_lon, td2m + 8.0)
+        if t2m_field is not None
+        else td2m + 8.0
+    )
     pwat = _array_point(pwat_field, i_lat, i_lon, 20.0)
     shear_kt = _array_point(shear_field, i_lat, i_lon)
     srh01 = _array_point(srh_field, i_lat, i_lon)
-    srh03 = _array_point(srh03_field, i_lat, i_lon) if srh03_field is not None else srh01 * 1.4
+    srh03 = (
+        _array_point(srh03_field, i_lat, i_lon)
+        if srh03_field is not None
+        else srh01 * 1.4
+    )
     sr_wind = shear_kt * 0.5
     surface_boundary = _surface_boundary_focus(
         lats, lons_norm, td_field, cape_field, u10_field, v10_field, model_region
     )
+    lcl_m = float(np.clip(125.0 * max(0.0, t2m - td2m), 100.0, 3500.0))
     comps = diag.composites(
         cape=np.array([surface_cape]),
         mlcape=np.array([mlcape]),
@@ -508,15 +661,32 @@ def _hour_payload_from_fields(
         shear_kt=np.array([shear_kt]),
         srh01=np.array([srh01]),
         srh03=np.array([srh03]),
-        cin=np.array([cin]),
+        cin=np.array([surface_cin]),
+        cin_mu=np.array([mucin]),
         td2m_K=np.array([td2m]),
+        t2m_K=np.array([t2m]),
+        lcl_m=np.array([lcl_m]),
+        surface_pressure_pa=np.array(
+            [_array_point(surface_pressure_field, i_lat, i_lon, np.nan)]
+        ),
+        t850_K=np.array([_array_point(t850_field, i_lat, i_lon, np.nan)]),
+        t700_K=np.array([_array_point(t700_field, i_lat, i_lon, np.nan)]),
+        t500_K=np.array([_array_point(t500_field, i_lat, i_lon, np.nan)]),
+        hgt850_m=np.array([_array_point(hgt850_field, i_lat, i_lon, np.nan)]),
+        hgt700_m=np.array([_array_point(hgt700_field, i_lat, i_lon, np.nan)]),
+        hgt500_m=np.array([_array_point(hgt500_field, i_lat, i_lon, np.nan)]),
     )
     comps_scalar = {k: float(v[0]) for k, v in comps.items()}
     ing = _ingredients_at_point(
         surface_cape,
         mlcape,
         mucape,
-        cin,
+        surface_cin,
+        mlcin,
+        mucin,
+        cape3km,
+        cape180,
+        cin180,
         td2m,
         t2m,
         pwat,
@@ -551,7 +721,11 @@ def _dataset_hour_payload(
     valid_iso: str,
 ) -> dict[str, Any]:
     cape_field = _safe2d(_isel_time(ds["cape"], dims, idx))
-    cin_field = -np.abs(_safe2d(_isel_time(ds["cin"], dims, idx))) if "cin" in ds.variables else np.zeros_like(cape_field)
+    cin_field = (
+        -np.abs(_safe2d(_isel_time(ds["cin"], dims, idx)))
+        if "cin" in ds.variables
+        else np.zeros_like(cape_field)
+    )
     shear_field = _shear06_field(ds, dims, idx)
     if "td2m" in ds.variables:
         td_field = _safe2d(_isel_time(ds["td2m"], dims, idx))
@@ -569,9 +743,13 @@ def _dataset_hour_payload(
         lons_norm,
         cape_field,
         cin_field,
-        None,
-        None,
-        None,
+        _safe2d(_isel_time(ds["cape_ml"], dims, idx)) if "cape_ml" in ds.variables else None,
+        _safe2d(_isel_time(ds["cape_mu"], dims, idx)) if "cape_mu" in ds.variables else None,
+        -np.abs(_safe2d(_isel_time(ds["cin_ml"], dims, idx))) if "cin_ml" in ds.variables else None,
+        -np.abs(_safe2d(_isel_time(ds["cin_mu"], dims, idx))) if "cin_mu" in ds.variables else None,
+        _safe2d(_isel_time(ds["cape_3km"], dims, idx)) if "cape_3km" in ds.variables else None,
+        _safe2d(_isel_time(ds["cape_180"], dims, idx)) if "cape_180" in ds.variables else None,
+        -np.abs(_safe2d(_isel_time(ds["cin_180"], dims, idx))) if "cin_180" in ds.variables else None,
         td_field,
         _safe2d(_isel_time(ds["t2m"], dims, idx)) if "t2m" in ds.variables else None,
         pwat_field,
@@ -582,6 +760,21 @@ def _dataset_hour_payload(
         _wind500_vectors(ds, dims, idx, lats, lons_norm),
         _safe2d(_isel_time(ds["u10"], dims, idx)) if "u10" in ds.variables else None,
         _safe2d(_isel_time(ds["v10"], dims, idx)) if "v10" in ds.variables else None,
+        _safe2d(_isel_time(ds["surface_pressure"], dims, idx))
+        if "surface_pressure" in ds.variables
+        else None,
+        _safe2d(_isel_time(ds["t850"], dims, idx)) if "t850" in ds.variables else None,
+        _safe2d(_isel_time(ds["t700"], dims, idx)) if "t700" in ds.variables else None,
+        _safe2d(_isel_time(ds["t500"], dims, idx)) if "t500" in ds.variables else None,
+        _safe2d(_isel_time(ds["hgt850"], dims, idx))
+        if "hgt850" in ds.variables
+        else None,
+        _safe2d(_isel_time(ds["hgt700"], dims, idx))
+        if "hgt700" in ds.variables
+        else None,
+        _safe2d(_isel_time(ds["hgt500"], dims, idx))
+        if "hgt500" in ds.variables
+        else None,
     )
 
 
@@ -591,15 +784,26 @@ def _direct_hrrr_hour_payload(h: int, grib_hour: dict[str, Any]) -> dict[str, An
     lons = np.asarray(grib_hour["lons"], dtype=float)
     cape_field = np.asarray(fields["cape"], dtype=float)
     cin_field = np.asarray(fields.get("cin", np.zeros_like(cape_field)), dtype=float)
-    td_field = np.asarray(fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float)
+    td_field = np.asarray(
+        fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float
+    )
     t2m_field = np.asarray(fields["t2m"], dtype=float) if "t2m" in fields else None
-    pwat_field = np.asarray(fields.get("pwat", np.full_like(cape_field, 20.0)), dtype=float)
+    pwat_field = np.asarray(
+        fields.get("pwat", np.full_like(cape_field, 20.0)), dtype=float
+    )
     if all(k in fields for k in ("u500", "v500", "u10", "v10")):
-        shear_field = np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"]) * 1.9438445
+        shear_field = (
+            np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"])
+            * 1.9438445
+        )
     else:
         shear_field = np.zeros_like(cape_field)
-    srh_field = np.asarray(fields.get("srh01", _surrogate_srh_from_shear(shear_field)), dtype=float)
-    srh03_field = np.asarray(fields["srh03"], dtype=float) if "srh03" in fields else None
+    srh_field = np.asarray(
+        fields.get("srh01", _surrogate_srh_from_shear(shear_field)), dtype=float
+    )
+    srh03_field = (
+        np.asarray(fields["srh03"], dtype=float) if "srh03" in fields else None
+    )
     return _hour_payload_from_fields(
         h,
         grib_hour["validTimeISO"],
@@ -610,6 +814,10 @@ def _direct_hrrr_hour_payload(h: int, grib_hour: dict[str, Any]) -> dict[str, An
         np.asarray(fields["cape_ml"], dtype=float) if "cape_ml" in fields else None,
         np.asarray(fields["cape_mu"], dtype=float) if "cape_mu" in fields else None,
         np.asarray(fields["cin_ml"], dtype=float) if "cin_ml" in fields else None,
+        np.asarray(fields["cin_mu"], dtype=float) if "cin_mu" in fields else None,
+        np.asarray(fields["cape_3km"], dtype=float) if "cape_3km" in fields else None,
+        np.asarray(fields["cape_180"], dtype=float) if "cape_180" in fields else None,
+        np.asarray(fields["cin_180"], dtype=float) if "cin_180" in fields else None,
         td_field,
         t2m_field,
         pwat_field,
@@ -617,9 +825,20 @@ def _direct_hrrr_hour_payload(h: int, grib_hour: dict[str, Any]) -> dict[str, An
         srh_field,
         srh03_field,
         _hgt500_lines_from_field(fields.get("hgt500"), lats, lons),
-        _wind500_vectors_from_fields(fields.get("u500"), fields.get("v500"), lats, lons),
+        _wind500_vectors_from_fields(
+            fields.get("u500"), fields.get("v500"), lats, lons
+        ),
         np.asarray(fields.get("u10"), dtype=float) if "u10" in fields else None,
         np.asarray(fields.get("v10"), dtype=float) if "v10" in fields else None,
+        np.asarray(fields.get("surface_pressure"), dtype=float)
+        if "surface_pressure" in fields
+        else None,
+        np.asarray(fields.get("t850"), dtype=float) if "t850" in fields else None,
+        np.asarray(fields.get("t700"), dtype=float) if "t700" in fields else None,
+        np.asarray(fields.get("t500"), dtype=float) if "t500" in fields else None,
+        np.asarray(fields.get("hgt850"), dtype=float) if "hgt850" in fields else None,
+        np.asarray(fields.get("hgt700"), dtype=float) if "hgt700" in fields else None,
+        np.asarray(fields.get("hgt500"), dtype=float) if "hgt500" in fields else None,
     )
 
 
@@ -637,9 +856,15 @@ def fetch_full_conus_500mb_overlay(
     hgt500 = fields.get("hgt500")
     u500 = fields.get("u500")
     v500 = fields.get("v500")
-    upper_air_lines = _hgt500_lines_from_field(hgt500, lats, lons, levels=HGT500_CONTOUR_LEVELS)
-    upper_air_vectors = _wind500_vectors_from_fields(u500, v500, lats, lons, stride=wind_barb_stride)
-    source_cycle = f"HRRR {int(grib_hour.get('runCycle', 0)):02d}Z {grib_hour.get('runDate', '')}"
+    upper_air_lines = _hgt500_lines_from_field(
+        hgt500, lats, lons, levels=HGT500_CONTOUR_LEVELS
+    )
+    upper_air_vectors = _wind500_vectors_from_fields(
+        u500, v500, lats, lons, stride=wind_barb_stride
+    )
+    source_cycle = (
+        f"HRRR {int(grib_hour.get('runCycle', 0)):02d}Z {grib_hour.get('runDate', '')}"
+    )
     model_forecast_hour = int(grib_hour.get("modelForecastHour", 0))
     metadata = {
         "domain": "CONUS",
@@ -668,7 +893,9 @@ def fetch_full_conus_500mb_overlay(
     }
 
 
-def _empty_full_conus_500mb_overlay(target_dt: datetime, forecast_hour: int, error: str | None = None) -> dict[str, Any]:
+def _empty_full_conus_500mb_overlay(
+    target_dt: datetime, forecast_hour: int, error: str | None = None
+) -> dict[str, Any]:
     metadata = {
         "domain": "CONUS",
         "level": "500mb",
@@ -713,15 +940,19 @@ def _nearest_full_conus_500mb_overlay(
     ]
     if not candidates:
         return None
-    _, source_hour, source_overlay = min(candidates, key=lambda item: (item[0], item[1]))
+    _, source_hour, source_overlay = min(
+        candidates, key=lambda item: (item[0], item[1])
+    )
     metadata = dict(source_overlay.get("metadata") or {})
-    metadata.update({
-        "forecastHour": int(forecast_hour),
-        "validTimeISO": target_dt.isoformat().replace("+00:00", "Z"),
-        "fallbackFromForecastHour": int(source_hour),
-        "fallbackFromValidTimeISO": metadata.get("validTimeISO"),
-        "fallbackReason": "nearest_full_conus_500mb_overlay",
-    })
+    metadata.update(
+        {
+            "forecastHour": int(forecast_hour),
+            "validTimeISO": target_dt.isoformat().replace("+00:00", "Z"),
+            "fallbackFromForecastHour": int(source_hour),
+            "fallbackFromValidTimeISO": metadata.get("validTimeISO"),
+            "fallbackReason": "nearest_full_conus_500mb_overlay",
+        }
+    )
     return {
         "upperAirLines": list(source_overlay.get("upperAirLines", [])),
         "upperAirVectors": list(source_overlay.get("upperAirVectors", [])),
@@ -729,7 +960,9 @@ def _nearest_full_conus_500mb_overlay(
     }
 
 
-def _attach_full_conus_500mb_overlay(payload: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+def _attach_full_conus_500mb_overlay(
+    payload: dict[str, Any], overlay: dict[str, Any]
+) -> dict[str, Any]:
     return {
         **payload,
         "upperAirLines": overlay.get("upperAirLines", []),
@@ -746,13 +979,19 @@ def _dataset_region(
     idx: int,
 ) -> dict[str, Any]:
     cape_field = _safe2d(_isel_time(ds["cape"], dims, idx))
-    cin_field = -np.abs(_safe2d(_isel_time(ds["cin"], dims, idx))) if "cin" in ds.variables else np.zeros_like(cape_field)
+    cin_field = (
+        -np.abs(_safe2d(_isel_time(ds["cin"], dims, idx)))
+        if "cin" in ds.variables
+        else np.zeros_like(cape_field)
+    )
     shear_field = _shear06_field(ds, dims, idx)
     if "td2m" in ds.variables:
         td_field = _safe2d(_isel_time(ds["td2m"], dims, idx))
     else:
         td_field = np.full_like(cape_field, 285.0)
-    return pick_focus_region(cape_field, shear_field, td_field, lats, lons_norm, cin_field)
+    return pick_focus_region(
+        cape_field, shear_field, td_field, lats, lons_norm, cin_field
+    )
 
 
 def _bbox_for_region(region: dict[str, Any]) -> dict[str, float]:
@@ -770,9 +1009,14 @@ def _quick_region_from_hrrr(grib_hour: dict[str, Any]) -> dict[str, Any]:
     lons = np.asarray(grib_hour["lons"], dtype=float)
     cape_field = np.asarray(fields["cape"], dtype=float)
     cin_field = np.asarray(fields.get("cin", np.zeros_like(cape_field)), dtype=float)
-    td_field = np.asarray(fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float)
+    td_field = np.asarray(
+        fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float
+    )
     if all(k in fields for k in ("u500", "v500", "u10", "v10")):
-        shear_field = np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"]) * 1.9438445
+        shear_field = (
+            np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"])
+            * 1.9438445
+        )
     else:
         shear_field = np.full_like(cape_field, 30.0)
     return pick_focus_region(cape_field, shear_field, td_field, lats, lons, cin_field)
@@ -790,9 +1034,14 @@ def _quick_outlook_areas_from_hrrr(grib_hour: dict[str, Any]) -> list[dict[str, 
     lons = np.asarray(grib_hour["lons"], dtype=float)
     cape_field = np.asarray(fields["cape"], dtype=float)
     cin_field = np.asarray(fields.get("cin", np.zeros_like(cape_field)), dtype=float)
-    td_field = np.asarray(fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float)
+    td_field = np.asarray(
+        fields.get("td2m", np.full_like(cape_field, 285.0)), dtype=float
+    )
     if all(k in fields for k in ("u500", "v500", "u10", "v10")):
-        shear_field = np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"]) * 1.9438445
+        shear_field = (
+            np.hypot(fields["u500"] - fields["u10"], fields["v500"] - fields["v10"])
+            * 1.9438445
+        )
     else:
         shear_field = np.full_like(cape_field, 30.0)
 
@@ -806,9 +1055,11 @@ def _quick_outlook_areas_from_hrrr(grib_hour: dict[str, Any]) -> list[dict[str, 
 
     for _name, (lat_min, lat_max, lon_min, lon_max) in SECONDARY_FOCUS_BOXES:
         mask = (
-            (lat_grid >= lat_min) & (lat_grid <= lat_max) &
-            (lon_grid >= lon_min) & (lon_grid <= lon_max) &
-            np.isfinite(cape_field)
+            (lat_grid >= lat_min)
+            & (lat_grid <= lat_max)
+            & (lon_grid >= lon_min)
+            & (lon_grid <= lon_max)
+            & np.isfinite(cape_field)
         )
         if not np.any(mask):
             continue
@@ -817,7 +1068,9 @@ def _quick_outlook_areas_from_hrrr(grib_hour: dict[str, Any]) -> list[dict[str, 
         if float(np.nanmax(masked_cape)) < 120.0:
             continue
 
-        region = pick_focus_region(masked_cape, shear_field, td_field, lats, lons, cin_field)
+        region = pick_focus_region(
+            masked_cape, shear_field, td_field, lats, lons, cin_field
+        )
         score_field = _quick_area_score_field(cape_field, shear_field, td_f, cin_field)
         i_lat, i_lon = np.unravel_index(
             int(np.nanargmax(np.where(mask, score_field, -np.inf))),
@@ -831,21 +1084,30 @@ def _quick_outlook_areas_from_hrrr(grib_hour: dict[str, Any]) -> list[dict[str, 
         if category is None:
             continue
 
-        areas.append({
-            "region": region,
-            "category": category,
-            "score": _quick_area_score(cape, shear, td, cin),
-            "ingredients": _quick_area_ingredients(cape, shear, td, cin),
-        })
+        areas.append(
+            {
+                "region": region,
+                "category": category,
+                "score": _quick_area_score(cape, shear, td, cin),
+                "ingredients": _quick_area_ingredients(cape, shear, td, cin),
+            }
+        )
 
     return _dedupe_outlook_areas(areas)
 
 
-def _quick_area_category(cape: float, shear_kt: float, td_f: float, cin: float) -> str | None:
+def _quick_area_category(
+    cape: float, shear_kt: float, td_f: float, cin: float
+) -> str | None:
     cin_abs = abs(min(0.0, cin)) if np.isfinite(cin) else 0.0
     if cape >= 900 and shear_kt >= 42 and td_f >= 60 and cin_abs < 150:
         return "SLGT"
-    if cape >= 450 and td_f >= 50 and cin_abs < 180 and (shear_kt >= 24 or cape >= 1200):
+    if (
+        cape >= 450
+        and td_f >= 50
+        and cin_abs < 180
+        and (shear_kt >= 24 or cape >= 1200)
+    ):
         return "MRGL"
     if cape >= 150 and td_f >= 45 and cin_abs < 240:
         return "TSTM"
@@ -853,21 +1115,37 @@ def _quick_area_category(cape: float, shear_kt: float, td_f: float, cin: float) 
 
 
 def _quick_area_score(cape: float, shear_kt: float, td_f: float, cin: float) -> float:
-    cin_mult = 0.35 if cin <= -180 else 0.65 if cin <= -100 else 0.85 if cin <= -50 else 1.0
-    return float((max(cape, 0) / 1200.0) * (max(shear_kt, 8) / 35.0) * (max(td_f - 45.0, 0) / 18.0) * cin_mult)
-
-
-def _quick_area_score_field(cape: np.ndarray, shear_kt: np.ndarray, td_f: np.ndarray, cin: np.ndarray) -> np.ndarray:
-    cin_mult = np.where(cin <= -180, 0.35, np.where(cin <= -100, 0.65, np.where(cin <= -50, 0.85, 1.0)))
-    return (
-        np.maximum(cape, 0.0) / 1200.0 *
-        np.maximum(shear_kt, 8.0) / 35.0 *
-        np.maximum(td_f - 45.0, 0.0) / 18.0 *
-        cin_mult
+    cin_mult = (
+        0.35 if cin <= -180 else 0.65 if cin <= -100 else 0.85 if cin <= -50 else 1.0
+    )
+    return float(
+        (max(cape, 0) / 1200.0)
+        * (max(shear_kt, 8) / 35.0)
+        * (max(td_f - 45.0, 0) / 18.0)
+        * cin_mult
     )
 
 
-def _quick_area_ingredients(cape: float, shear_kt: float, td_f: float, cin: float) -> dict[str, Any]:
+def _quick_area_score_field(
+    cape: np.ndarray, shear_kt: np.ndarray, td_f: np.ndarray, cin: np.ndarray
+) -> np.ndarray:
+    cin_mult = np.where(
+        cin <= -180, 0.35, np.where(cin <= -100, 0.65, np.where(cin <= -50, 0.85, 1.0))
+    )
+    return (
+        np.maximum(cape, 0.0)
+        / 1200.0
+        * np.maximum(shear_kt, 8.0)
+        / 35.0
+        * np.maximum(td_f - 45.0, 0.0)
+        / 18.0
+        * cin_mult
+    )
+
+
+def _quick_area_ingredients(
+    cape: float, shear_kt: float, td_f: float, cin: float
+) -> dict[str, Any]:
     cap = _classify_cap(cin)
     front = "none"
     srh01 = float(max(0.0, (shear_kt - 25.0) * 3.0))
@@ -886,7 +1164,9 @@ def _quick_area_ingredients(cape: float, shear_kt: float, td_f: float, cin: floa
         "shear06Kt": float(max(0.0, shear_kt)),
         "stormRelWindKt": float(max(0.0, shear_kt * 0.5)),
         "frontSignal": front,
-        "initiationConf": _initiation_confidence(front, min(0.0, cin), cape * 0.85, td_f),
+        "initiationConf": _initiation_confidence(
+            front, min(0.0, cin), cape * 0.85, td_f
+        ),
         "stormMode": _classify_storm_mode(shear_kt, srh03, front),
         "capStrength": cap,
         "stp": 0.0,
@@ -926,7 +1206,9 @@ def _dedupe_outlook_areas(areas: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
-def _areas_for_hour_from_anchors(hour: int, anchors: dict[int, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def _areas_for_hour_from_anchors(
+    hour: int, anchors: dict[int, list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
     if not anchors:
         return []
     if hour in anchors:
@@ -985,27 +1267,47 @@ def _matching_area_index(
     return None
 
 
-def _blend_outlook_area(a: dict[str, Any], b: dict[str, Any], weight: float) -> dict[str, Any]:
+def _blend_outlook_area(
+    a: dict[str, Any], b: dict[str, Any], weight: float
+) -> dict[str, Any]:
     nearest = a if weight <= 0.5 else b
     r0 = a["region"]
     r1 = b["region"]
-    center_lat = float(np.clip(_lerp(float(r0["centerLat"]), float(r1["centerLat"]), weight), 24.0, 50.0))
-    center_lon = float(np.clip(_lerp(float(r0["centerLon"]), float(r1["centerLon"]), weight), -125.0, -66.0))
+    center_lat = float(
+        np.clip(
+            _lerp(float(r0["centerLat"]), float(r1["centerLat"]), weight), 24.0, 50.0
+        )
+    )
+    center_lon = float(
+        np.clip(
+            _lerp(float(r0["centerLon"]), float(r1["centerLon"]), weight), -125.0, -66.0
+        )
+    )
     region = {
         **nearest["region"],
         "centerLat": center_lat,
         "centerLon": center_lon,
         "bbox": [center_lon - 5, center_lat - 3, center_lon + 5, center_lat + 3],
     }
-    ingredients = _blend_ingredients(
-        a.get("ingredients", {}),
-        b.get("ingredients", {}),
-        weight,
-    ) if a.get("ingredients") and b.get("ingredients") else nearest.get("ingredients")
+    ingredients = (
+        _blend_ingredients(
+            a.get("ingredients", {}),
+            b.get("ingredients", {}),
+            weight,
+        )
+        if a.get("ingredients") and b.get("ingredients")
+        else nearest.get("ingredients")
+    )
     out = {
         **nearest,
         "region": region,
-        "score": float(_lerp(float(a.get("score", 0.0)), float(b.get("score", a.get("score", 0.0))), weight)),
+        "score": float(
+            _lerp(
+                float(a.get("score", 0.0)),
+                float(b.get("score", a.get("score", 0.0))),
+                weight,
+            )
+        ),
     }
     if ingredients:
         out["ingredients"] = ingredients
@@ -1014,13 +1316,17 @@ def _blend_outlook_area(a: dict[str, Any], b: dict[str, Any], weight: float) -> 
 
 def _region_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
     mean_lat = (float(a["centerLat"]) + float(b["centerLat"])) * 0.5 * np.pi / 180.0
-    return float(np.hypot(
-        (float(a["centerLon"]) - float(b["centerLon"])) * np.cos(mean_lat),
-        float(a["centerLat"]) - float(b["centerLat"]),
-    ))
+    return float(
+        np.hypot(
+            (float(a["centerLon"]) - float(b["centerLon"])) * np.cos(mean_lat),
+            float(a["centerLat"]) - float(b["centerLat"]),
+        )
+    )
 
 
-def _region_for_hour_from_anchors(hour: int, anchors: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def _region_for_hour_from_anchors(
+    hour: int, anchors: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
     if hour in anchors:
         return anchors[hour]
     anchor_hours = sorted(anchors)
@@ -1040,8 +1346,12 @@ def _region_for_hour_from_anchors(hour: int, anchors: dict[int, dict[str, Any]])
     r1 = anchors[h1]
     weight = (hour - h0) / max(1, h1 - h0)
     nearest = r0 if weight <= 0.5 else r1
-    center_lat = float(np.clip(_lerp(r0["centerLat"], r1["centerLat"], weight), 24.0, 50.0))
-    center_lon = float(np.clip(_lerp(r0["centerLon"], r1["centerLon"], weight), -125.0, -66.0))
+    center_lat = float(
+        np.clip(_lerp(r0["centerLat"], r1["centerLat"], weight), 24.0, 50.0)
+    )
+    center_lon = float(
+        np.clip(_lerp(r0["centerLon"], r1["centerLon"], weight), -125.0, -66.0)
+    )
     return {
         **nearest,
         "centerLat": center_lat,
@@ -1050,7 +1360,9 @@ def _region_for_hour_from_anchors(hour: int, anchors: dict[int, dict[str, Any]])
     }
 
 
-def _nearest_anchor_payload(hour: int, anchors: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def _nearest_anchor_payload(
+    hour: int, anchors: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
     nearest_hour = min(anchors, key=lambda h: abs(h - hour))
     return anchors[nearest_hour]
 
@@ -1158,11 +1470,19 @@ def _blend_upper_air_lines(
         coords = _blend_polyline(coords0, coords1, weight)
         if len(coords) < 2:
             continue
-        blended.append({
-            "level": "500mb",
-            "value": float(_lerp(float(line0.get("value", 0)), float(line1.get("value", line0.get("value", 0))), weight)),
-            "coords": coords,
-        })
+        blended.append(
+            {
+                "level": "500mb",
+                "value": float(
+                    _lerp(
+                        float(line0.get("value", 0)),
+                        float(line1.get("value", line0.get("value", 0))),
+                        weight,
+                    )
+                ),
+                "coords": coords,
+            }
+        )
 
     return blended or fallback
 
@@ -1177,8 +1497,12 @@ def _blend_polyline(
     count = max(2, min(96, max(len(coords0), len(coords1))))
     return [
         [
-            _lerp(_coord_at(coords0, i, count)[0], _coord_at(coords1, i, count)[0], weight),
-            _lerp(_coord_at(coords0, i, count)[1], _coord_at(coords1, i, count)[1], weight),
+            _lerp(
+                _coord_at(coords0, i, count)[0], _coord_at(coords1, i, count)[0], weight
+            ),
+            _lerp(
+                _coord_at(coords0, i, count)[1], _coord_at(coords1, i, count)[1], weight
+            ),
         ]
         for i in range(count)
     ]
@@ -1221,14 +1545,16 @@ def _blend_upper_air_vectors(
         u_kt = _lerp(float(v0.get("uKt", 0)), float(v1.get("uKt", 0)), weight)
         v_kt = _lerp(float(v0.get("vKt", 0)), float(v1.get("vKt", 0)), weight)
         speed_kt = float(np.hypot(u_kt, v_kt))
-        blended.append({
-            "level": "500mb",
-            "lon": _lerp(float(v0.get("lon", 0)), float(v1.get("lon", 0)), weight),
-            "lat": _lerp(float(v0.get("lat", 0)), float(v1.get("lat", 0)), weight),
-            "uKt": u_kt,
-            "vKt": v_kt,
-            "speedKt": speed_kt,
-        })
+        blended.append(
+            {
+                "level": "500mb",
+                "lon": _lerp(float(v0.get("lon", 0)), float(v1.get("lon", 0)), weight),
+                "lat": _lerp(float(v0.get("lat", 0)), float(v1.get("lat", 0)), weight),
+                "uKt": u_kt,
+                "vKt": v_kt,
+                "speedKt": speed_kt,
+            }
+        )
 
     return blended or fallback
 
@@ -1243,25 +1569,56 @@ def _blend_surface_boundary(
         nearest = a if weight <= 0.5 else b
         return {
             "kind": nearest.get("kind", "frontal"),
-            "lat": _lerp(float(a.get("lat", 0)), float(b.get("lat", a.get("lat", 0))), weight),
-            "lon": _lerp(float(a.get("lon", 0)), float(b.get("lon", a.get("lon", 0))), weight),
-            "confidence": float(np.clip(
-                _lerp(float(a.get("confidence", 0)), float(b.get("confidence", a.get("confidence", 0))), weight),
-                0.0,
-                1.0,
-            )),
+            "lat": _lerp(
+                float(a.get("lat", 0)), float(b.get("lat", a.get("lat", 0))), weight
+            ),
+            "lon": _lerp(
+                float(a.get("lon", 0)), float(b.get("lon", a.get("lon", 0))), weight
+            ),
+            "confidence": float(
+                np.clip(
+                    _lerp(
+                        float(a.get("confidence", 0)),
+                        float(b.get("confidence", a.get("confidence", 0))),
+                        weight,
+                    ),
+                    0.0,
+                    1.0,
+                )
+            ),
         }
     return fallback
 
 
-def _blend_ingredients(a: dict[str, Any], b: dict[str, Any], weight: float) -> dict[str, Any]:
+def _blend_ingredients(
+    a: dict[str, Any], b: dict[str, Any], weight: float
+) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    categorical = {"frontSignal", "stormMode", "capStrength"}
+    categorical = {"frontSignal", "stormMode", "capStrength", "shipAvailable"}
     nearest = a if weight <= 0.5 else b
     nonnegative = {
-        "mlcape", "mucape", "sbcape", "sfcDewpointF", "pwatIn", "lclM",
-        "moistureDepthM", "srh01", "srh03", "shear06Kt", "stormRelWindKt",
-        "stp", "scp", "ehi", "ship", "tornadoComposite",
+        "mlcape",
+        "mucape",
+        "sbcape",
+        "cape3km",
+        "cape180",
+        "sfcDewpointF",
+        "pwatIn",
+        "lclM",
+        "moistureDepthM",
+        "srh01",
+        "srh03",
+        "shear06Kt",
+        "stormRelWindKt",
+        "stp",
+        "scp",
+        "ehi",
+        "ship",
+        "tornadoComposite",
+        "lapseRate700500CPerKm",
+        "freezingLevelM",
+        "mixingRatioGKg",
+        "surfacePressurePa",
     }
     for key, value in a.items():
         if key in categorical:
@@ -1272,7 +1629,7 @@ def _blend_ingredients(a: dict[str, Any], b: dict[str, Any], weight: float) -> d
         blended = _lerp(av, bv, weight)
         if key == "initiationConf":
             blended = float(np.clip(blended, 0.0, 1.0))
-        elif key == "cin":
+        elif key in {"cin", "cinSb", "cinMl", "cinMu", "cin180"}:
             blended = min(0.0, blended)
         elif key in nonnegative:
             blended = max(0.0, blended)
@@ -1296,8 +1653,14 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
     upper_air_overlays: dict[int, dict[str, Any]] = {}
 
     def _fetch_focus(hour: int) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
-        grib_hour = fetch_hrrr_grib_valid_time(_valid_dt_for_hour(now, hour), profile="focus")
-        return hour, _quick_region_from_hrrr(grib_hour), _quick_outlook_areas_from_hrrr(grib_hour)
+        grib_hour = fetch_hrrr_grib_valid_time(
+            _valid_dt_for_hour(now, hour), profile="focus"
+        )
+        return (
+            hour,
+            _quick_region_from_hrrr(grib_hour),
+            _quick_outlook_areas_from_hrrr(grib_hour),
+        )
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(_fetch_focus, h) for h in focus_hours]
@@ -1334,11 +1697,12 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
                 log.warning("HRRR anchor failed: %s", exc)
 
     if len(raw_anchors) < 2:
-        raise NomadsFetchError("Direct HRRR GRIB filter did not return enough anchor hours")
+        raise NomadsFetchError(
+            "Direct HRRR GRIB filter did not return enough anchor hours"
+        )
 
     anchor_payloads = {
-        h: _direct_hrrr_hour_payload(h, raw_anchors[h])
-        for h in sorted(raw_anchors)
+        h: _direct_hrrr_hour_payload(h, raw_anchors[h]) for h in sorted(raw_anchors)
     }
 
     def _fetch_overlay(hour: int) -> tuple[int, dict[str, Any]]:
@@ -1352,19 +1716,27 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
                 hour, overlay = future.result()
                 upper_air_overlays[hour] = overlay
             except Exception as exc:  # noqa: BLE001
-                log.info("Full-CONUS 500 mb overlay skipped for F%02d: %s", future_to_hour[future], exc)
+                log.info(
+                    "Full-CONUS 500 mb overlay skipped for F%02d: %s",
+                    future_to_hour[future],
+                    exc,
+                )
 
     ml_status = model_status()
     ml_used_hours = 0
     hours_out = []
     for h in FORECAST_HOURS:
         valid_dt = _valid_dt_for_hour(now, h)
-        payload = _payload_for_hour_from_anchors(h, _valid_iso(valid_dt), anchor_payloads)
+        payload = _payload_for_hour_from_anchors(
+            h, _valid_iso(valid_dt), anchor_payloads
+        )
         overlay = upper_air_overlays.get(h)
         if not _overlay_has_content(overlay):
             overlay = _nearest_full_conus_500mb_overlay(upper_air_overlays, h, valid_dt)
         if overlay is None:
-            overlay = _empty_full_conus_500mb_overlay(valid_dt, h, "Full-CONUS HRRR 500 mb overlay unavailable")
+            overlay = _empty_full_conus_500mb_overlay(
+                valid_dt, h, "Full-CONUS HRRR 500 mb overlay unavailable"
+            )
         payload = _attach_full_conus_500mb_overlay(payload, overlay)
         ml_hazards = predict_ml_hazards(payload.get("ingredients", {}), h)
         if ml_hazards is not None:
@@ -1388,7 +1760,12 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
         ml_note = ", ML hazards unavailable during inference; fallback rule hazards"
     else:
         ml_note = f", ML hazards inactive: {ml_status.get('reason', 'model artifacts unavailable')}; fallback rule hazards"
-    overlay_count = sum(1 for overlay in upper_air_overlays.values() if overlay.get("metadata", {}).get("hasHeightContours") or overlay.get("metadata", {}).get("hasWindVectors"))
+    overlay_count = sum(
+        1
+        for overlay in upper_air_overlays.values()
+        if overlay.get("metadata", {}).get("hasHeightContours")
+        or overlay.get("metadata", {}).get("hasWindVectors")
+    )
 
     bundle = {
         "cycle": cycle_str,
@@ -1411,6 +1788,7 @@ def build_bundle(now: datetime | None = None) -> dict[str, Any]:
 
 
 # --- helpers ---
+
 
 def _scalar(da: xr.DataArray) -> float:
     arr = np.asarray(da.values).ravel()
@@ -1440,7 +1818,9 @@ def _isel_time(da: xr.DataArray, dims: dict[str, str], vtime_idx: int) -> xr.Dat
     return da
 
 
-def _point(da: xr.DataArray, dims: dict[str, str], vtime_idx: int, i_lat: int, i_lon: int) -> float:
+def _point(
+    da: xr.DataArray, dims: dict[str, str], vtime_idx: int, i_lat: int, i_lon: int
+) -> float:
     sel: dict[str, int] = {}
     vt = dims.get("validtime")
     if vt and vt in da.dims:
@@ -1459,17 +1839,31 @@ def _shear06_field(ds: xr.Dataset, dims: dict[str, str], vtime_idx: int) -> np.n
     base_shape = _safe2d(_isel_time(ds["cape"], dims, vtime_idx)).shape
     if "u_iso" not in ds.variables or "v_iso" not in ds.variables:
         return np.zeros(base_shape)
-    iso_dim = next((d for d in ds["u_iso"].dims if d.lower().startswith("isobaric")), None)
+    iso_dim = next(
+        (d for d in ds["u_iso"].dims if d.lower().startswith("isobaric")), None
+    )
     if iso_dim is None:
         return np.zeros(base_shape)
-    u500 = _safe2d(_isel_time(ds["u_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest"))
-    v500 = _safe2d(_isel_time(ds["v_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest"))
+    u500 = _safe2d(
+        _isel_time(ds["u_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest")
+    )
+    v500 = _safe2d(
+        _isel_time(ds["v_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest")
+    )
     if "u10" in ds.variables and "v10" in ds.variables:
         u_low = _safe2d(_isel_time(ds["u10"], dims, vtime_idx))
         v_low = _safe2d(_isel_time(ds["v10"], dims, vtime_idx))
     else:
-        u_low = _safe2d(_isel_time(ds["u_iso"], dims, vtime_idx).sel({iso_dim: 100000}, method="nearest"))
-        v_low = _safe2d(_isel_time(ds["v_iso"], dims, vtime_idx).sel({iso_dim: 100000}, method="nearest"))
+        u_low = _safe2d(
+            _isel_time(ds["u_iso"], dims, vtime_idx).sel(
+                {iso_dim: 100000}, method="nearest"
+            )
+        )
+        v_low = _safe2d(
+            _isel_time(ds["v_iso"], dims, vtime_idx).sel(
+                {iso_dim: 100000}, method="nearest"
+            )
+        )
     du = u500 - u_low
     dv = v500 - v_low
     shear_ms = np.hypot(du, dv)
@@ -1493,12 +1887,18 @@ def _hgt500_lines(
     """Generate 500 mb geopotential-height contour polylines for the map."""
     if "hgt_iso" not in ds.variables:
         return []
-    iso_dim = next((d for d in ds["hgt_iso"].dims if d.lower().startswith("isobaric")), None)
+    iso_dim = next(
+        (d for d in ds["hgt_iso"].dims if d.lower().startswith("isobaric")), None
+    )
     if iso_dim is None:
         return []
 
     try:
-        hgt = _safe2d(_isel_time(ds["hgt_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest"))
+        hgt = _safe2d(
+            _isel_time(ds["hgt_iso"], dims, vtime_idx).sel(
+                {iso_dim: 50000}, method="nearest"
+            )
+        )
     except Exception:
         return []
 
@@ -1515,13 +1915,23 @@ def _wind500_vectors(
     """Sample 500 mb wind vectors for frontend wind-barb rendering."""
     if "u_iso" not in ds.variables or "v_iso" not in ds.variables:
         return []
-    iso_dim = next((d for d in ds["u_iso"].dims if d.lower().startswith("isobaric")), None)
+    iso_dim = next(
+        (d for d in ds["u_iso"].dims if d.lower().startswith("isobaric")), None
+    )
     if iso_dim is None:
         return []
 
     try:
-        u500 = _safe2d(_isel_time(ds["u_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest"))
-        v500 = _safe2d(_isel_time(ds["v_iso"], dims, vtime_idx).sel({iso_dim: 50000}, method="nearest"))
+        u500 = _safe2d(
+            _isel_time(ds["u_iso"], dims, vtime_idx).sel(
+                {iso_dim: 50000}, method="nearest"
+            )
+        )
+        v500 = _safe2d(
+            _isel_time(ds["v_iso"], dims, vtime_idx).sel(
+                {iso_dim: 50000}, method="nearest"
+            )
+        )
     except Exception:
         return []
 
@@ -1573,14 +1983,16 @@ def _wind500_vectors_from_fields(
                 u_kt = float(u_ms * 1.9438445)
                 v_kt = float(v_ms * 1.9438445)
                 speed_kt = float(speed_ms * 1.9438445)
-                vectors.append({
-                    "level": "500mb",
-                    "lon": lon,
-                    "lat": lat,
-                    "uKt": u_kt,
-                    "vKt": v_kt,
-                    "speedKt": speed_kt,
-                })
+                vectors.append(
+                    {
+                        "level": "500mb",
+                        "lon": lon,
+                        "lat": lat,
+                        "uKt": u_kt,
+                        "vKt": v_kt,
+                        "speedKt": speed_kt,
+                    }
+                )
     return vectors
 
 
@@ -1622,6 +2034,7 @@ def _hgt500_lines_from_field(
     with _MATPLOTLIB_CONTOUR_LOCK:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
         except Exception:
@@ -1642,7 +2055,9 @@ def _hgt500_lines_from_field(
                         if -130 <= lon <= -60 and 20 <= lat <= 55
                     ]
                     if len(coords) >= 8:
-                        lines.append({"level": "500mb", "value": float(level), "coords": coords})
+                        lines.append(
+                            {"level": "500mb", "value": float(level), "coords": coords}
+                        )
             return lines[:48]
         finally:
             plt.close(fig)

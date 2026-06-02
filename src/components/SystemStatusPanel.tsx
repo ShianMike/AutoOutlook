@@ -69,7 +69,7 @@ export default function SystemStatusPanel({
   return (
     <RetroPanel
       title="System Status"
-      eyebrow="10 / Pipeline telemetry"
+      eyebrow="08 / Pipeline telemetry"
       badge={<RetroBadge tone={status === 'loading' ? 'amber' : status === 'error' ? 'red' : 'lime'} pulse={status === 'loading'}>
         {fetchStatusLabel}
       </RetroBadge>}

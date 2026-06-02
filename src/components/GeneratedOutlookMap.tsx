@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
-import type { ActiveRegion, HourSnapshot, PhilippineRegionPane, RiskCategory, UpperAirVector } from '../types/forecast';
+import type { ActiveRegion, HourSnapshot, RiskCategory, UpperAirVector } from '../types/forecast';
 import type {
   OutlookArtifacts,
   OutlookArtifactFeatureCollection,
@@ -16,7 +16,6 @@ import {
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
-import { getPhilippineRegionPaneConfig } from '../utils/philippineRegions';
 import { apiUrl } from '../utils/apiBase';
 
 const STATES_URL = '/us-states-10m.json';
@@ -31,13 +30,12 @@ interface GeneratedOutlookMapProps {
   artifacts: OutlookArtifacts | null;
   message: string | null;
   activeRegion?: ActiveRegion;
-  philippinePane?: PhilippineRegionPane;
   comparisonMode?: SpcComparisonMode;
 }
 
 function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
-  if (activeRegion !== 'philippines') return 'HRRR';
-  return 'ECMWF';
+  void activeRegion;
+  return 'HRRR';
 }
 
 interface UpperAirFeature {
@@ -285,25 +283,20 @@ export default function GeneratedOutlookMap({
   artifacts,
   message,
   activeRegion = 'conus',
-  philippinePane = 'national',
   comparisonMode = 'auto',
 }: GeneratedOutlookMapProps) {
   const [spcDay1, setSpcDay1] = useState<SpcCategoryFeatureCollection | null>(null);
   const [spcStatus, setSpcStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
-  const isPhil = activeRegion === 'philippines';
   const modelLabel = generatedModelLabel(activeRegion, artifacts);
-  const effectiveComparisonMode: SpcComparisonMode = activeRegion === 'conus' ? comparisonMode : 'auto';
-  const activePhilippinePane = getPhilippineRegionPaneConfig(philippinePane);
-  const geoUrl = isPhil ? '/philippines-provinces.json' : STATES_URL;
-  const projection = isPhil ? 'geoMercator' : 'geoAlbers';
-  const projectionConfig = isPhil
-    ? { center: activePhilippinePane.center, scale: activePhilippinePane.scale }
-    : {
-        rotate: [96, 0, 0] as [number, number, number],
-        center: [0, 38] as [number, number],
-        parallels: [29.5, 45.5] as [number, number],
-        scale: 1000,
-      };
+  const effectiveComparisonMode: SpcComparisonMode = comparisonMode;
+  const geoUrl = STATES_URL;
+  const projection = 'geoAlbers';
+  const projectionConfig = {
+    rotate: [96, 0, 0] as [number, number, number],
+    center: [0, 38] as [number, number],
+    parallels: [29.5, 45.5] as [number, number],
+    scale: 1000,
+  };
   const selectedForecastHour = snapshot?.forecastHour;
   const spcVerification = artifacts?.metadata?.spcVerification ?? null;
   const showAutoLayer = effectiveComparisonMode === 'auto' || effectiveComparisonMode === 'overlay';
@@ -311,7 +304,7 @@ export default function GeneratedOutlookMap({
   const isOverlayMode = effectiveComparisonMode === 'overlay';
 
   useEffect(() => {
-    if (!showSpcLayer || activeRegion !== 'conus') {
+    if (!showSpcLayer) {
       if (!spcDay1) setSpcStatus('idle');
       return;
     }
@@ -345,7 +338,7 @@ export default function GeneratedOutlookMap({
       });
 
     return () => controller.abort();
-  }, [activeRegion, showSpcLayer, spcDay1]);
+  }, [showSpcLayer, spcDay1]);
 
   const selectedTile = useMemo(
     () => getArtifactHourTile(artifacts, selectedForecastHour),
