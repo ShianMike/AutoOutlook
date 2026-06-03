@@ -57,7 +57,7 @@ export function artifactRiskShapesToFeatureCollection(
   tile: OutlookProbabilityTile | undefined,
 ): OutlookArtifactFeatureCollection | undefined {
   const collection = tile?.riskShapes;
-  if (!collection) return undefined;
+  if (!collection || !Array.isArray(collection.features)) return undefined;
   return {
     ...collection,
     features: [...collection.features].sort((a, b) => categoryOrdinal(a.properties.category) - categoryOrdinal(b.properties.category)),
@@ -69,7 +69,7 @@ export function artifactProbabilityShapesToFeatureCollection(
   hazard: GeneratedArtifactHazardKey,
 ): ArtifactProbabilityFeatureCollection | undefined {
   const collection: OutlookProbabilityShapeFeatureCollection | undefined = tile?.hazardProbabilityShapes;
-  if (!collection) return undefined;
+  if (!collection || !Array.isArray(collection.features)) return undefined;
   const features = collection.features
     .filter((feature) => normalizeHazardName(feature.properties.hazard) === hazard)
     .map((feature): ArtifactProbabilityFeature => ({
