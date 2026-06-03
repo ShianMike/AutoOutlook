@@ -28,12 +28,13 @@ interface OutlookMapPanelProps {
   setSelectedMergedDate: (date: string) => void;
   viewType: 'hourly' | 'merged';
   setViewType: (type: 'hourly' | 'merged') => void;
-  stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
-  setStormReportsMode?: (mode: 'none' | 'all' | 'tornado' | 'hail' | 'wind') => void;
+  stormReportsMode?: StormReportsMode;
+  setStormReportsMode?: (mode: StormReportsMode) => void;
   stormReports?: SpcStormReport[];
 }
 
 type OutlookMode = 'levels' | 'hazards';
+type StormReportsMode = 'none' | 'all' | 'tornado' | 'hail' | 'wind';
 type GifQualityPreset = 'small' | 'medium' | 'large';
 
 interface GifProgressState {
@@ -350,6 +351,19 @@ export default function OutlookMapPanel({
   const validTimeText = viewType === 'merged' && (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.d1WindowValidISO
     ? `${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowValidISO)} – ${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowExpireISO)}`
     : fmtUTC(effectiveSnapshot?.validTimeISO);
+  const latestAvailableReportDate = latestAvailableSpcReportDate();
+  const reportsPendingForSelectedDate = viewType === 'merged'
+    && Boolean(selectedMergedDate)
+    && selectedMergedDate > latestAvailableReportDate;
+  const mapStormReportsMode: StormReportsMode = viewType === 'merged' && !reportsPendingForSelectedDate
+    ? stormReportsMode
+    : 'none';
+  const mapStormReports = mapStormReportsMode === 'none' ? [] : stormReports;
+  const reportStatusLabel = reportsPendingForSelectedDate
+    ? `Pending · SPC thru ${fmtShortDate(latestAvailableReportDate)}`
+    : stormReportsMode !== 'none' && stormReports.length === 0
+      ? `No reports · SPC thru ${fmtShortDate(latestAvailableReportDate)}`
+      : `SPC thru ${fmtShortDate(latestAvailableReportDate)}`;
 
   const timeRows = [
     ['Cycle', viewType === 'merged' ? 'Merged Multi-Cycle' : (artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO))],
@@ -623,8 +637,8 @@ export default function OutlookMapPanel({
               message={effectiveArtifactState.message}
               activeRegion={activeRegion}
               comparisonMode={spcComparisonMode}
-              stormReportsMode={stormReportsMode}
-              stormReports={stormReports}
+              stormReportsMode={mapStormReportsMode}
+              stormReports={mapStormReports}
             />
           </div>
         ) : (
@@ -647,8 +661,8 @@ export default function OutlookMapPanel({
                     artifacts={effectiveArtifactState.artifacts}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -657,8 +671,8 @@ export default function OutlookMapPanel({
                     artifacts={effectiveArtifactState.artifacts}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -667,8 +681,8 @@ export default function OutlookMapPanel({
                     artifacts={effectiveArtifactState.artifacts}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -677,8 +691,8 @@ export default function OutlookMapPanel({
                     artifacts={effectiveArtifactState.artifacts}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                 </>
               ) : (
@@ -697,8 +711,8 @@ export default function OutlookMapPanel({
                   artifacts={effectiveArtifactState.artifacts}
                   status={effectiveArtifactState.status}
                   activeRegion={activeRegion}
-                  stormReportsMode={stormReportsMode}
-                  stormReports={stormReports}
+                  stormReportsMode={mapStormReportsMode}
+                  stormReports={mapStormReports}
                 />
               )
             ) : useRuleHazardFallback ? (
@@ -710,8 +724,8 @@ export default function OutlookMapPanel({
                     title="Thunderstorm Outlook"
                     sourceLabel="Rule fallback"
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <HazardOutlookMap
                     snapshot={effectiveSnapshot}
@@ -719,8 +733,8 @@ export default function OutlookMapPanel({
                     title="Hail Outlook"
                     sourceLabel="Rule fallback"
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <HazardOutlookMap
                     snapshot={effectiveSnapshot}
@@ -728,8 +742,8 @@ export default function OutlookMapPanel({
                     title="Damaging Wind Outlook"
                     sourceLabel="Rule fallback"
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                   <HazardOutlookMap
                     snapshot={effectiveSnapshot}
@@ -737,8 +751,8 @@ export default function OutlookMapPanel({
                     title="Tornado Outlook"
                     sourceLabel="Rule fallback"
                     activeRegion={activeRegion}
-                    stormReportsMode={stormReportsMode}
-                    stormReports={stormReports}
+                    stormReportsMode={mapStormReportsMode}
+                    stormReports={mapStormReports}
                   />
                 </>
               ) : (
@@ -756,8 +770,8 @@ export default function OutlookMapPanel({
                   }
                   sourceLabel="Rule fallback"
                   activeRegion={activeRegion}
-                  stormReportsMode={stormReportsMode}
-                  stormReports={stormReports}
+                  stormReportsMode={mapStormReportsMode}
+                  stormReports={mapStormReports}
                 />
               )
             ) : (
@@ -845,22 +859,30 @@ export default function OutlookMapPanel({
 
           {/* Dropdown: Verified Reports (Conditional) */}
           {viewType === 'merged' && setStormReportsMode && (
-            <div className="flex items-center gap-2 animate-fadeIn">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                Reports
-              </label>
-              <select
-                value={stormReportsMode}
-                onChange={(e) => setStormReportsMode(e.target.value as any)}
-                disabled={isAnyExporting}
-                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
-              >
-                <option value="none">No Reports</option>
-                <option value="all">All Reports</option>
-                <option value="tornado">Tornadoes</option>
-                <option value="hail">Hail</option>
-                <option value="wind">Wind</option>
-              </select>
+            <div className="flex items-center gap-2 animate-fadeIn min-w-0">
+              <div className="flex items-center gap-2">
+                <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                  Reports
+                </label>
+                <select
+                  value={reportsPendingForSelectedDate ? 'none' : stormReportsMode}
+                  onChange={(e) => setStormReportsMode(e.target.value as StormReportsMode)}
+                  disabled={isAnyExporting || reportsPendingForSelectedDate}
+                  className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors disabled:cursor-not-allowed disabled:bg-paper-dark/30 disabled:text-ink/45"
+                >
+                  <option value="none">No Reports</option>
+                  <option value="all">All Reports</option>
+                  <option value="tornado">Tornadoes</option>
+                  <option value="hail">Hail</option>
+                  <option value="wind">Wind</option>
+                </select>
+              </div>
+              <span className={[
+                'max-w-[13rem] truncate font-mono text-[9px] font-bold uppercase tracking-wider',
+                reportsPendingForSelectedDate ? 'text-signal-red' : 'text-ink/55',
+              ].join(' ')}>
+                {reportStatusLabel}
+              </span>
             </div>
           )}
 
@@ -1072,6 +1094,23 @@ function GeneratedHazardsUnavailable({ message, status }: { message: string | nu
       </div>
     </div>
   );
+}
+
+function latestAvailableSpcReportDate(now = new Date()): string {
+  const utcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  // SPC daily storm reports use a 1200Z-to-1159Z report day across the US.
+  const reportDayStart = now.getUTCHours() >= 12 ? utcMidnight : utcMidnight - 24 * 60 * 60 * 1000;
+  return new Date(reportDayStart).toISOString().slice(0, 10);
+}
+
+function fmtShortDate(dateStr: string): string {
+  const date = new Date(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return dateStr;
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    timeZone: 'UTC',
+  });
 }
 
 function ModeButton({
