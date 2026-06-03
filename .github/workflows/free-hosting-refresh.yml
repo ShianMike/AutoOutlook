@@ -15,9 +15,9 @@ on:
         required: false
         default: 'false'
 
-concurrency:
-  group: autooutlook-static-refresh
-  cancel-in-progress: false
+# concurrency:
+#   group: autooutlook-static-refresh
+#   cancel-in-progress: false
 
 permissions:
   contents: read
@@ -75,10 +75,28 @@ jobs:
           print(json.dumps(cycle, indent=2))
           PY
 
+      - name: Check for active concurrent runs
+        id: check-concurrency
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get running runs of this workflow, excluding the current run
+          active_runs=$(gh run list --repo ${{ github.repository }} --workflow free-hosting-refresh.yml --status in_progress --json databaseId --jq '[.[] | select(.databaseId != ${{ github.run_id }})] | length')
+          echo "Other in-progress runs count: $active_runs"
+          if [ "$active_runs" -gt 0 ]; then
+            echo "Another run of this workflow is currently in progress."
+            echo "other_running=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No other runs are in progress."
+            echo "other_running=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check production freshness
         id: gate
         env:
           FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
+          OTHER_RUNNING: ${{ steps.check-concurrency.outputs.other_running }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python - <<'PY'
           import json
@@ -86,16 +104,22 @@ jobs:
           import urllib.request
           from pathlib import Path
 
-          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
-          expected = cycle.get("cycleTimeISO", "")
-          force = os.environ.get("FORCE_DEPLOY", "false").lower() == "true"
-          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
-
           def write_outputs(should_generate: bool, reason: str) -> None:
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                   print(f"should_generate={str(should_generate).lower()}", file=output)
                   print(f"reason={reason}", file=output)
               print(reason)
+
+          other_running = os.environ.get("OTHER_RUNNING", "false").lower() == "true"
+          event_name = os.environ.get("EVENT_NAME", "")
+          if other_running and event_name == "schedule":
+              write_outputs(False, "another scheduled run is in progress")
+              raise SystemExit
+
+          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
+          expected = cycle.get("cycleTimeISO", "")
+          force = os.environ.get("FORCE_DEPLOY", "false").lower() == "true"
+          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
 
           if force:
               write_outputs(True, "manual force requested")
