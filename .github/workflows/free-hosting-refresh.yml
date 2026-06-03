@@ -215,7 +215,7 @@ jobs:
           PY
 
       - name: Generate shard hours
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           python -m backend.ml.outlook_pipeline \
             --incremental \
