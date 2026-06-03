@@ -213,9 +213,11 @@ class SequenceSession:
     def __init__(self, responses: list[FakeResponse]) -> None:
         self.responses = responses
         self.calls = 0
+        self.requests: list[dict] = []
 
-    def request(self, method: str, url: str, **_kwargs):
+    def request(self, method: str, url: str, **kwargs):
         self.calls += 1
+        self.requests.append({"method": method, "url": url, "kwargs": kwargs})
         return self.responses.pop(0)
 
 
@@ -309,6 +311,20 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _fetch_range(session, "https://example.test/file", 0, 10)
+
+    def test_byte_range_fetch_uses_bounded_timeout_and_retry_budget(self) -> None:
+        session = SequenceSession([FakeResponse(503), FakeResponse(200, content=b"GRIBabc")])
+
+        with patch("backend.hrrr_selected.DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS", 12.0), patch(
+            "backend.hrrr_selected.DEFAULT_RANGE_REQUEST_RETRIES",
+            1,
+        ):
+            start, content = _fetch_range(session, "https://example.test/file", 0, 6)
+
+        self.assertEqual(start, 0)
+        self.assertEqual(content, b"GRIBabc")
+        self.assertEqual(session.calls, 2)
+        self.assertEqual([call["kwargs"]["timeout"] for call in session.requests], [12.0, 12.0])
 
     def test_latest_cycle_detection_falls_back_to_complete_extended_cycle(self) -> None:
         detection = latest_available_hrrr_cycle_with_metadata(

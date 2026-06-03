@@ -42,8 +42,20 @@ def _env_nonnegative_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return float(default)
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return float(default)
+
+
 DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
 DEFAULT_RANGE_COALESCE_GAP_BYTES = _env_nonnegative_int("AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES", 2 * 1024 * 1024)
+DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS = _env_float("AUTOOUTLOOK_RANGE_REQUEST_TIMEOUT_SECONDS", 30.0)
+DEFAULT_RANGE_REQUEST_RETRIES = _env_nonnegative_int("AUTOOUTLOOK_RANGE_REQUEST_RETRIES", 1)
 
 SELECTED_HRRR_TERMS = (
     ":CAPE:surface:",
@@ -592,14 +604,14 @@ def _content_length(session: requests.Session, url: str) -> int | None:
 def _fetch_range(
     session: requests.Session, url: str, start: int, end: int
 ) -> tuple[int, bytes]:
-    # Reuse the same session object (real or mock) to enable connection pooling & Keep-Alive.
+    # Keep per-range waits bounded so one slow NOAA/S3 response cannot stall a whole shard.
     response = _request_with_backoff(
         session,
         "GET",
         url,
         headers={"Range": f"bytes={start}-{end}"},
-        timeout=90,
-        retries=3,
+        timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
+        retries=DEFAULT_RANGE_REQUEST_RETRIES,
     )
     response.raise_for_status()
     expected_length = end - start + 1
