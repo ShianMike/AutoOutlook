@@ -6,6 +6,7 @@ import type {
   OutlookArtifactFeatureCollection,
   ArtifactRiskCategory,
   SpcCategoryFeatureCollection,
+  SpcStormReport,
 } from '../types/outlookArtifacts';
 import {
   artifactRiskShapesToFeatureCollection,
@@ -31,6 +32,8 @@ interface GeneratedOutlookMapProps {
   message: string | null;
   activeRegion?: ActiveRegion;
   comparisonMode?: SpcComparisonMode;
+  stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
+  stormReports?: SpcStormReport[];
 }
 
 function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
@@ -284,6 +287,8 @@ export default function GeneratedOutlookMap({
   message,
   activeRegion = 'conus',
   comparisonMode = 'auto',
+  stormReportsMode = 'none',
+  stormReports = [],
 }: GeneratedOutlookMapProps) {
   const [spcDay1, setSpcDay1] = useState<SpcCategoryFeatureCollection | null>(null);
   const [spcStatus, setSpcStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
@@ -691,6 +696,66 @@ export default function GeneratedOutlookMap({
               <WindBarb vector={vector} top />
             </Marker>
           ))}
+
+          {stormReportsMode && stormReportsMode !== 'none' && stormReports && stormReports
+            .filter((report) => stormReportsMode === 'all' || report.type === stormReportsMode)
+            .map((report, idx) => {
+              let markerColor = '#e11d48'; // crimson (Tornado)
+              let markerShape = 'triangle';
+              if (report.type === 'hail') {
+                markerColor = '#16a34a'; // forest green
+                markerShape = 'circle';
+              } else if (report.type === 'wind') {
+                markerColor = '#2563eb'; // steel blue
+                markerShape = 'square';
+              }
+              
+              const reportTypeLabel = report.type.toUpperCase();
+              const valLabel = report.value ? ` (${report.value})` : '';
+              const timeLabel = report.time ? ` at ${report.time} UTC` : '';
+              const locLabel = report.location ? `\nLocation: ${report.location}` : '';
+              const commentLabel = report.comment ? `\nDescription: ${report.comment}` : '';
+              
+              const tooltipText = `${reportTypeLabel}${valLabel}${timeLabel}${locLabel}${commentLabel}`;
+              
+              return (
+                <Marker key={`storm-report-${report.type}-${idx}`} coordinates={[report.lon, report.lat]}>
+                  {markerShape === 'triangle' && (
+                    <polygon
+                      points="0,-6 5,3 -5,3"
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    >
+                      <title>{tooltipText}</title>
+                    </polygon>
+                  )}
+                  {markerShape === 'circle' && (
+                    <circle
+                      r={4}
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    >
+                      <title>{tooltipText}</title>
+                    </circle>
+                  )}
+                  {markerShape === 'square' && (
+                    <rect
+                      x={-3.5}
+                      y={-3.5}
+                      width={7}
+                      height={7}
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    >
+                      <title>{tooltipText}</title>
+                    </rect>
+                  )}
+                </Marker>
+              );
+            })}
         </ComposableMap>
 
         {!hasGeneratedArtifact && effectiveComparisonMode !== 'spc' && (
@@ -758,6 +823,34 @@ export default function GeneratedOutlookMap({
                   <span>{LEVEL_STYLE[category].label}</span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {stormReportsMode && stormReportsMode !== 'none' && (
+            <div className="mt-2.5 border-t-[1.5px] border-ink/30 pt-2">
+              <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/75 leading-none mb-1.5">
+                Verified Reports
+              </div>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {(stormReportsMode === 'all' || stormReportsMode === 'tornado') && (
+                  <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                    <span className="inline-block w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-b-[7px] border-b-[#e11d48]" aria-hidden />
+                    <span>Tornado</span>
+                  </div>
+                )}
+                {(stormReportsMode === 'all' || stormReportsMode === 'hail') && (
+                  <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                    <span className="inline-block h-2 w-2 rounded-full bg-[#16a34a]" aria-hidden />
+                    <span>Hail</span>
+                  </div>
+                )}
+                {(stormReportsMode === 'all' || stormReportsMode === 'wind') && (
+                  <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                    <span className="inline-block h-2 w-2 bg-[#2563eb]" aria-hidden />
+                    <span>Wind</span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -1,7 +1,7 @@
 import { Fragment, useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, UpperAirVector } from '../types/forecast';
-import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import type { OutlookArtifacts, SpcStormReport } from '../types/outlookArtifacts';
 import {
   artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
@@ -31,6 +31,8 @@ interface GeneratedHazardProbabilityMapProps {
   artifacts: OutlookArtifacts | null;
   status: ArtifactStatus;
   activeRegion?: ActiveRegion;
+  stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
+  stormReports?: SpcStormReport[];
 }
 
 export function hasGeneratedHazardTile(
@@ -49,6 +51,8 @@ export default function GeneratedHazardProbabilityMap({
   artifacts,
   status,
   activeRegion = 'conus',
+  stormReportsMode = 'none',
+  stormReports = [],
 }: GeneratedHazardProbabilityMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
@@ -420,6 +424,73 @@ export default function GeneratedHazardProbabilityMap({
               <WindBarb vector={vector} top />
             </Marker>
           ))}
+
+          {stormReportsMode && stormReportsMode !== 'none' && stormReports && stormReports
+            .filter((report) => {
+              if (stormReportsMode !== 'all' && report.type !== stormReportsMode) {
+                return false;
+              }
+              if (hazard === 'tornado' && report.type !== 'tornado') return false;
+              if (hazard === 'hail' && report.type !== 'hail') return false;
+              if (hazard === 'wind' && report.type !== 'wind') return false;
+              return true;
+            })
+            .map((report, idx) => {
+              let markerColor = '#e11d48'; // crimson (Tornado)
+              let markerShape = 'triangle';
+              if (report.type === 'hail') {
+                markerColor = '#16a34a'; // forest green
+                markerShape = 'circle';
+              } else if (report.type === 'wind') {
+                markerColor = '#2563eb'; // steel blue
+                markerShape = 'square';
+              }
+              
+              const reportTypeLabel = report.type.toUpperCase();
+              const valLabel = report.value ? ` (${report.value})` : '';
+              const timeLabel = report.time ? ` at ${report.time} UTC` : '';
+              const locLabel = report.location ? `\nLocation: ${report.location}` : '';
+              const commentLabel = report.comment ? `\nDescription: ${report.comment}` : '';
+              const tooltipText = `${reportTypeLabel}${valLabel}${timeLabel}${locLabel}${commentLabel}`;
+              
+              return (
+                <Marker key={`hazard-storm-report-${hazard}-${report.type}-${idx}`} coordinates={[report.lon, report.lat]}>
+                  {markerShape === 'triangle' && (
+                    <polygon
+                      points="0,-5 4,2 -4,2"
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={0.75}
+                    >
+                      <title>{tooltipText}</title>
+                    </polygon>
+                  )}
+                  {markerShape === 'circle' && (
+                    <circle
+                      r={3.2}
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={0.75}
+                    >
+                      <title>{tooltipText}</title>
+                    </circle>
+                  )}
+                  {markerShape === 'square' && (
+                    <rect
+                      x={-2.8}
+                      y={-2.8}
+                      width={5.6}
+                      height={5.6}
+                      fill={markerColor}
+                      stroke="#ffffff"
+                      strokeWidth={0.75}
+                    >
+                      <title>{tooltipText}</title>
+                    </rect>
+                  )}
+                </Marker>
+              );
+            })}
         </ComposableMap>
 
         <div className="absolute bottom-1.5 left-1.5 border-[2px] border-ink bg-paper px-2 py-1 shadow-retro-sm">
@@ -448,6 +519,50 @@ export default function GeneratedHazardProbabilityMap({
               </div>
             )}
           </div>
+          {stormReportsMode && stormReportsMode !== 'none' && (
+            <div className="mt-1 border-t-[1px] border-ink/20 pt-1 flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[8px] font-bold leading-none text-ink">
+              {hazard === 'tornado' && (stormReportsMode === 'all' || stormReportsMode === 'tornado') && (
+                <div className="flex items-center gap-0.5">
+                  <span className="inline-block w-0 h-0 border-l-[3px] border-l-transparent border-r-[3px] border-r-transparent border-b-[5px] border-b-[#e11d48]" aria-hidden />
+                  <span>Torn Reports</span>
+                </div>
+              )}
+              {hazard === 'hail' && (stormReportsMode === 'all' || stormReportsMode === 'hail') && (
+                <div className="flex items-center gap-0.5">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#16a34a]" aria-hidden />
+                  <span>Hail Reports</span>
+                </div>
+              )}
+              {hazard === 'wind' && (stormReportsMode === 'all' || stormReportsMode === 'wind') && (
+                <div className="flex items-center gap-0.5">
+                  <span className="inline-block h-1.5 w-1.5 bg-[#2563eb]" aria-hidden />
+                  <span>Wind Reports</span>
+                </div>
+              )}
+              {hazard === 'thunder' && (
+                <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
+                  {(stormReportsMode === 'all' || stormReportsMode === 'tornado') && (
+                    <div className="flex items-center gap-0.5">
+                      <span className="inline-block w-0 h-0 border-l-[3px] border-l-transparent border-r-[3px] border-r-transparent border-b-[5px] border-b-[#e11d48]" aria-hidden />
+                      <span>Torn</span>
+                    </div>
+                  )}
+                  {(stormReportsMode === 'all' || stormReportsMode === 'hail') && (
+                    <div className="flex items-center gap-0.5">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#16a34a]" aria-hidden />
+                      <span>Hail</span>
+                    </div>
+                  )}
+                  {(stormReportsMode === 'all' || stormReportsMode === 'wind') && (
+                    <div className="flex items-center gap-0.5">
+                      <span className="inline-block h-1.5 w-1.5 bg-[#2563eb]" aria-hidden />
+                      <span>Wind</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {featureCollection.features.length === 0 && (

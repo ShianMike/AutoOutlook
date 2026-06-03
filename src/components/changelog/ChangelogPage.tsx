@@ -84,10 +84,52 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v0.9',
+    codename: 'Multi-Cycle Merge, Verification Archives & Storm Reports',
+    date: '2026-06-03',
+    status: 'CURRENT',
+    summary:
+      'This release introduces dynamic multi-cycle merging for SPC Day 1 comparison, automatic NOAA/SPC verification archive fetching for historical dates, daily SPC storm reports (Tornado, Hail, Wind) overlay on all outlook and hazard maps, singleflight concurrency locking, and optimized static bundle exports.',
+    highlights: [
+      'Multi-cycle merge date selection: Added a retro-themed Date picker dropdown to compare merged forecast runs with historical SPC records.',
+      'NOAA/SPC verification archive retriever: Automatically fetches and parses official GeoJSON outlooks on-the-fly for historical dates when no local cycle cache exists.',
+      'SPC daily storm reports overlay: Renders crimson triangles (Tornado), forest green circles (Hail), and steel blue squares (Wind) with detailed tooltips and legends on all Outlook and Hazard Map panels.',
+      'Singleflight concurrency locks: Prevents duplicate/concurrent forecast merges and NOAA download requests in local development.',
+      'Static export size optimization: Stripped heavy grid coordinates from static probability tiles, saving 98% of space (reducing files from 28MB to 3.6MB) for fast Cloudflare builds.',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'SPC daily storm reports overlay',
+        body: 'Added Tornado, Hail, and Wind report overlays to the main Outlook and individual/grid Hazard Probability maps with custom tooltip details and retro legends.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Multi-cycle merge date selection',
+        body: 'Allows operators to choose from available historical dates on the Merged D1 Outlook to dynamically fetch, compile, and run the verification comparison.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'NOAA verification archives fetcher',
+        body: 'Automatically downloads and extracts historical SPC Day 1 GeoJSONs from NOAA archives when no local cycle cache exists.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Singleflight lock & double freshness checks',
+        body: 'Synchronizes merge executions to prevent concurrent disk writes and duplicate NOAA network calls.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Static archive API exporter',
+        body: 'Statically exports merged verification and hazard data for Pages static hosting, stripping heavy grids to keep builds lightweight.',
+      },
+    ],
+  },
+  {
     version: 'v0.8',
     codename: 'Florida Land Mask Fix, Grid Stride 2 & Dashboard Alignment',
     date: '2026-06-02',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release expands the CONUS land mask to Southern Florida and the Keys, prevents strict ocean offshore suppressions on land grid cells, aligns dashboard widget eyebrows to their sidebar navigation index, and defaults the gridded risk pipeline to a denser gridStride of 2 with raw GRIB caching to keep dev fetches fast.',
     highlights: [
@@ -1073,7 +1115,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.8
+          AutoOutlook · Automated Convective Risk Intelligence · v0.9
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

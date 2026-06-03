@@ -26,8 +26,34 @@ function apiHeaders(cacheControl, contentType = 'application/json; charset=utf-8
   };
 }
 
-function resolveStaticPath(pathname, region, model = null) {
+function resolveStaticPath(pathname, region, model = null, date = null) {
   const prefix = region === 'conus' ? '/_api/conus' : '/_api';
+
+  // Available dates list
+  if (pathname === '/api/outlook/merged-d1-available-dates') {
+    return `${prefix}/outlook/merged-d1/available-dates.json`;
+  }
+
+  // Merged D1 endpoints
+  const isMergedD1Verification = pathname === '/api/outlook/merged-d1-verification';
+  const isMergedD1RiskPolygons = pathname === '/api/outlook/merged-d1-risk-polygons';
+  const isMergedD1ProbabilityTile = pathname === '/api/outlook/merged-d1-probability-tile';
+  const isSpcStormReports = pathname === '/api/outlook/spc-storm-reports';
+
+  if (isMergedD1Verification || isMergedD1RiskPolygons || isMergedD1ProbabilityTile || isSpcStormReports) {
+    const filename = isMergedD1Verification
+      ? 'verification.json'
+      : isMergedD1RiskPolygons
+        ? 'risk-polygons.geojson'
+        : isMergedD1ProbabilityTile
+          ? 'probability-tile.json'
+          : 'storm-reports.json';
+        
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return `${prefix}/outlook/merged-d1/${date}/${filename}`;
+    }
+    return `${prefix}/outlook/merged-d1/${filename}`;
+  }
 
   const direct = STATIC_ROUTES.get(pathname);
   if (direct) {
@@ -100,17 +126,17 @@ export async function onRequest(context) {
   const url = new URL(context.request.url);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
   const region = url.searchParams.get('region');
-
   const model = url.searchParams.get('model');
+  const date = url.searchParams.get('date');
 
-  let staticPath = resolveStaticPath(pathname, region, model);
+  let staticPath = resolveStaticPath(pathname, region, model, date);
   if (!staticPath) return notReady(pathname);
 
   let assetResponse = await fetchStaticAsset(context, staticPath);
 
   // If regional asset is not found, try falling back to the legacy root asset path
   if (isMissingAssetResponse(assetResponse) && region) {
-    const fallbackPath = resolveStaticPath(pathname, null, null);
+    const fallbackPath = resolveStaticPath(pathname, null, null, date);
     if (fallbackPath && fallbackPath !== staticPath) {
       const fallbackResponse = await fetchStaticAsset(context, fallbackPath);
       if (!isMissingAssetResponse(fallbackResponse)) {

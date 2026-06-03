@@ -135,6 +135,30 @@ export interface SpcVerificationSummary {
   spcFetchedAfterPredictionArtifacts?: boolean;
 }
 
+export interface MergedD1VerificationSummary extends SpcVerificationSummary {
+  mergedCycles?: string[];
+  d1WindowValidISO?: string;
+  d1WindowExpireISO?: string;
+  contributingHours?: Array<{ cycle: string; forecastHour: number; validTimeISO: string }>;
+  mergeMethod?: 'maximum';
+  latencyMs?: number;
+}
+
+export interface SpcStormReport {
+  type: 'tornado' | 'hail' | 'wind';
+  time: string;
+  value: string;
+  location: string;
+  lat: number;
+  lon: number;
+  comment: string;
+}
+
+export interface SpcStormReportsResponse {
+  reports: SpcStormReport[];
+}
+
+
 export interface OutlookArtifactMetadata {
   generatedAtISO: string;
   cycle: string;

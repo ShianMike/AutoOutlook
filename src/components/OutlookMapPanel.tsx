@@ -8,11 +8,12 @@ import HazardOutlookMap from './HazardOutlookMap';
 import GeneratedOutlookMap, { type SpcComparisonMode } from './GeneratedOutlookMap';
 import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
-import type { OutlookArtifactState } from '../hooks/useOutlookArtifacts';
-import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { useMergedD1Artifacts, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
+import type { OutlookArtifacts, MergedD1VerificationSummary, SpcStormReport } from '../types/outlookArtifacts';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { recordCanvasesToGif } from '../utils/gifRecorder';
 import type { OutlookHazardKey } from '../utils/hazardProbabilityBands';
+import { apiUrl } from '../utils/apiBase';
 
 interface OutlookMapPanelProps {
   snapshot: HourSnapshot | null;
@@ -23,6 +24,13 @@ interface OutlookMapPanelProps {
   onIndexChange: (index: number) => void;
   setPlaying: (playing: boolean) => void;
   activeRegion: ActiveRegion;
+  selectedMergedDate: string;
+  setSelectedMergedDate: (date: string) => void;
+  viewType: 'hourly' | 'merged';
+  setViewType: (type: 'hourly' | 'merged') => void;
+  stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
+  setStormReportsMode?: (mode: 'none' | 'all' | 'tornado' | 'hail' | 'wind') => void;
+  stormReports?: SpcStormReport[];
 }
 
 type OutlookMode = 'levels' | 'hazards';
@@ -245,6 +253,13 @@ export default function OutlookMapPanel({
   onIndexChange,
   setPlaying,
   activeRegion,
+  selectedMergedDate,
+  setSelectedMergedDate,
+  viewType,
+  setViewType,
+  stormReportsMode = 'none',
+  setStormReportsMode,
+  stormReports = [],
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
   const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>('auto');
@@ -260,46 +275,92 @@ export default function OutlookMapPanel({
   const [gifProgress, setGifProgress] = useState<GifProgressState | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
-  const latestExportStateRef = useRef({ snapshot, outlookArtifacts });
+
+  // Fetch available merged D1 dates on mount
+  const [availableMergedDates, setAvailableMergedDates] = useState<string[]>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadDates = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/outlook/merged-d1-available-dates'), { signal: controller.signal });
+        if (response.ok) {
+          const res = await response.json();
+          if (res.dates && res.dates.length > 0) {
+            setAvailableMergedDates(res.dates);
+            if (!selectedMergedDate) {
+              setSelectedMergedDate(res.dates[0]);
+            }
+          }
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        console.error('Failed to load available merge dates:', err);
+      }
+    };
+    loadDates();
+    return () => controller.abort();
+  }, []);
+
+  const mergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate);
+
+  const effectiveArtifactState = viewType === 'merged' ? mergedArtifacts : outlookArtifacts;
+  const effectiveMetadata = effectiveArtifactState.artifacts?.metadata;
+  const effectiveSnapshot = viewType === 'merged' && snapshot ? {
+    ...snapshot,
+    forecastHour: 0,
+    validTimeISO: (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.d1WindowValidISO || snapshot.validTimeISO,
+  } : snapshot;
+
+  const latestExportStateRef = useRef({ snapshot: effectiveSnapshot, outlookArtifacts: effectiveArtifactState });
   const cancelGifRef = useRef(false);
   const gifAbortRef = useRef<AbortController | null>(null);
   const forecastStops = bundle?.hours ?? [];
   const isAnyExporting = isExporting || isExportingGif;
-  const artifactMetadata = outlookArtifacts.artifacts?.metadata;
+  const artifactMetadata = effectiveMetadata;
   const latestCandidate = artifactMetadata?.latestExtendedCandidate ?? undefined;
   const staleArtifacts = isNewerCycle(latestCandidate?.cycleTimeISO, artifactMetadata?.cycleTimeISO);
-  const generatedHazardsReady = hasGeneratedHazardTile(outlookArtifacts.artifacts, snapshot?.forecastHour, outlookArtifacts.status);
-  const mlDriven = Boolean(snapshot?.mlHazards);
-  const useRuleHazardFallback = !mlDriven && outlookArtifacts.status === 'missing';
-  const engineLabel = mlDriven
-    ? outlookArtifacts.status === 'ready'
-      ? 'Auto-generated · HRRR/XGBoost artifact pipeline'
-      : 'Auto-generated · XGBoost hazard model · artifact pending'
-    : 'Auto-generated · rule-based outlook engine v1';
-  const hourLabel = snapshot
-    ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
-    : '—';
+  const generatedHazardsReady = hasGeneratedHazardTile(effectiveArtifactState.artifacts, effectiveSnapshot?.forecastHour, effectiveArtifactState.status);
+  const mlDriven = Boolean(effectiveSnapshot?.mlHazards);
+  const useRuleHazardFallback = !mlDriven && effectiveArtifactState.status === 'missing';
+  const engineLabel = viewType === 'merged'
+    ? 'Multi-Cycle Merged Day 1 Outlook (Element-wise Maximum)'
+    : mlDriven
+      ? effectiveArtifactState.status === 'ready'
+        ? 'Auto-generated · HRRR/XGBoost artifact pipeline'
+        : 'Auto-generated · XGBoost hazard model · artifact pending'
+      : 'Auto-generated · rule-based outlook engine v1';
+  const hourLabel = viewType === 'merged'
+    ? 'D1 MERGED'
+    : effectiveSnapshot
+      ? FORECAST_HOUR_LABELS[effectiveSnapshot.forecastHour] ?? `+${effectiveSnapshot.forecastHour}h`
+      : '—';
 
-  const validTime = snapshot
+  const validTime = effectiveSnapshot
     ? (() => {
-        const d = new Date(snapshot.validTimeISO);
+        const d = new Date(effectiveSnapshot.validTimeISO);
         const hh = String(d.getUTCHours()).padStart(2, '0');
         const mm = String(d.getUTCMinutes()).padStart(2, '0');
         return `${hh}${mm}Z ${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
       })()
     : '—';
 
-  const shear = snapshot ? `${Math.round(snapshot.ingredients.shear06Kt)} kt SHR` : '—';
-  const cape = snapshot ? `${Math.round(snapshot.ingredients.mucape)} CAPE` : '—';
+  const shear = effectiveSnapshot ? `${Math.round(effectiveSnapshot.ingredients.shear06Kt)} kt SHR` : '—';
+  const cape = effectiveSnapshot ? `${Math.round(effectiveSnapshot.ingredients.mucape)} CAPE` : '—';
+
+  const validTimeText = viewType === 'merged' && (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.d1WindowValidISO
+    ? `${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowValidISO)} – ${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowExpireISO)}`
+    : fmtUTC(effectiveSnapshot?.validTimeISO);
+
   const timeRows = [
-    ['HRRR cycle', artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO)],
-    ['Forecast valid', fmtUTC(snapshot?.validTimeISO)],
+    ['Cycle', viewType === 'merged' ? 'Merged Multi-Cycle' : (artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO))],
+    ['Forecast valid', validTimeText],
     ['Artifact generated', fmtUTC(artifactMetadata?.generatedAtISO)],
   ] as const;
 
   useEffect(() => {
-    latestExportStateRef.current = { snapshot, outlookArtifacts };
-  }, [snapshot, outlookArtifacts]);
+    latestExportStateRef.current = { snapshot: effectiveSnapshot, outlookArtifacts: effectiveArtifactState };
+  }, [effectiveSnapshot, effectiveArtifactState]);
+
 
   useEffect(() => {
     if (forecastStops.length === 0) {
@@ -550,18 +611,20 @@ export default function OutlookMapPanel({
           </span>
           <span className="text-paper/80">{cape}</span>
           <span className="text-paper/80">{shear}</span>
-          <span className="shrink-0">{snapshot ? fmtCoord(snapshot.region.centerLat, snapshot.region.centerLon) : '—'}</span>
+          <span className="shrink-0">{effectiveSnapshot ? fmtCoord(effectiveSnapshot.region.centerLat, effectiveSnapshot.region.centerLon) : '—'}</span>
         </div>
 
         {mode === 'levels' ? (
           <div className="outlook-export-stage border-[3px] border-ink bg-paper p-2">
             <GeneratedOutlookMap
-              snapshot={snapshot}
-              status={outlookArtifacts.status}
-              artifacts={outlookArtifacts.artifacts}
-              message={outlookArtifacts.message}
+              snapshot={effectiveSnapshot}
+              status={effectiveArtifactState.status}
+              artifacts={effectiveArtifactState.artifacts}
+              message={effectiveArtifactState.message}
               activeRegion={activeRegion}
               comparisonMode={spcComparisonMode}
+              stormReportsMode={stormReportsMode}
+              stormReports={stormReports}
             />
           </div>
         ) : (
@@ -578,41 +641,49 @@ export default function OutlookMapPanel({
               hazardLayout === 'all' ? (
                 <>
                   <GeneratedHazardProbabilityMap
-                    snapshot={snapshot}
+                    snapshot={effectiveSnapshot}
                     hazard="thunder"
                     title="Thunderstorm Outlook"
-                    artifacts={outlookArtifacts.artifacts}
-                    status={outlookArtifacts.status}
+                    artifacts={effectiveArtifactState.artifacts}
+                    status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
                   />
                   <GeneratedHazardProbabilityMap
-                    snapshot={snapshot}
+                    snapshot={effectiveSnapshot}
                     hazard="hail"
                     title="Hail Outlook"
-                    artifacts={outlookArtifacts.artifacts}
-                    status={outlookArtifacts.status}
+                    artifacts={effectiveArtifactState.artifacts}
+                    status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
                   />
                   <GeneratedHazardProbabilityMap
-                    snapshot={snapshot}
+                    snapshot={effectiveSnapshot}
                     hazard="wind"
                     title="Damaging Wind Outlook"
-                    artifacts={outlookArtifacts.artifacts}
-                    status={outlookArtifacts.status}
+                    artifacts={effectiveArtifactState.artifacts}
+                    status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
                   />
                   <GeneratedHazardProbabilityMap
-                    snapshot={snapshot}
+                    snapshot={effectiveSnapshot}
                     hazard="tornado"
                     title="Tornado Outlook"
-                    artifacts={outlookArtifacts.artifacts}
-                    status={outlookArtifacts.status}
+                    artifacts={effectiveArtifactState.artifacts}
+                    status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
                   />
                 </>
               ) : (
                 <GeneratedHazardProbabilityMap
-                  snapshot={snapshot}
+                  snapshot={effectiveSnapshot}
                   hazard={selectedHazard}
                   title={
                     selectedHazard === 'thunder'
@@ -623,22 +694,56 @@ export default function OutlookMapPanel({
                           ? 'Damaging Wind Outlook'
                           : 'Tornado Outlook'
                   }
-                  artifacts={outlookArtifacts.artifacts}
-                  status={outlookArtifacts.status}
+                  artifacts={effectiveArtifactState.artifacts}
+                  status={effectiveArtifactState.status}
                   activeRegion={activeRegion}
+                  stormReportsMode={stormReportsMode}
+                  stormReports={stormReports}
                 />
               )
             ) : useRuleHazardFallback ? (
               hazardLayout === 'all' ? (
                 <>
-                  <HazardOutlookMap snapshot={snapshot} hazard="thunder" title="Thunderstorm Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
-                  <HazardOutlookMap snapshot={snapshot} hazard="hail" title="Hail Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
-                  <HazardOutlookMap snapshot={snapshot} hazard="wind" title="Damaging Wind Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
-                  <HazardOutlookMap snapshot={snapshot} hazard="tornado" title="Tornado Outlook" sourceLabel="Rule fallback" activeRegion={activeRegion} />
+                  <HazardOutlookMap
+                    snapshot={effectiveSnapshot}
+                    hazard="thunder"
+                    title="Thunderstorm Outlook"
+                    sourceLabel="Rule fallback"
+                    activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
+                  />
+                  <HazardOutlookMap
+                    snapshot={effectiveSnapshot}
+                    hazard="hail"
+                    title="Hail Outlook"
+                    sourceLabel="Rule fallback"
+                    activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
+                  />
+                  <HazardOutlookMap
+                    snapshot={effectiveSnapshot}
+                    hazard="wind"
+                    title="Damaging Wind Outlook"
+                    sourceLabel="Rule fallback"
+                    activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
+                  />
+                  <HazardOutlookMap
+                    snapshot={effectiveSnapshot}
+                    hazard="tornado"
+                    title="Tornado Outlook"
+                    sourceLabel="Rule fallback"
+                    activeRegion={activeRegion}
+                    stormReportsMode={stormReportsMode}
+                    stormReports={stormReports}
+                  />
                 </>
               ) : (
                 <HazardOutlookMap
-                  snapshot={snapshot}
+                  snapshot={effectiveSnapshot}
                   hazard={selectedHazard}
                   title={
                     selectedHazard === 'thunder'
@@ -651,19 +756,22 @@ export default function OutlookMapPanel({
                   }
                   sourceLabel="Rule fallback"
                   activeRegion={activeRegion}
+                  stormReportsMode={stormReportsMode}
+                  stormReports={stormReports}
                 />
               )
             ) : (
-              <GeneratedHazardsUnavailable message={outlookArtifacts.message} status={outlookArtifacts.status} />
+              <GeneratedHazardsUnavailable message={effectiveArtifactState.message} status={effectiveArtifactState.status} />
             )}
           </div>
         )}
 
         {/* Footer strip */}
         <div className="outlook-export-footer border-[3px] border-t-0 border-ink bg-paper px-3 py-1.5 flex items-center justify-between gap-3 flex-wrap font-mono text-[10px] uppercase tracking-widest text-ink/70">
-          <span>States in focus: {snapshot?.region.states.join(' · ') ?? '—'}</span>
+          <span>States in focus: {effectiveSnapshot?.region.states.join(' · ') ?? '—'}</span>
           <span>{engineLabel}</span>
         </div>
+
 
         <div className="outlook-export-disclaimer border-[3px] border-t-0 border-ink bg-ink px-3 py-2 text-paper">
           <ForecastDisclaimer variant="export" />
@@ -688,6 +796,73 @@ export default function OutlookMapPanel({
               <option value="hazards">Hazard Probs</option>
             </select>
           </div>
+
+          {/* Dropdown: View Mode (Hourly vs Merged D1) */}
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+              View
+            </label>
+            <select
+              value={viewType}
+              onChange={(e) => setViewType(e.target.value as 'hourly' | 'merged')}
+              disabled={isAnyExporting}
+              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+            >
+              <option value="hourly">Hourly Scrubber</option>
+              <option value="merged">Merged D1 Outlook</option>
+            </select>
+          </div>
+
+          {/* Dropdown: Merged Date (Conditional) */}
+          {viewType === 'merged' && availableMergedDates.length > 0 && (
+            <div className="flex items-center gap-2 animate-fadeIn">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                Date
+              </label>
+              <select
+                value={selectedMergedDate}
+                onChange={(e) => setSelectedMergedDate(e.target.value)}
+                disabled={isAnyExporting}
+                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+              >
+                {availableMergedDates.map((dateStr) => {
+                  const d = new Date(dateStr + 'T12:00:00Z');
+                  const formatted = d.toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: '2-digit',
+                    year: 'numeric',
+                    timeZone: 'UTC',
+                  });
+                  return (
+                    <option key={dateStr} value={dateStr}>
+                      {formatted}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+          )}
+
+          {/* Dropdown: Verified Reports (Conditional) */}
+          {viewType === 'merged' && setStormReportsMode && (
+            <div className="flex items-center gap-2 animate-fadeIn">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                Reports
+              </label>
+              <select
+                value={stormReportsMode}
+                onChange={(e) => setStormReportsMode(e.target.value as any)}
+                disabled={isAnyExporting}
+                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+              >
+                <option value="none">No Reports</option>
+                <option value="all">All Reports</option>
+                <option value="tornado">Tornadoes</option>
+                <option value="hail">Hail</option>
+                <option value="wind">Wind</option>
+              </select>
+            </div>
+          )}
 
           {/* Dropdown 2: Hazard View (Conditional) */}
           {mode === 'hazards' && (

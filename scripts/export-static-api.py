@@ -195,6 +195,73 @@ def validate_full_index(index: dict[str, Any]) -> None:
         )
 
 
+def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
+    # 1. Get available merge dates list
+    dates = helpers._available_merge_dates_list(model="hrrr")
+    if not dates:
+        print("No available merge dates found for static export.")
+        return
+        
+    print(f"Exporting merged D1 archives for dates: {dates}")
+    
+    # 2. Create target directory
+    merged_d1_out_dir = output_dir / "outlook" / "merged-d1"
+    merged_d1_out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 3. Write available dates list
+    write_json(merged_d1_out_dir / "available-dates.json", {"dates": dates})
+    
+    latest_date_dir = None
+    
+    for date_str in dates:
+        merged_dir = helpers._generate_or_get_merged_d1_dir(date_str, model="hrrr")
+        if merged_dir is None or not merged_dir.exists():
+            print(f"Warning: could not resolve merged D1 dir for date {date_str}")
+            continue
+            
+        # Target output folder for this date
+        date_out_dir = merged_d1_out_dir / date_str
+        date_out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy small files
+        copy_if_exists(merged_dir / "merged_verification_summary.json", date_out_dir / "verification.json")
+        copy_if_exists(merged_dir / "merged_risk_polygons.geojson", date_out_dir / "risk-polygons.geojson")
+        copy_if_exists(merged_dir / "merged_hazard_probability_shapes.geojson", date_out_dir / "hazard-probability-shapes.geojson")
+        
+        # Process and write lightweight probability tile (remove heavy lat/lon and probability grids)
+        tile_path = merged_dir / "merged_probability_tile.json"
+        if tile_path.exists():
+            try:
+                tile = json.loads(tile_path.read_text(encoding="utf-8"))
+                if isinstance(tile, dict):
+                    tile["categoryOrdinal"] = []
+                    tile["categoryLabel"] = []
+                    tile["probabilities"] = {}
+                    write_json(date_out_dir / "probability-tile.json", tile)
+            except Exception as e:
+                print(f"Warning: failed to make lightweight tile for {date_str}: {e}")
+                
+        # Fetch and write storm reports
+        try:
+            reports = helpers.fetch_spc_daily_storm_reports(date_str)
+            write_json(date_out_dir / "storm-reports.json", {"reports": reports})
+        except Exception as e:
+            print(f"Warning: failed to fetch storm reports for {date_str}: {e}")
+            write_json(date_out_dir / "storm-reports.json", {"reports": []})
+                
+        if latest_date_dir is None:
+            latest_date_dir = date_out_dir
+
+    # 4. Copy latest date's files directly as default fallbacks
+    if latest_date_dir is not None:
+        copy_if_exists(latest_date_dir / "verification.json", merged_d1_out_dir / "verification.json")
+        copy_if_exists(latest_date_dir / "risk-polygons.geojson", merged_d1_out_dir / "risk-polygons.geojson")
+        copy_if_exists(latest_date_dir / "hazard-probability-shapes.geojson", merged_d1_out_dir / "hazard-probability-shapes.geojson")
+        copy_if_exists(latest_date_dir / "probability-tile.json", merged_d1_out_dir / "probability-tile.json")
+        copy_if_exists(latest_date_dir / "storm-reports.json", merged_d1_out_dir / "storm-reports.json")
+        print(f"Default fallback merged D1 set to latest date: {dates[0]}")
+
+
 def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir: Path) -> None:
     artifact_dir = artifact_dir.resolve()
     legacy_artifact_dir = legacy_artifact_dir.resolve()
@@ -248,6 +315,9 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
         copy_if_exists(source_hour_dir / "risk_polygons.geojson", target_hour_dir / "risk-polygons.geojson")
         copy_if_exists(source_hour_dir / "probability_tile.json", target_hour_dir / "probability-tile.json")
         copy_if_exists(source_hour_dir / "metadata.json", target_hour_dir / "metadata.json")
+
+    # Export merged D1 outlook archives
+    export_merged_d1_archives(output_dir, artifact_dir.parent, helpers)
 
     print(json.dumps({
         "outputDir": str(output_dir),

@@ -292,6 +292,323 @@ def latest_outlook_spc_day1_category():
     return _json_artifact("spc_day1_cat.geojson")
 
 
+def _available_merge_dates_list(model: str) -> list[str]:
+    from datetime import datetime, timezone, timedelta
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+    if not artifact_root.exists():
+        return []
+        
+    dates_set = set()
+    for child in artifact_root.iterdir():
+        if not child.is_dir():
+            continue
+        index_path = child / "index.json"
+        if not index_path.exists():
+            index_path = child / "metadata.json"
+        if not index_path.exists():
+            continue
+            
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+            
+        status = index.get("status")
+        if status not in ("complete", "partial"):
+            continue
+            
+        ready = index.get("readyForecastHours")
+        if not isinstance(ready, list) or not ready:
+            continue
+            
+        cycle_time_str = index.get("cycleTimeISO")
+        if not cycle_time_str:
+            continue
+            
+        try:
+            cycle_time = datetime.fromisoformat(cycle_time_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            continue
+            
+        # Check if model matches
+        cycle_policy = index.get("cyclePolicy") or {}
+        cycle_model = cycle_policy.get("model") or index.get("model", {}).get("name") or "HRRR"
+        if str(cycle_model).lower() != model.lower():
+            continue
+            
+        # Add dates of D1 windows overlapping with ready forecast hours
+        for h in ready:
+            try:
+                forecast_hour = int(h)
+            except (TypeError, ValueError):
+                continue
+            valid_time = cycle_time + timedelta(hours=forecast_hour)
+            d1_start = valid_time.date()
+            if valid_time.hour < 12:
+                d1_start -= timedelta(days=1)
+            dates_set.add(d1_start.isoformat())
+            
+    return sorted(list(dates_set), reverse=True)
+
+
+def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> Path | None:
+    """Ensure that the merged artifacts for target_date_str are generated and return path."""
+    from datetime import date, datetime, timezone, timedelta
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+    
+    # 1. Resolve target date
+    if not target_date_str:
+        available = _available_merge_dates_list(model)
+        if not available:
+            return None
+        target_date_str = available[0]
+        
+    try:
+        target_date = date.fromisoformat(target_date_str)
+    except ValueError:
+        return None
+        
+    merged_dir = artifact_root / f"merged_{model}_{target_date_str}"
+    
+    verification_path = merged_dir / "merged_verification_summary.json"
+    tile_path = merged_dir / "merged_probability_tile.json"
+    index_path = merged_dir / "merged_d1_index.json"
+    
+    def check_freshness() -> bool:
+        if not (verification_path.exists() and tile_path.exists() and index_path.exists()):
+            return False
+            
+        is_historical = True
+        now_utc = datetime.now(timezone.utc).date()
+        if abs((target_date - now_utc).days) <= 1:
+            is_historical = False
+            
+        if is_historical:
+            return True
+            
+        # For non-historical, check if cached files are up-to-date with contributing forecast cycle index files
+        d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
+        d1_expire = d1_valid + timedelta(days=1)
+        
+        from backend.ml.merged_outlook import resolve_cycle_dirs_for_window
+        cycle_dirs = resolve_cycle_dirs_for_window(artifact_root, d1_valid, d1_expire, model)
+        if not cycle_dirs:
+            return False
+            
+        try:
+            cached_index = json.loads(index_path.read_text(encoding="utf-8"))
+            cached_gen_time_str = cached_index.get("generatedAtISO")
+            if not cached_gen_time_str:
+                return False
+                
+            cached_gen_time = datetime.fromisoformat(cached_gen_time_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+            max_cycle_gen_time = None
+            for cycle_dir in cycle_dirs:
+                cycle_idx_path = cycle_dir / "index.json"
+                if not cycle_idx_path.exists():
+                    cycle_idx_path = cycle_dir / "metadata.json"
+                if cycle_idx_path.exists():
+                    cycle_idx = json.loads(cycle_idx_path.read_text(encoding="utf-8"))
+                    cycle_gen_time_str = cycle_idx.get("generatedAtISO")
+                    if cycle_gen_time_str:
+                        cycle_gen_time = datetime.fromisoformat(cycle_gen_time_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+                        if max_cycle_gen_time is None or cycle_gen_time > max_cycle_gen_time:
+                            max_cycle_gen_time = cycle_gen_time
+                            
+            if max_cycle_gen_time is None or cached_gen_time >= max_cycle_gen_time:
+                return True
+        except Exception:
+            pass
+        return False
+
+    # 2. Check freshness outside the lock first (fast path)
+    if check_freshness():
+        return merged_dir
+        
+    # 3. Synchronize re-generation using singleflight lock
+    lock_key = f"merge-d1-{model}-{target_date_str}"
+    lock = _singleflight_lock(lock_key)
+    with lock:
+        # Re-check freshness under lock in case another thread just generated it
+        if check_freshness():
+            return merged_dir
+            
+        d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
+        d1_expire = d1_valid + timedelta(days=1)
+        
+        from backend.ml.merged_outlook import resolve_cycle_dirs_for_window, merge_cycles_for_spc_window
+        cycle_dirs = resolve_cycle_dirs_for_window(artifact_root, d1_valid, d1_expire, model)
+        if not cycle_dirs:
+            return None
+            
+        try:
+            # Run merge and write to target directory
+            merge_cycles_for_spc_window(
+                cycle_dirs,
+                output_dir=merged_dir,
+                target_date=target_date,
+            )
+            return merged_dir
+        except Exception as exc:
+            log.exception("Dynamic D1 merge failed for date %s", target_date_str)
+            return None
+
+
+@app.get("/api/outlook/merged-d1-available-dates")
+def merged_d1_available_dates():
+    model = _request_model()
+    dates = _available_merge_dates_list(model)
+    return _json_response({"dates": dates})
+
+
+@app.get("/api/outlook/merged-d1-verification")
+def merged_d1_verification():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_verification_summary.json")
+
+
+@app.get("/api/outlook/merged-d1-risk-polygons")
+def merged_d1_risk_polygons():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_risk_polygons.geojson")
+
+
+@app.get("/api/outlook/merged-d1-probability-tile")
+def merged_d1_probability_tile():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_probability_tile.json")
+
+
+def fetch_spc_daily_storm_reports(target_date: Any, session: Any = None) -> list[dict[str, Any]]:
+    from datetime import date
+    import requests
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
+    
+    session = session or requests.Session()
+    session.headers.setdefault("User-Agent", "AutoOutlook-storm-reports/1.0")
+    
+    date_str = target_date.strftime("%y%m%d")
+    hazards = ["torn", "hail", "wind"]
+    reports = []
+    
+    for hazard in hazards:
+        url = f"https://www.spc.noaa.gov/climo/reports/{date_str}_rpts_{hazard}.csv"
+        try:
+            res = session.get(url, timeout=10)
+            if res.status_code == 200:
+                lines = res.text.splitlines()
+                if not lines:
+                    continue
+                header = [h.strip().lower() for h in lines[0].split(",")]
+                
+                lat_idx = -1
+                lon_idx = -1
+                time_idx = -1
+                loc_idx = -1
+                val_idx = -1
+                comments_idx = -1
+                
+                for idx, name in enumerate(header):
+                    if "lat" in name:
+                        lat_idx = idx
+                    elif "lon" in name:
+                        lon_idx = idx
+                    elif "time" in name:
+                        time_idx = idx
+                    elif "loc" in name or "location" in name:
+                        loc_idx = idx
+                    elif name in ("f_scale", "size", "speed", "sz", "spd"):
+                        val_idx = idx
+                    elif "comment" in name:
+                        comments_idx = idx
+                        
+                if lat_idx == -1 or lon_idx == -1:
+                    continue
+                    
+                for line in lines[1:]:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) <= max(lat_idx, lon_idx):
+                        continue
+                    try:
+                        lat = float(parts[lat_idx])
+                        lon = float(parts[lon_idx])
+                        if not (20.0 <= lat <= 55.0 and -130.0 <= lon <= -60.0):
+                            continue
+                            
+                        val = parts[val_idx] if (val_idx != -1 and val_idx < len(parts)) else ""
+                        time_val = parts[time_idx] if (time_idx != -1 and time_idx < len(parts)) else ""
+                        loc = parts[loc_idx] if (loc_idx != -1 and loc_idx < len(parts)) else ""
+                        comment = parts[comments_idx] if (comments_idx != -1 and comments_idx < len(parts)) else ""
+                        
+                        reports.append({
+                            "type": "tornado" if hazard == "torn" else hazard,
+                            "time": time_val,
+                            "value": val,
+                            "location": loc,
+                            "lat": lat,
+                            "lon": lon,
+                            "comment": comment
+                        })
+                    except (ValueError, IndexError):
+                        continue
+        except Exception:
+            continue
+            
+    return reports
+
+
+@app.get("/api/outlook/spc-storm-reports")
+def spc_storm_reports():
+    date_str = request.args.get("date")
+    model = _request_model()
+    if not date_str:
+        available = _available_merge_dates_list(model)
+        if not available:
+            return _json_response({"reports": []})
+        date_str = available[0]
+        
+    try:
+        from datetime import date
+        target_date = date.fromisoformat(date_str)
+    except ValueError:
+        return _json_error({"error": "invalid date format"}, 400)
+        
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+    merged_dir = artifact_root / f"merged_{model}_{date_str}"
+    cache_path = merged_dir / "storm_reports.json"
+    
+    if cache_path.exists():
+        return _json_path(cache_path)
+        
+    try:
+        import requests
+        session = requests.Session()
+        reports = fetch_spc_daily_storm_reports(target_date, session)
+        
+        if merged_dir.exists():
+            import json
+            cache_path.write_text(json.dumps({"reports": reports}), encoding="utf-8")
+            
+        return _json_response({"reports": reports})
+    except Exception as exc:
+        log.exception("Failed to fetch storm reports for date %s", date_str)
+        return _json_response({"reports": []})
+
+
+
 @app.get("/api/outlook/incremental")
 def incremental_outlook_index():
     return _json_path(_selected_incremental_artifact_dir() / "index.json")

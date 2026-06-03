@@ -38,7 +38,7 @@ Tagged releases publish a container image to GitHub Container Registry:
 
 ```powershell
 docker pull ghcr.io/shianmike/autooutlook:latest
-docker pull ghcr.io/shianmike/autooutlook:v0.8
+docker pull ghcr.io/shianmike/autooutlook:v0.9
 ```
 
 The image contains the built React dashboard and Python backend service from the release tag.

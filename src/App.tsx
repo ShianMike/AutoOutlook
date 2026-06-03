@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
-import { useOutlookArtifacts } from './hooks/useOutlookArtifacts';
+import { useOutlookArtifacts, useMergedD1Verification, useSpcStormReports } from './hooks/useOutlookArtifacts';
 import { FORECAST_HOUR_LABELS, type ActiveRegion } from './types/forecast';
 
 import DashboardSidebar from './components/DashboardSidebar';
@@ -51,10 +51,16 @@ function viewFromHash(): AppView {
 export default function App() {
   const activeRegion: ActiveRegion = 'conus';
 
+  const [selectedMergedDate, setSelectedMergedDate] = useState<string>('');
+  const [viewType, setViewType] = useState<'hourly' | 'merged'>('hourly');
+  const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
+
   const auto = useAutoForecast(activeRegion);
   const hour = useForecastHour(auto.bundle);
   const snapshot = hour.snapshot;
   const outlookArtifacts = useOutlookArtifacts(snapshot?.forecastHour, snapshot?.validTimeISO, activeRegion);
+  const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate);
+  const stormReports = useSpcStormReports(activeRegion, selectedMergedDate);
   const mlDriven = Boolean(auto.bundle?.mlModel?.active && auto.bundle.mlHazardHours);
   const hourLabel = snapshot
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
@@ -148,6 +154,13 @@ export default function App() {
               onIndexChange={hour.setIndex}
               setPlaying={hour.setPlaying}
               activeRegion={activeRegion}
+              selectedMergedDate={selectedMergedDate}
+              setSelectedMergedDate={setSelectedMergedDate}
+              viewType={viewType}
+              setViewType={setViewType}
+              stormReportsMode={stormReportsMode}
+              setStormReportsMode={setStormReportsMode}
+              stormReports={stormReports}
             />
           </section>
 
@@ -193,7 +206,11 @@ export default function App() {
           </section>
 
           <section id="verification" className="scroll-mt-4">
-            <VerificationPanel spcVerification={outlookArtifacts.artifacts?.metadata?.spcVerification} />
+            <VerificationPanel
+              spcVerification={outlookArtifacts.artifacts?.metadata?.spcVerification}
+              mergedD1Verification={mergedD1Verification}
+              viewType={viewType}
+            />
           </section>
 
           <section id="system-status" className="scroll-mt-4">
@@ -215,7 +232,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v0.8
+              AutoOutlook · Automated Convective Risk Intelligence · v0.9
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

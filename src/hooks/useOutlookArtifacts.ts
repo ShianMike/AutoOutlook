@@ -10,6 +10,9 @@ import type {
   OutlookProbabilityTile,
   OutlookProbabilityTiles,
   SpcVerificationSummary,
+  MergedD1VerificationSummary,
+  SpcStormReport,
+  SpcStormReportsResponse,
 } from '../types/outlookArtifacts';
 import { apiUrl } from '../utils/apiBase';
 
@@ -732,3 +735,127 @@ export function useOutlookArtifacts(
 
   return state;
 }
+
+export function useMergedD1Verification(
+  activeRegion: ActiveRegion = 'conus',
+  selectedDate?: string,
+): MergedD1VerificationSummary | null {
+  const [data, setData] = useState<MergedD1VerificationSummary | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const url = selectedDate
+      ? `/api/outlook/merged-d1-verification?date=${selectedDate}`
+      : '/api/outlook/merged-d1-verification';
+    fetchJson<MergedD1VerificationSummary>(
+      url,
+      controller.signal,
+      activeRegion,
+    )
+      .then((result) => setData(result))
+      .catch(() => setData(null));
+    return () => controller.abort();
+  }, [activeRegion, selectedDate]);
+
+  return data;
+}
+
+export function useMergedD1Artifacts(
+  activeRegion: ActiveRegion = 'conus',
+  selectedDate?: string,
+): OutlookArtifactState {
+  const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState(INITIAL_STATE);
+
+    const load = async () => {
+      try {
+        const query = selectedDate ? `?date=${selectedDate}` : '';
+        const [riskPolygons, mergedTile, verification] = await Promise.all([
+          fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/merged-d1-risk-polygons${query}`, controller.signal, activeRegion),
+          fetchJson<OutlookProbabilityTile>(`/api/outlook/merged-d1-probability-tile${query}`, controller.signal, activeRegion),
+          fetchJson<MergedD1VerificationSummary>(`/api/outlook/merged-d1-verification${query}`, controller.signal, activeRegion),
+        ]);
+
+        const probabilityTiles: OutlookProbabilityTiles = {
+          cycle: 'Merged D1',
+          hours: [
+            {
+              forecastHour: 0,
+              validTimeISO: mergedTile.validTimeISO,
+              tile: mergedTile,
+            },
+          ],
+        };
+
+        const metadata: OutlookArtifactMetadata = {
+          generatedAtISO: new Date().toISOString(),
+          cycle: 'Merged D1 Outlook',
+          spcVerification: verification,
+          mode: 'full',
+        };
+
+        setState({
+          status: 'ready',
+          artifacts: {
+            metadata,
+            riskPolygons,
+            probabilityTiles,
+            selectedArtifactForecastHour: 0,
+            selectedHourStatus: 'ready',
+          },
+          message: null,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setState({
+          status: 'error',
+          artifacts: null,
+          message: `Failed to load merged D1 artifacts: ${message}`,
+        });
+      }
+    };
+
+    load();
+    return () => controller.abort();
+  }, [activeRegion, selectedDate]);
+
+  return state;
+}
+
+export function useSpcStormReports(
+  activeRegion: ActiveRegion = 'conus',
+  selectedDate?: string,
+): SpcStormReport[] {
+  const [reports, setReports] = useState<SpcStormReport[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const query = selectedDate ? `?date=${selectedDate}` : '';
+    
+    fetchJson<SpcStormReportsResponse>(
+      `/api/outlook/spc-storm-reports${query}`,
+      controller.signal,
+      activeRegion,
+    )
+      .then((res) => {
+        if (res && Array.isArray(res.reports)) {
+          setReports(res.reports);
+        } else {
+          setReports([]);
+        }
+      })
+      .catch(() => {
+        setReports([]);
+      });
+
+    return () => controller.abort();
+  }, [activeRegion, selectedDate]);
+
+  return reports;
+}
+
+

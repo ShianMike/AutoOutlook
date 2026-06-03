@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag to publish, for example v0.8"
+        description: "Version tag to publish, for example v0.9"
         required: true
-        default: "v0.8"
+        default: "v0.9"
 
 concurrency:
   group: autooutlook-package-${{ github.event.inputs.version || github.ref_name }}
