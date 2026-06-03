@@ -197,7 +197,7 @@ function formatGeneratedAt(iso: string | undefined): string {
 }
 
 function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollection | undefined): OutlookArtifactFeatureCollection | undefined {
-  if (!collection) return undefined;
+  if (!collection || !Array.isArray(collection.features)) return undefined;
   const demoted = demoteSmallFeatures(collection);
   return {
     ...demoted,
@@ -215,7 +215,7 @@ function normalizeArtifactCollection(collection: OutlookArtifactFeatureCollectio
 }
 
 function normalizeSpcCollection(collection: SpcCategoryFeatureCollection | null): SpcCategoryFeatureCollection | null {
-  if (!collection) return null;
+  if (!collection || !Array.isArray(collection.features)) return null;
   return {
     ...collection,
     features: [...collection.features].sort((a, b) => CATEGORY_ORD[spcCategory(a)] - CATEGORY_ORD[spcCategory(b)]).map((feature) => {
@@ -268,7 +268,7 @@ function riskPolygonsForHour(
   collection: OutlookArtifactFeatureCollection | undefined,
   forecastHour: number | undefined,
 ): OutlookArtifactFeatureCollection | undefined {
-  if (!collection || forecastHour === undefined) return undefined;
+  if (!collection || forecastHour === undefined || !Array.isArray(collection.features)) return undefined;
   const features = collection.features.filter((feature) => feature.properties.forecastHour === forecastHour);
   if (features.length === 0) return undefined;
   return { ...collection, features };
