@@ -92,7 +92,8 @@ export function getArtifactHazardGrid(
   forecastHour: number | undefined,
   hazard: ArtifactHazardKey,
 ): number[][] | undefined {
-  return getArtifactHourTile(artifacts, forecastHour)?.probabilities[hazard];
+  const grid = getArtifactHourTile(artifacts, forecastHour)?.probabilities?.[hazard];
+  return isGrid(grid) ? grid : undefined;
 }
 
 export function getArtifactHazardPeak(
@@ -109,8 +110,8 @@ export function getArtifactHazardPeakLocation(
   hazard: ArtifactHazardKey,
 ): ArtifactHazardPeakLocation | undefined {
   const tile = getArtifactHourTile(artifacts, forecastHour);
-  const grid = tile?.probabilities[hazard];
-  if (!tile || !grid) return undefined;
+  const grid = tile?.probabilities?.[hazard];
+  if (!tile || !isGrid(grid)) return undefined;
   let best: ArtifactHazardPeakLocation | undefined;
   grid.forEach((row, rowIndex) => row.forEach((value, colIndex) => {
     const probability = Number(value);
@@ -153,8 +154,8 @@ export function measureArtifactBandRadius(
   threshold: number,
 ): number {
   if (!tile) return Infinity;
-  const grid = tile.probabilities[hazard];
-  if (!grid) return Infinity;
+  const grid = tile.probabilities?.[hazard];
+  if (!isGrid(grid)) return Infinity;
   let minDistToOutside = Infinity;
   for (let r = 0; r < grid.length; r += 1) {
     for (let c = 0; c < grid[r].length; c += 1) {
@@ -191,7 +192,8 @@ export function artifactProbabilityToFeatureCollection(
   hazard: ArtifactHazardKey,
 ): ArtifactProbabilityFeatureCollection {
   if (!tile) return { type: 'FeatureCollection', features: [] };
-  const grid = tile.probabilities[hazard];
+  const grid = tile.probabilities?.[hazard];
+  if (!isGrid(grid)) return { type: 'FeatureCollection', features: [] };
   const thresholds = hazardThresholds(hazard);
   const labels = hazardLabels(hazard);
   const colors = hazardColors(hazard);
@@ -227,6 +229,7 @@ export function artifactThunderToFeatureCollection(
   tile: OutlookProbabilityTile | undefined,
 ): ArtifactProbabilityFeatureCollection {
   if (!tile) return { type: 'FeatureCollection', features: [] };
+  if (!isGrid(tile.categoryOrdinal)) return { type: 'FeatureCollection', features: [] };
   const features: ArtifactProbabilityFeature[] = [];
 
   const thresholds = THUNDER_THRESHOLDS;
@@ -260,6 +263,7 @@ export function artifactThunderToFeatureCollection(
 
 export function getArtifactThunderCoverage(tile: OutlookProbabilityTile | undefined): number | undefined {
   if (!tile) return undefined;
+  if (!isGrid(tile.categoryOrdinal)) return undefined;
   let validCells = 0;
   let thunderCells = 0;
   tile.categoryOrdinal.forEach((row, rowIndex) => row.forEach((value, colIndex) => {
@@ -277,6 +281,7 @@ export function artifactRiskToFeatureCollection(
   tile: OutlookProbabilityTile | undefined,
 ): OutlookArtifactFeatureCollection {
   if (!tile) return { type: 'FeatureCollection', features: [] };
+  if (!isGrid(tile.categoryOrdinal)) return { type: 'FeatureCollection', features: [] };
   const features: OutlookArtifactFeatureCollection['features'] = [];
   for (let row = 0; row < tile.categoryOrdinal.length; row += 1) {
     for (let col = 0; col < tile.categoryOrdinal[row].length; col += 1) {
@@ -309,6 +314,7 @@ export function getArtifactMaxCategory(
 ): ArtifactRiskCategory | undefined {
   const tile = getArtifactHourTile(artifacts, forecastHour);
   if (!tile) return undefined;
+  if (!isGrid(tile.categoryOrdinal)) return undefined;
   let maxOrdinal = 0;
   tile.categoryOrdinal.forEach((row) => row.forEach((value) => {
     if (Number.isFinite(value)) maxOrdinal = Math.max(maxOrdinal, Number(value));
@@ -414,13 +420,25 @@ function categoryOrdinal(category: ArtifactRiskCategory): number {
   return 6;
 }
 
+function isGrid(grid: unknown): grid is number[][] {
+  return Array.isArray(grid) && grid.every((row) => Array.isArray(row));
+}
+
 function cellRing(tile: OutlookProbabilityTile, row: number, col: number): number[][] {
+  const latRow = Array.isArray(tile.lats[row]) ? tile.lats[row] : [];
+  const lonRow = Array.isArray(tile.lons[row]) ? tile.lons[row] : [];
+  const prevLatRow = Array.isArray(tile.lats[Math.max(0, row - 1)])
+    ? tile.lats[Math.max(0, row - 1)]
+    : [];
+  const nextLatRow = Array.isArray(tile.lats[Math.min(tile.lats.length - 1, row + 1)])
+    ? tile.lats[Math.min(tile.lats.length - 1, row + 1)]
+    : [];
   const lat = Number(tile.lats[row]?.[col]);
   const lon = Number(tile.lons[row]?.[col]);
-  const prevLon = Number(tile.lons[row]?.[Math.max(0, col - 1)]);
-  const nextLon = Number(tile.lons[row]?.[Math.min(tile.lons[row].length - 1, col + 1)]);
-  const prevLat = Number(tile.lats[Math.max(0, row - 1)]?.[col]);
-  const nextLat = Number(tile.lats[Math.min(tile.lats.length - 1, row + 1)]?.[col]);
+  const prevLon = Number(lonRow[Math.max(0, col - 1)]);
+  const nextLon = Number(lonRow[Math.min(Math.max(0, lonRow.length - 1), col + 1)]);
+  const prevLat = Number(prevLatRow[col]);
+  const nextLat = Number(nextLatRow[col]);
   const dx = Math.max(0.05, Math.abs((Number.isFinite(nextLon) ? nextLon : lon) - (Number.isFinite(prevLon) ? prevLon : lon)) / 2);
   const dy = Math.max(0.05, Math.abs((Number.isFinite(nextLat) ? nextLat : lat) - (Number.isFinite(prevLat) ? prevLat : lat)) / 2);
   const minLon = lon - dx / 2;
