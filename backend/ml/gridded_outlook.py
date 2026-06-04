@@ -1343,7 +1343,6 @@ def category_grid_from_probabilities(
     tornado = _hazard_ord("tornado", np.asarray(probabilities["tornado"], dtype=float))
     hail = _hazard_ord("hail", np.asarray(probabilities["hail"], dtype=float))
     wind = _hazard_ord("wind", np.asarray(probabilities["wind"], dtype=float))
-    severe_ord = np.maximum.reduce([tornado, hail, wind])
     organized_severe_mask = (
         (features.raw["mucape"] >= 500.0)
         & (features.raw["sfcDewpointF"] >= 52.0)
@@ -1380,6 +1379,49 @@ def category_grid_from_probabilities(
         & (features.raw["shear06Kt"] >= 45.0)
         & (features.raw["cin"] > -150.0)
     )
+    hail_slight_support = (
+        organized_severe_mask
+        & severe_kinematic_mask
+        & (features.raw["sfcDewpointF"] >= 55.0)
+        & (features.raw["cin"] > -175.0)
+        & (
+            ((features.raw["mucape"] >= 1500.0) & (features.raw["shear06Kt"] >= 38.0))
+            | (
+                (features.raw["mucape"] >= 900.0)
+                & (features.raw["shear06Kt"] >= 50.0)
+                & (features.raw["stormRelWindKt"] >= 25.0)
+            )
+        )
+    )
+    wind_slight_support = (
+        organized_severe_mask
+        & severe_kinematic_mask
+        & (features.raw["sfcDewpointF"] >= 55.0)
+        & (features.raw["cin"] > -175.0)
+        & (
+            (
+                (features.raw["mlcape"] >= 1250.0)
+                & (features.raw["shear06Kt"] >= 38.0)
+                & (features.raw["stormRelWindKt"] >= 24.0)
+            )
+            | (
+                (features.raw["mlcape"] >= 800.0)
+                & (features.raw["shear06Kt"] >= 50.0)
+                & (features.raw["stormRelWindKt"] >= 28.0)
+            )
+        )
+    )
+    hail = np.where(
+        hail_slight_support,
+        hail,
+        np.minimum(hail, SPC_RISK_LABELS.index("MRGL")),
+    )
+    wind = np.where(
+        wind_slight_support,
+        wind,
+        np.minimum(wind, SPC_RISK_LABELS.index("MRGL")),
+    )
+    severe_ord = np.maximum.reduce([tornado, hail, wind])
     severe_ord = np.where(organized_severe_mask, severe_ord, 0)
     kinematic_clamp = np.where(features.raw["mucape"] >= 1500.0, 2, 1)
     severe_ord = np.where(severe_kinematic_mask, severe_ord, np.minimum(severe_ord, kinematic_clamp))
@@ -1693,29 +1735,37 @@ def hazard_probability_shapes_from_grids(
         ndimage = None
 
     features: list[dict[str, Any]] = []
-    hazard_inputs: dict[str, tuple[np.ndarray, tuple[float, ...], np.ndarray]] = {
+    tornado_probability = np.asarray(probabilities.get("tornado", np.zeros(grid.shape)), dtype=float)
+    hail_probability = np.asarray(probabilities.get("hail", np.zeros(grid.shape)), dtype=float)
+    wind_probability = np.asarray(probabilities.get("wind", np.zeros(grid.shape)), dtype=float)
+    thunder_probability = _thunder_probability_from_category_grid(grid, lat_grid, lon_grid)
+    hazard_inputs: dict[str, tuple[np.ndarray, tuple[float, ...], np.ndarray, str]] = {
         "tornado": (
-            np.asarray(probabilities.get("tornado", np.zeros(grid.shape)), dtype=float),
+            tornado_probability,
             _TORNADO_PROBABILITY_THRESHOLDS,
-            grid >= SPC_RISK_LABELS.index("MRGL"),
+            _hazard_probability_support_mask(tornado_probability, _TORNADO_PROBABILITY_THRESHOLDS, ndimage),
+            "hazard_probability",
         ),
         "hail": (
-            np.asarray(probabilities.get("hail", np.zeros(grid.shape)), dtype=float),
+            hail_probability,
             _SEVERE_PROBABILITY_THRESHOLDS,
-            grid >= SPC_RISK_LABELS.index("MRGL"),
+            _hazard_probability_support_mask(hail_probability, _SEVERE_PROBABILITY_THRESHOLDS, ndimage),
+            "hazard_probability",
         ),
         "wind": (
-            np.asarray(probabilities.get("wind", np.zeros(grid.shape)), dtype=float),
+            wind_probability,
             _SEVERE_PROBABILITY_THRESHOLDS,
-            grid >= SPC_RISK_LABELS.index("MRGL"),
+            _hazard_probability_support_mask(wind_probability, _SEVERE_PROBABILITY_THRESHOLDS, ndimage),
+            "hazard_probability",
         ),
         "thunder": (
-            _thunder_probability_from_category_grid(grid, lat_grid, lon_grid),
+            thunder_probability,
             (0.30, 0.60, 0.90) if _is_philippines_grid(lat_grid, lon_grid) else _THUNDER_PROBABILITY_THRESHOLDS,
             grid >= SPC_RISK_LABELS.index("TSTM"),
+            "category_thunder",
         ),
     }
-    for hazard, (probability_grid, thresholds, support_mask) in hazard_inputs.items():
+    for hazard, (probability_grid, thresholds, support_mask, support_source) in hazard_inputs.items():
         masks = _threshold_masks_with_hierarchy(probability_grid, thresholds, support_mask, ndimage)
         settings_by_bucket: list[dict[str, int | float | bool]] = []
         generalized_masks: list[np.ndarray] = []
@@ -1791,6 +1841,7 @@ def hazard_probability_shapes_from_grids(
                         "tendrilPruneIterations": int(settings["tendrilPruneIterations"]),
                         "maximumHoleCells": int(settings["maximumHoleCells"]),
                         "minimumComponentCells": int(settings["minimumComponentCells"]),
+                        "supportSource": support_source,
                     },
                 },
             })
@@ -2094,6 +2145,32 @@ def _threshold_masks_with_hierarchy(
             expanded = ndimage.binary_dilation(expanded, structure=structure, iterations=1) & support
             masks[target_idx] |= expanded
     return masks
+
+
+def _hazard_probability_support_mask(
+    probability_grid: np.ndarray,
+    thresholds: tuple[float, ...],
+    ndimage: Any,
+) -> np.ndarray:
+    """Limit severe hazard contours to that hazard's own probability signal."""
+    probability = np.asarray(probability_grid, dtype=float)
+    if not thresholds:
+        return np.zeros(probability.shape, dtype=bool)
+    base = probability >= float(thresholds[0])
+    if ndimage is None or not np.any(base):
+        return base
+
+    support = base.copy()
+    higher = np.zeros(probability.shape, dtype=bool)
+    for threshold in thresholds[1:]:
+        higher |= probability >= float(threshold)
+    if np.any(higher):
+        support |= ndimage.binary_dilation(
+            higher,
+            structure=np.ones((3, 3), dtype=bool),
+            iterations=2,
+        )
+    return support
 
 
 def _thunder_probability_from_category_grid(

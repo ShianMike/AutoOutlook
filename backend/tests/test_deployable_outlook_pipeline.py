@@ -694,6 +694,45 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             ["MRGL", "SLGT", "ENH", "ENH", "MDT"],
         ])
 
+    def test_hail_wind_can_still_register_as_mrgl(self) -> None:
+        fields = small_fields((1, 2))
+        probabilities = {
+            "tornado": np.zeros((1, 2)),
+            "hail": np.array([[0.05, 0.0]]),
+            "wind": np.array([[0.0, 0.05]]),
+        }
+
+        categories = category_grid_from_probabilities(probabilities, gridded_features_from_fields(fields, forecast_hour=0))
+
+        self.assertEqual([[SPC_RISK_LABELS[int(v)] for v in row] for row in categories], [
+            ["MRGL", "MRGL"],
+        ])
+
+    def test_hail_wind_slgt_requires_hazard_specific_support(self) -> None:
+        fields = small_fields((1, 2))
+        probabilities = {
+            "tornado": np.zeros((1, 2)),
+            "hail": np.full((1, 2), 0.18),
+            "wind": np.full((1, 2), 0.18),
+        }
+
+        categories = category_grid_from_probabilities(probabilities, gridded_features_from_fields(fields, forecast_hour=0))
+
+        self.assertTrue(np.all(categories <= SPC_RISK_LABELS.index("MRGL")))
+
+        supported_fields = small_fields((1, 2))
+        supported_fields["cape_mu"] = np.full((1, 2), 1100.0)
+        supported_fields["cape_ml"] = np.full((1, 2), 900.0)
+        supported_fields["cape"] = np.full((1, 2), 850.0)
+        supported_fields["u500"] = np.full((1, 2), 35.0)
+        supported_fields["td2m"] = np.full((1, 2), 290.0)
+        supported_fields["srh03"] = np.full((1, 2), 200.0)
+        supported = gridded_features_from_fields(supported_fields, forecast_hour=0)
+
+        supported_categories = category_grid_from_probabilities(probabilities, supported)
+
+        self.assertTrue(np.all(supported_categories >= SPC_RISK_LABELS.index("SLGT")))
+
     def test_category_grid_gates_uncalibrated_high_end_risk(self) -> None:
         weak_fields = small_fields((1, 2))
         weak_fields["td2m"] = np.full((1, 2), 282.0)
@@ -2677,6 +2716,44 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertGreater(hail["15%"]["cellCount"], hail["15%"]["sourceCellCount"])
         self.assertGreater(hail["5%"]["cellCount"], hail["5%"]["sourceCellCount"])
         self.assertTrue(hail["15%"]["vectorization"]["hierarchyBuffersApplied"])
+        self.assertEqual(hail["15%"]["vectorization"]["supportSource"], "hazard_probability")
+
+    def test_hazard_probability_shapes_do_not_use_category_as_severe_support(self) -> None:
+        lats = np.linspace(30.0, 40.0, 40)
+        lons = np.linspace(-105.0, -95.0, 40)
+        category = np.full((40, 40), SPC_RISK_LABELS.index("SLGT"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.zeros((40, 40)),
+            "hail": np.zeros((40, 40)),
+            "wind": np.zeros((40, 40)),
+        }
+        probabilities["hail"][18:22, 18:22] = 0.30
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=1,
+        )
+
+        hail = {
+            feature["properties"]["label"]: feature["properties"]
+            for feature in shapes["features"]
+            if feature["properties"]["hazard"] == "hail"
+        }
+        thunder = [
+            feature["properties"]
+            for feature in shapes["features"]
+            if feature["properties"]["hazard"] == "thunder"
+        ]
+
+        self.assertLess(hail["5%"]["cellCount"], int(category.size * 0.10))
+        self.assertLess(hail["15%"]["cellCount"], int(category.size * 0.10))
+        self.assertEqual(hail["5%"]["vectorization"]["supportSource"], "hazard_probability")
+        self.assertTrue(all(item["vectorization"]["supportSource"] == "category_thunder" for item in thunder))
 
     def test_hazard_probability_shapes_generalize_nearby_contours(self) -> None:
         lats = np.linspace(25.0, 45.0, 40)
