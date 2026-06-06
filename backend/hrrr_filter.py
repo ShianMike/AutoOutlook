@@ -38,6 +38,7 @@ FULL_GRIB_PARAMS = [
     "var_UGRD",
     "var_VGRD",
     "var_HGT",
+    "var_REFC",
 ]
 FULL_LEVEL_PARAMS = [
     "lev_surface",
@@ -413,6 +414,8 @@ def _messages_to_fields(
             fields["srh01"] = np.clip(vals, 0.0, None)
         elif cat == 7 and param == 8 and _is_height_agl(msg, 3000.0):
             fields["srh03"] = np.clip(vals, 0.0, None)
+        elif cat == 16 and param in (5, 196):
+            fields["refc"] = vals
 
     if require_cape and "cape" not in fields:
         raise ValueError("HRRR GRIB payload did not contain surface CAPE")

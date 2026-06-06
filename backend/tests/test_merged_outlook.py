@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from backend.ml.merged_outlook import (
+    _spc_geojson_max_category_ordinal,
     merge_cycles_for_spc_window,
     resolve_merge_cycle_dirs,
     spc_d1_window,
@@ -48,12 +49,27 @@ def _make_spc_geojson(
     }
 
 
+class TestArchivedSpcSelection(unittest.TestCase):
+    def test_category_ordinal_recognizes_moderate_label(self) -> None:
+        geojson = {
+            "type": "FeatureCollection",
+            "features": [
+                {"properties": {"LABEL": "TSTM"}},
+                {"properties": {"LABEL": "ENH"}},
+                {"properties": {"LABEL": "MDT"}},
+            ],
+        }
+
+        self.assertEqual(_spc_geojson_max_category_ordinal(geojson), 5)
+
+
 def _make_probability_tile(
     category_grid: list[list[int]] | np.ndarray,
     lat_min: float = 30.0,
     lat_max: float = 45.0,
     lon_min: float = -105.0,
     lon_max: float = -85.0,
+    stride: int = 2,
 ) -> dict[str, Any]:
     grid = np.asarray(category_grid, dtype=int)
     rows, cols = grid.shape
@@ -61,6 +77,7 @@ def _make_probability_tile(
     lons = np.linspace(lon_min, lon_max, cols)
     lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
     return {
+        "stride": stride,
         "categoryOrdinal": grid.tolist(),
         "lats": lat_grid.tolist(),
         "lons": lon_grid.tolist(),
@@ -79,6 +96,7 @@ def _write_cycle_artifacts(
     ready_hours: list[int],
     grid: list[list[int]] | np.ndarray,
     status: str = "complete",
+    tile_stride: int = 2,
 ) -> Path:
     cycle_dir = root / cycle_name
     cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +111,7 @@ def _write_cycle_artifacts(
     for hour in ready_hours:
         hour_dir = cycle_dir / "hours" / f"f{hour:02d}"
         hour_dir.mkdir(parents=True, exist_ok=True)
-        tile = _make_probability_tile(grid)
+        tile = _make_probability_tile(grid, stride=tile_stride)
         (hour_dir / "probability_tile.json").write_text(json.dumps(tile), encoding="utf-8")
     return cycle_dir
 
@@ -196,6 +214,47 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             self.assertTrue((output / "merged_verification_summary.json").exists())
             self.assertTrue((output / "merged_d1_index.json").exists())
             self.assertTrue((output / "spc_day1_cat.geojson").exists())
+
+    def test_preserves_source_tile_stride_in_merged_tile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.array([[0, 1, 2], [1, 3, 4], [0, 2, 0], [0, 0, 0], [0, 0, 0]])
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                list(range(12, 19)),
+                grid,
+                tile_stride=2,
+            )
+            output = root / "output"
+            result = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(),
+                output_dir=output,
+            )
+            merged_tile = json.loads((output / "merged_probability_tile.json").read_text(encoding="utf-8"))
+            merged_index = json.loads((output / "merged_d1_index.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["tileStride"], 2)
+            self.assertEqual(merged_tile["stride"], 2)
+            self.assertEqual(merged_index["tileStride"], 2)
+
+    def test_accepts_custom_event_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_dir = _write_cycle_artifacts(root, "00z", "2026-06-03T00:00:00Z", list(range(12, 30)), grid)
+            result = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(),
+                window_valid=datetime(2026, 6, 3, 17, tzinfo=timezone.utc),
+                window_expire=datetime(2026, 6, 4, 4, tzinfo=timezone.utc),
+                target_date="2026-06-03",
+            )
+            contributing_hours = [item["forecastHour"] for item in result["contributingHours"]]
+            self.assertEqual(result["d1WindowValidISO"], "2026-06-03T17:00:00Z")
+            self.assertEqual(result["d1WindowExpireISO"], "2026-06-04T04:00:00Z")
+            self.assertEqual(contributing_hours, list(range(17, 29)))
 
     def test_filters_hours_outside_d1_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

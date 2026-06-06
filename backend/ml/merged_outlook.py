@@ -12,6 +12,7 @@ import requests
 
 from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
 from backend.ml.gridded_outlook import (
+    constrain_hazard_probability_shapes_to_risk_support,
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
 )
@@ -143,34 +144,39 @@ def fetch_archived_spc_day1_category(
     # Try 1200, then 1300, 1630, 2000, 0100.
     run_times = ["1200", "1300", "1630", "2000", "0100"]
     zip_url = None
-    zip_response = None
+    selected_run_time = None
+    category_geojson = None
+    selected_ordinal = -1
     last_error = None
 
     for run_time in run_times:
         url = f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}_{run_time}-geojson.zip"
         try:
             res = session.get(url, timeout=15)
-            if res.status_code == 200:
+            if res.status_code != 200:
+                continue
+            import io
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                cat_name = next(
+                    name for name in zf.namelist()
+                    if name.endswith("_cat.nolyr.geojson") or name.endswith("day1otlk_cat.nolyr.geojson")
+                )
+                candidate_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
+            candidate_ordinal = _spc_geojson_max_category_ordinal(candidate_geojson)
+            if candidate_ordinal > selected_ordinal:
                 zip_url = url
-                zip_response = res
-                break
+                selected_run_time = run_time
+                category_geojson = candidate_geojson
+                selected_ordinal = candidate_ordinal
         except Exception as exc:
             last_error = exc
 
-    if not zip_response:
+    if category_geojson is None:
         raise ValueError(
             f"Could not find SPC Day 1 archive zip for date {date_str}. "
             f"Tried run times {run_times}. Last error: {last_error}"
         )
-
-    import io
-    import zipfile
-    with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zf:
-        cat_name = next(
-            name for name in zf.namelist()
-            if name.endswith("_cat.nolyr.geojson") or name.endswith("day1otlk_cat.nolyr.geojson")
-        )
-        category_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
 
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,15 +184,41 @@ def fetch_archived_spc_day1_category(
         (output_dir / "spc_source.json").write_text(json.dumps({
             "day1Url": f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}.html",
             "geojsonZipUrl": zip_url,
+            "selectedIssueTimeUTC": selected_run_time,
             "fetchedAtISO": _now_iso(),
         }, indent=2), encoding="utf-8")
 
     return {
         "day1Url": f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}.html",
         "geojsonZipUrl": zip_url,
+        "selectedIssueTimeUTC": selected_run_time,
         "fetchedAtISO": _now_iso(),
         "categoryGeojson": category_geojson,
     }
+
+
+def _spc_geojson_max_category_ordinal(category_geojson: Mapping[str, Any]) -> int:
+    category_order = {
+        "NONE": 0,
+        "TSTM": 1,
+        "MRGL": 2,
+        "SLGT": 3,
+        "ENH": 4,
+        "MDT": 5,
+        "MOD": 5,
+        "HIGH": 6,
+    }
+    return max(
+        (
+            category_order.get(
+                str(feature.get("properties", {}).get("LABEL") or "").upper(),
+                0,
+            )
+            for feature in category_geojson.get("features", [])
+            if isinstance(feature, Mapping)
+        ),
+        default=0,
+    )
 
 
 def merge_cycles_for_spc_window(
@@ -195,6 +227,8 @@ def merge_cycles_for_spc_window(
     session: requests.Session | None = None,
     output_dir: Path | None = None,
     target_date: Any | None = None,
+    window_valid: datetime | None = None,
+    window_expire: datetime | None = None,
 ) -> dict[str, Any]:
     """Merge per-hour category grids from multiple cycles and compare to SPC D1.
 
@@ -224,7 +258,13 @@ def merge_cycles_for_spc_window(
             target_date = date.fromisoformat(target_date)
 
         # 1. Determine SPC Day 1 window bounds
-        if target_date is not None:
+        if (window_valid is None) != (window_expire is None):
+            raise ValueError("window_valid and window_expire must be provided together")
+        window_expire_inclusive = window_valid is not None and window_expire is not None
+        if window_valid is not None and window_expire is not None:
+            d1_valid = window_valid.astimezone(timezone.utc)
+            d1_expire = window_expire.astimezone(timezone.utc)
+        elif target_date is not None:
             d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
             d1_expire = d1_valid + timedelta(days=1)
         else:
@@ -242,11 +282,18 @@ def merge_cycles_for_spc_window(
                     geo = json.loads(cached_geojson_path.read_text(encoding="utf-8"))
                     if d1_valid is not None:
                         cv, ce = spc_d1_window(geo)
-                        if cv == d1_valid:
+                        date_matches = target_date is not None and cv.date() == target_date
+                        if cv == d1_valid or (window_valid is not None and date_matches):
+                            day1_url = (
+                                f"https://www.spc.noaa.gov/products/outlook/archive/{target_date.year}/"
+                                f"day1otlk_{target_date.strftime('%Y%m%d')}.html"
+                                if target_date is not None
+                                else None
+                            )
                             spc_geojson = geo
                             spc = {
                                 "categoryGeojson": geo,
-                                "day1Url": f"https://www.spc.noaa.gov/products/outlook/archive/{target_date.year}/day1otlk_{target_date.strftime('%Y%m%d')}.html",
+                                "day1Url": day1_url,
                                 "fetchedAtISO": _now_iso(),
                             }
                             break
@@ -296,6 +343,7 @@ def merge_cycles_for_spc_window(
         contributing_hours: list[dict[str, Any]] = []
         merged_cycles: list[str] = []
         grid_shape: tuple[int, ...] | None = None
+        source_tile_stride: int | None = None
 
         for cycle_dir in cycle_dirs:
             index = _read_index(cycle_dir)
@@ -312,7 +360,12 @@ def merge_cycles_for_spc_window(
             cycle_contributed = False
             for forecast_hour in sorted(ready_hours):
                 valid_time = cycle_time + timedelta(hours=forecast_hour)
-                if not (d1_valid <= valid_time < d1_expire):
+                in_window = (
+                    d1_valid <= valid_time <= d1_expire
+                    if window_expire_inclusive
+                    else d1_valid <= valid_time < d1_expire
+                )
+                if not in_window:
                     continue
                 tile_path = cycle_dir / "hours" / f"f{forecast_hour:02d}" / "probability_tile.json"
                 tile = _read_json(tile_path)
@@ -322,6 +375,9 @@ def merge_cycles_for_spc_window(
                     hour_lats, hour_lons, category_grid = _tile_grid_payload(tile)
                 except (ValueError, KeyError):
                     continue
+                tile_stride = _positive_int(tile.get("stride"))
+                if tile_stride is not None:
+                    source_tile_stride = tile_stride if source_tile_stride is None else min(source_tile_stride, tile_stride)
 
                 if grid_shape is None:
                     grid_shape = category_grid.shape
@@ -381,6 +437,10 @@ def merge_cycles_for_spc_window(
             forecast_hour=0,
             valid_time_iso=valid_time_str,
         )
+        merged_hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(
+            merged_hazard_shapes,
+            merged_risk_polygons,
+        )
 
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
         summary["mergedCycles"] = merged_cycles
@@ -394,6 +454,7 @@ def merge_cycles_for_spc_window(
         summary["spcFetchedAfterPredictionArtifacts"] = True
         summary["generatedAtISO"] = _now_iso()
         summary["latencyMs"] = int((time.perf_counter() - started) * 1000)
+        summary["tileStride"] = source_tile_stride
 
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -408,7 +469,7 @@ def merge_cycles_for_spc_window(
             merged_probability_tile = {
                 "forecastHour": 0,
                 "validTimeISO": valid_time_str,
-                "stride": 4,
+                "stride": source_tile_stride or 4,
                 "shape": list(merged_grid.shape),
                 "lats": tile_lats.tolist(),
                 "lons": tile_lons.tolist(),
@@ -432,6 +493,7 @@ def merge_cycles_for_spc_window(
                 "mergeMethod": "maximum",
                 "spcDay1Url": spc.get("day1Url"),
                 "latencyMs": summary["latencyMs"],
+                "tileStride": source_tile_stride,
             })
 
         return summary
@@ -511,6 +573,14 @@ def _int_list(value: Any) -> list[int]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _now_iso() -> str:

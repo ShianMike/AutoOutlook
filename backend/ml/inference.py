@@ -31,6 +31,7 @@ def _status_from_metadata(metadata: Mapping[str, Any], active: bool, reason: str
         "featureSchemaVersion": metadata.get("featureSchemaVersion"),
         "artifactType": metadata.get("artifactType", "xgboost_joblib"),
         "trainingRows": _training_rows(metadata),
+        "allowBootstrapRuntime": bool(metadata.get("allowBootstrapRuntime", False)),
     }
     if isinstance(metadata.get("datasetQuality"), Mapping):
         status["datasetQuality"] = dict(metadata["datasetQuality"])

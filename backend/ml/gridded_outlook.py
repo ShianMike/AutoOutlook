@@ -33,6 +33,7 @@ _DISPLAY_BAND_GAP_METERS = 10_000.0
 _LOWER_OWNED_BOUNDARY_METERS = 5_000.0
 _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
 _DISPLAY_BAND_CRS = "EPSG:5070"
+_MIN_SERIALIZED_RING_AREA_DEG2 = 1e-5
 _PROBABILITY_COLORS = {
     "tornado": ("#3b9b3b", "#a87d4f", "#d4ad7c", "#cf2727", "#c43eb1", "#6e0099", "#4b006b"),
     "hail": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
@@ -188,6 +189,8 @@ def gridded_features_from_fields(
         "hgt500": hgt500,
     }
     raw = {key: _finite(raw_value, _default_for(key)) for key, raw_value in raw.items()}
+    if "refc" in fields:
+        raw["refc"] = _finite(np.asarray(fields["refc"], dtype=float), 0.0)
     normalized = {key: normalize_feature(key, value) for key, value in raw.items()}
     matrix = np.column_stack([raw[name].reshape(-1) for name in FEATURE_NAMES]).astype(float)
     if lons is not None and np.any(lons > 0):
@@ -1266,6 +1269,21 @@ def apply_environmental_probability_caps(
         "pacificNorthwestColdCoreCells": int(np.sum(new_regions["pnw_cold_core"])),
         "pacificNorthwestTerrainForcedClippedCells": int(np.sum(new_regions["pnw_terrain_forced_clip"])),
     }
+
+    # Convective Initiation Guard: suppress severe hazard probabilities if HRRR predicts no active storm cells (REFC < 15.0 dBZ)
+    if "refc" in features.raw:
+        refc_val = features.raw["refc"]
+        try:
+            from scipy.ndimage import gaussian_filter
+            refc_val_filled = np.where(np.isnan(refc_val), -10.0, refc_val)
+            refc_val_smooth = gaussian_filter(refc_val_filled, sigma=2.0)
+        except Exception:
+            refc_val_smooth = refc_val
+
+        capped["tornado"] = np.where(refc_val_smooth < 15.0, np.minimum(capped["tornado"], 0.019), capped["tornado"])
+        capped["hail"] = np.where(refc_val_smooth < 15.0, np.minimum(capped["hail"], 0.049), capped["hail"])
+        capped["wind"] = np.where(refc_val_smooth < 15.0, np.minimum(capped["wind"], 0.049), capped["wind"])
+
     return ProbabilityCapResult(capped, report)
 
 
@@ -1854,6 +1872,137 @@ def merge_feature_collections(collections: list[dict[str, Any]]) -> dict[str, An
         "type": "FeatureCollection",
         "features": [feature for collection in collections for feature in collection.get("features", [])],
     }
+
+
+def constrain_hazard_probability_shapes_to_risk_support(
+    hazard_shapes: Mapping[str, Any],
+    risk_shapes: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Clip displayed hazard contours to their categorical support boundary."""
+    try:
+        from pyproj import Transformer
+        from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, shape
+        from shapely.ops import transform as shapely_transform
+        from shapely.ops import unary_union
+    except ImportError:
+        return dict(hazard_shapes)
+
+    to_projected = Transformer.from_crs("EPSG:4326", _DISPLAY_BAND_CRS, always_xy=True).transform
+    to_lonlat = Transformer.from_crs(_DISPLAY_BAND_CRS, "EPSG:4326", always_xy=True).transform
+    risk_by_ordinal: dict[int, list[Any]] = {}
+    risk_lonlat_by_ordinal: dict[int, list[Any]] = {}
+    for feature in risk_shapes.get("features", []):
+        props = feature.get("properties", {})
+        try:
+            ordinal = int(props.get("ordinal", SPC_RISK_LABELS.index(str(props.get("category", "NONE")))))
+            lonlat = _clean_projected_geometry(shape(feature.get("geometry")))
+            projected = _clean_projected_geometry(
+                shapely_transform(to_projected, lonlat)
+            )
+        except (TypeError, ValueError):
+            continue
+        if not lonlat.is_empty:
+            risk_lonlat_by_ordinal.setdefault(ordinal, []).append(lonlat)
+        if not projected.is_empty:
+            risk_by_ordinal.setdefault(ordinal, []).append(projected)
+
+    support_by_ordinal: dict[int, Any] = {}
+    support_lonlat_by_ordinal: dict[int, Any] = {}
+    for required_ordinal in (SPC_RISK_LABELS.index("TSTM"), SPC_RISK_LABELS.index("MRGL")):
+        pieces = [
+            geometry
+            for ordinal, geometries in risk_by_ordinal.items()
+            if ordinal >= required_ordinal
+            for geometry in geometries
+        ]
+        support_by_ordinal[required_ordinal] = (
+            _clean_projected_geometry(unary_union(pieces))
+            if pieces
+            else GeometryCollection()
+        )
+        lonlat_pieces = [
+            geometry
+            for ordinal, geometries in risk_lonlat_by_ordinal.items()
+            if ordinal >= required_ordinal
+            for geometry in geometries
+        ]
+        support_lonlat_by_ordinal[required_ordinal] = (
+            _clean_projected_geometry(unary_union(lonlat_pieces))
+            if lonlat_pieces
+            else GeometryCollection()
+        )
+
+    constrained: list[dict[str, Any]] = []
+    for feature in hazard_shapes.get("features", []):
+        props = dict(feature.get("properties", {}))
+        hazard = str(props.get("hazard", "")).lower()
+        try:
+            probability = float(props.get("probability", props.get("threshold", 0.0)))
+        except (TypeError, ValueError):
+            probability = 0.0
+        required_ordinal = (
+            SPC_RISK_LABELS.index("TSTM")
+            if (
+                hazard in {"thunder", "thunderstorm"}
+                or (hazard in {"hail", "wind"} and probability <= 0.0500001)
+            )
+            else SPC_RISK_LABELS.index("MRGL")
+        )
+        support = support_by_ordinal[required_ordinal]
+        if support.is_empty:
+            continue
+        try:
+            projected = _clean_projected_geometry(
+                shapely_transform(to_projected, shape(feature.get("geometry")))
+            )
+        except (TypeError, ValueError):
+            continue
+        clipped = _clean_projected_geometry(projected.intersection(support))
+        if clipped.is_empty:
+            continue
+        lonlat_geom = _clean_projected_geometry(shapely_transform(to_lonlat, clipped))
+        geometry = _geojson_geometry_from_shapely(
+            lonlat_geom,
+            Polygon,
+            MultiPolygon,
+            GeometryCollection,
+        )
+        if geometry is None:
+            continue
+        serialized_shape = _clean_projected_geometry(shape(geometry))
+        serialized_polygons = _projected_polygons(serialized_shape)
+        if not serialized_polygons:
+            continue
+        serialized_shape = _clean_projected_geometry(unary_union(serialized_polygons))
+        if serialized_shape.is_empty:
+            continue
+        serialized_shape = _clean_projected_geometry(
+            serialized_shape.intersection(support_lonlat_by_ordinal[required_ordinal])
+        )
+        serialized_polygons = _projected_polygons(serialized_shape)
+        if not serialized_polygons:
+            continue
+        serialized_shape = _clean_projected_geometry(unary_union(serialized_polygons))
+        geometry = _geojson_geometry_from_shapely(
+            serialized_shape,
+            Polygon,
+            MultiPolygon,
+            GeometryCollection,
+        )
+        if geometry is None:
+            continue
+        vectorization = dict(props.get("vectorization") or {})
+        vectorization["categoricalSupportClipped"] = True
+        vectorization["minimumSupportCategory"] = SPC_RISK_LABELS[required_ordinal]
+        props["vectorization"] = vectorization
+        props["componentCount"] = _projected_component_count(clipped)
+        props["displayAreaKm2"] = round(float(clipped.area) / 1_000_000.0, 1)
+        constrained.append({
+            **feature,
+            "geometry": geometry,
+            "properties": props,
+        })
+    return {"type": "FeatureCollection", "features": constrained}
 
 
 def probability_tile(
@@ -2469,6 +2618,10 @@ def _mask_polygons(
 
 
 def _rings_geometry(rings: list[list[list[float]]]) -> dict[str, Any]:
+    rings = [
+        ring for ring in rings
+        if _serialized_ring_area_ok(ring)
+    ]
     if len(rings) == 1:
         return {"type": "Polygon", "coordinates": [rings[0]]}
     return {"type": "MultiPolygon", "coordinates": [[ring] for ring in rings]}
@@ -2724,20 +2877,20 @@ def _subtract_next_higher_display_gap(
 def _risk_display_geometry_settings(ordinal: int) -> dict[str, float]:
     return {
         "smoothMeters": {
-            1: 12_000.0,
-            2: 11_000.0,
-            3: 9_000.0,
-            4: 7_500.0,
-            5: 6_000.0,
-            6: 5_000.0,
+            1: 18_000.0,
+            2: 16_000.0,
+            3: 12_000.0,
+            4: 10_000.0,
+            5: 8_000.0,
+            6: 6_000.0,
         }.get(int(ordinal), 7_500.0),
         "simplifyMeters": {
-            1: 9_000.0,
-            2: 8_000.0,
-            3: 7_000.0,
-            4: 5_500.0,
-            5: 4_500.0,
-            6: 4_000.0,
+            1: 3_500.0,
+            2: 3_200.0,
+            3: 2_800.0,
+            4: 2_400.0,
+            5: 2_100.0,
+            6: 1_800.0,
         }.get(int(ordinal), 5_500.0),
         "supportMeters": {
             1: 45_000.0,
@@ -2760,8 +2913,8 @@ def _risk_display_geometry_settings(ordinal: int) -> dict[str, float]:
 
 def _probability_display_geometry_settings(bucket: int) -> dict[str, float]:
     idx = max(0, int(bucket))
-    smooth = (12_000.0, 11_000.0, 9_000.0, 7_500.0, 6_000.0, 5_000.0, 4_500.0)
-    simplify = (9_000.0, 8_000.0, 7_000.0, 5_500.0, 4_500.0, 4_000.0, 3_500.0)
+    smooth = (18_000.0, 16_000.0, 12_000.0, 10_000.0, 8_000.0, 6_000.0, 5_000.0)
+    simplify = (3_500.0, 3_200.0, 2_800.0, 2_400.0, 2_100.0, 1_800.0, 1_600.0)
     support = (45_000.0, 40_000.0, 35_000.0, 30_000.0, 25_000.0, 22_000.0, 20_000.0)
     area = (1_400.0, 1_000.0, 650.0, 420.0, 280.0, 200.0, 160.0)
     capped = min(idx, len(smooth) - 1)
@@ -2893,12 +3046,12 @@ def _geojson_geometry_from_shapely(
 
 def _geojson_polygon_rings(polygon: Any) -> list[list[list[float]]]:
     exterior = _normalize_exterior_ring(_round_ring_coords(list(polygon.exterior.coords)))
-    if len(exterior) < 4:
+    if len(exterior) < 4 or not _serialized_ring_area_ok(exterior):
         return []
     rings = [exterior]
     for interior in polygon.interiors:
         hole = _normalize_interior_ring(_round_ring_coords(list(interior.coords)))
-        if len(hole) >= 4:
+        if len(hole) >= 4 and _serialized_ring_area_ok(hole):
             rings.append(hole)
     return rings
 
@@ -2917,6 +3070,13 @@ def _normalize_interior_ring(coords: list[list[float]]) -> list[list[float]]:
     if out[0] != out[-1]:
         out.append(out[0])
     return out
+
+
+def _serialized_ring_area_ok(coords: list[list[float]]) -> bool:
+    if len(coords) < 4:
+        return False
+    ring = coords[:-1] if coords[0] == coords[-1] else coords
+    return abs(_signed_ring_area(ring)) >= _MIN_SERIALIZED_RING_AREA_DEG2
 
 
 def normalize_feature(name: str, values: np.ndarray) -> np.ndarray:

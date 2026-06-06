@@ -12,12 +12,13 @@ export const DOCS_NAV_ITEMS: DocsNavItem[] = [
   { id: 'docs-levels',         label: 'Risk Level Codex',      code: '02' },
   { id: 'docs-performance',    label: 'Model Skill',           code: '03' },
   { id: 'docs-spc-qc',         label: 'SPC QC Console',        code: '04' },
-  { id: 'docs-predictability', label: 'Predictability Window', code: '05' },
-  { id: 'docs-hazards',        label: 'Hazard Bands',          code: '06' },
-  { id: 'docs-sources',        label: 'Provider Chain',        code: '07' },
-  { id: 'docs-glossary',       label: 'Ingredients Glossary',  code: '08' },
-  { id: 'docs-disclaimer',     label: 'Verification & Notes',  code: '09' },
-  { id: 'docs-research',       label: 'Research Sources',      code: '10' },
+  { id: 'docs-enh-verification', label: '2026 Risk Archive',   code: '05' },
+  { id: 'docs-predictability', label: 'Predictability Window', code: '06' },
+  { id: 'docs-hazards',        label: 'Hazard Bands',          code: '07' },
+  { id: 'docs-sources',        label: 'Provider Chain',        code: '08' },
+  { id: 'docs-glossary',       label: 'Ingredients Glossary',  code: '09' },
+  { id: 'docs-disclaimer',     label: 'Verification & Notes',  code: '10' },
+  { id: 'docs-research',       label: 'Research Sources',      code: '11' },
 ];
 
 export default function DocsSidebar() {

@@ -84,6 +84,7 @@ SELECTED_HRRR_TERMS = (
     ":HGT:700 mb:",
     ":HGT:1000 mb:",
     ":PRES:surface:",
+    ":REFC:entire atmosphere:",
 )
 
 REQUIRED_HRRR_TERMS = (
@@ -123,6 +124,7 @@ REQUIRED_FIELD_KEYS = (
     "v500",
     "hgt500",
 )
+
 
 
 @dataclass(frozen=True)
@@ -760,6 +762,7 @@ def _validate_plausibility(key: str, finite: np.ndarray) -> None:
         "hgt1000": (-500.0, 1200.0),
         "srh01": (0.0, 5000.0),
         "srh03": (0.0, 7000.0),
+        "refc": (-15.0, 95.0),
     }
     if key not in limits:
         return

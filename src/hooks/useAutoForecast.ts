@@ -16,7 +16,7 @@ export interface AutoForecastState {
   refreshNow: () => void;
 }
 
-export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForecastState {
+export function useAutoForecast(activeRegion: ActiveRegion = 'conus', enabled = true): AutoForecastState {
   const [bundle, setBundle] = useState<ForecastBundle | null>(null);
   const [status, setStatus] = useState<FetchStatus>('idle');
   const [attempted, setAttempted] = useState<FetchResult['attemptedProviders']>([]);
@@ -24,9 +24,22 @@ export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForec
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
 
   const isMountedRef = useRef(true);
+  const enabledRef = useRef(enabled);
   const activeRegionRef = useRef(activeRegion);
   const previousRegionRef = useRef(activeRegion);
   const inflightRef = useRef<{ region: ActiveRegion; promise: Promise<void> } | null>(null);
+
+  useEffect(() => {
+    enabledRef.current = enabled;
+    if (!enabled) {
+      setBundle(null);
+      setStatus('idle');
+      setAttempted([]);
+      setErrorMsg(null);
+      setLastFetchedAt(null);
+      previousRegionRef.current = activeRegion;
+    }
+  }, [activeRegion, enabled]);
 
   useEffect(() => {
     activeRegionRef.current = activeRegion;
@@ -40,6 +53,7 @@ export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForec
   }, [activeRegion]);
 
   const doFetch = useCallback(async () => {
+    if (!enabled) return;
     const requestRegion = activeRegion;
     const currentInflight = inflightRef.current;
     if (currentInflight?.region === requestRegion) return currentInflight.promise;
@@ -47,14 +61,14 @@ export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForec
     const job = (async () => {
       try {
         const result = await fetchLatestForecast(requestRegion);
-        if (!isMountedRef.current || activeRegionRef.current !== requestRegion) return;
+        if (!isMountedRef.current || !enabledRef.current || activeRegionRef.current !== requestRegion) return;
         setBundle(result.bundle);
         setAttempted(result.attemptedProviders);
         setLastFetchedAt(new Date());
         setStatus('success');
         setErrorMsg(null);
       } catch (err) {
-        if (!isMountedRef.current || activeRegionRef.current !== requestRegion) return;
+        if (!isMountedRef.current || !enabledRef.current || activeRegionRef.current !== requestRegion) return;
         setStatus('error');
         setErrorMsg(err instanceof Error ? err.message : String(err));
       }
@@ -67,17 +81,22 @@ export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForec
         inflightRef.current = null;
       }
     }
-  }, [activeRegion]);
+  }, [activeRegion, enabled]);
 
   useEffect(() => {
     isMountedRef.current = true;
+    if (!enabled) {
+      return () => {
+        isMountedRef.current = false;
+      };
+    }
     void doFetch();
     const id = setInterval(() => { void doFetch(); }, REFRESH_INTERVAL_MS);
     return () => {
       isMountedRef.current = false;
       clearInterval(id);
     };
-  }, [doFetch]);
+  }, [doFetch, enabled]);
 
   return {
     bundle,
@@ -86,6 +105,8 @@ export function useAutoForecast(activeRegion: ActiveRegion = 'conus'): AutoForec
     errorMsg,
     lastFetchedAt,
     refreshIntervalMs: REFRESH_INTERVAL_MS,
-    refreshNow: () => { void doFetch(); },
+    refreshNow: () => {
+      if (enabledRef.current) void doFetch();
+    },
   };
 }

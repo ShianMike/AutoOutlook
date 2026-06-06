@@ -1,7 +1,8 @@
 import { Fragment, useMemo } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, UpperAirVector } from '../types/forecast';
-import type { OutlookArtifacts, SpcStormReport } from '../types/outlookArtifacts';
+import type { OutlookArtifacts, OutlookProbabilityShapeFeatureCollection, SpcStormReport } from '../types/outlookArtifacts';
+import type { SpcComparisonMode } from './GeneratedOutlookMap';
 import {
   artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
@@ -11,6 +12,8 @@ import {
   getArtifactHourTile,
   getArtifactThunderCoverage,
   measureArtifactBandRadius,
+  type ArtifactProbabilityFeature,
+  type ArtifactProbabilityFeatureCollection,
   type ArtifactHazardKey,
   type GeneratedArtifactHazardKey,
 } from '../utils/artifactProbabilities';
@@ -33,6 +36,8 @@ interface GeneratedHazardProbabilityMapProps {
   activeRegion?: ActiveRegion;
   stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
   stormReports?: SpcStormReport[];
+  comparisonMode?: SpcComparisonMode;
+  spcHazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection | null;
 }
 
 export function hasGeneratedHazardTile(
@@ -53,6 +58,8 @@ export default function GeneratedHazardProbabilityMap({
   activeRegion = 'conus',
   stormReportsMode = 'none',
   stormReports = [],
+  comparisonMode = 'auto',
+  spcHazardProbabilityShapes = null,
 }: GeneratedHazardProbabilityMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
@@ -84,7 +91,37 @@ export default function GeneratedHazardProbabilityMap({
     () => vectorFeatureCollection ?? tileFeatureCollection,
     [tileFeatureCollection, vectorFeatureCollection],
   );
+  const spcFeatureCollection = useMemo(
+    () => spcHazardShapesToFeatureCollection(spcHazardProbabilityShapes, hazard),
+    [hazard, spcHazardProbabilityShapes],
+  );
+  const hasSpcHazardLayer = hazard !== 'thunder' && spcFeatureCollection.features.length > 0;
+  const effectiveComparisonMode = hasSpcHazardLayer ? comparisonMode : 'auto';
+  const showAutoLayer = effectiveComparisonMode !== 'spc';
+  const showSpcFillLayer = effectiveComparisonMode === 'spc';
+  const showSpcOutlineLayer = effectiveComparisonMode === 'overlay';
   const usingVectorProbability = Boolean(vectorFeatureCollection);
+  const vectorPeakProbability = useMemo(
+    () => vectorFeatureCollection?.features.reduce((peak, feature) => {
+      const probability = Number(feature.properties.probability);
+      return Number.isFinite(probability) ? Math.max(peak, probability) : peak;
+    }, 0),
+    [vectorFeatureCollection],
+  );
+  const categoryCountCoverage = useMemo(() => {
+    const hour = artifacts?.probabilityTiles?.hours.find(
+      (candidate) => candidate.forecastHour === displayForecastHour,
+    );
+    const counts = hour?.categoryCounts;
+    if (!counts) return undefined;
+    const total = Object.values(counts).reduce((sum, value) => {
+      const count = Number(value);
+      return Number.isFinite(count) && count > 0 ? sum + count : sum;
+    }, 0);
+    const none = Number(counts.NONE ?? 0);
+    if (total <= 0 || !Number.isFinite(none)) return undefined;
+    return Math.max(0, Math.min(1, (total - none) / total));
+  }, [artifacts, displayForecastHour]);
   // SIG (significant severe) overlay: a SINGLE smooth blob anchored at the
   // peak hazard cell and OFFSET along a per-hazard axis, so the SIG core has
   // its own location instead of perfectly overlaying every ENH+ cell.
@@ -140,13 +177,22 @@ export default function GeneratedHazardProbabilityMap({
     };
   }, [artifacts, tile, displayForecastHour, hazard, cfg.sigThreshold, snapshot?.ingredients, snapshot?.region]);
   const peakProb = hazard === 'thunder'
-    ? getArtifactThunderCoverage(tile) ?? 0
-    : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? 0;
+    ? getArtifactThunderCoverage(tile) ?? categoryCountCoverage ?? vectorPeakProbability ?? 0
+    : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? vectorPeakProbability ?? 0;
+  const spcPeakProb = useMemo(
+    () => spcFeatureCollection.features.reduce((peak, feature) => {
+      const probability = Number(feature.properties.probability);
+      return Number.isFinite(probability) ? Math.max(peak, probability) : peak;
+    }, 0),
+    [spcFeatureCollection],
+  );
   const peakPct = formatProbabilityMetric(
-    peakProb,
+    showSpcFillLayer ? spcPeakProb : peakProb,
     hazard === 'thunder' ? undefined : cfg.thresholds[0],
   );
-  const metricLabel = hazard === 'thunder' ? `COVER ${peakPct}` : `PEAK ${peakPct}`;
+  const metricLabel = hazard === 'thunder'
+    ? `COVER ${peakPct}`
+    : `${showSpcFillLayer ? 'SPC' : 'PEAK'} ${peakPct}`;
   const headerTitle = title.replace(/\s+Outlook$/i, '');
   const legendItems = cfg.thresholds.map((threshold, i) => ({ label: cfg.labels[i], color: cfg.colors[i], threshold }));
   const upperAirLines = useMemo(() => map500mbLines(snapshot), [snapshot]);
@@ -237,7 +283,7 @@ export default function GeneratedHazardProbabilityMap({
             </Geographies>
           )}
 
-          {featureCollection.features.length > 0 && (
+          {showAutoLayer && featureCollection.features.length > 0 && (
             <Geographies geography={featureCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
@@ -283,6 +329,38 @@ export default function GeneratedHazardProbabilityMap({
                         }}
                       />
                     </Fragment>
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {(showSpcFillLayer || showSpcOutlineLayer) && spcFeatureCollection.features.length > 0 && (
+            <Geographies geography={spcFeatureCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const color = geo.properties.color as string;
+                  const spcStyle = {
+                    fill: showSpcFillLayer ? color : 'none',
+                    fillOpacity: showSpcFillLayer ? 0.72 : 0,
+                    stroke: showSpcOutlineLayer ? color : 'none',
+                    strokeWidth: showSpcOutlineLayer ? 2.1 : 0,
+                    strokeOpacity: showSpcOutlineLayer ? 0.95 : 0,
+                    strokeDasharray: showSpcOutlineLayer ? '7 4' : undefined,
+                    outline: 'none',
+                    pointerEvents: 'none' as const,
+                  };
+                  return (
+                    <Geography
+                      key={`spc-hazard-prob-${hazard}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: spcStyle,
+                        hover: spcStyle,
+                        pressed: spcStyle,
+                      }}
+                    />
                   );
                 })
               }
@@ -573,6 +651,28 @@ export default function GeneratedHazardProbabilityMap({
       </div>
     </div>
   );
+}
+
+function spcHazardShapesToFeatureCollection(
+  collection: OutlookProbabilityShapeFeatureCollection | null,
+  hazard: GeneratedHazardKey,
+): ArtifactProbabilityFeatureCollection {
+  if (!collection || hazard === 'thunder') return { type: 'FeatureCollection', features: [] };
+  const features = collection.features
+    .filter((feature) => feature.properties.hazard === hazard)
+    .map((feature): ArtifactProbabilityFeature => ({
+      type: 'Feature',
+      geometry: feature.geometry,
+      properties: {
+        hazard,
+        probability: Number(feature.properties.probability),
+        bucket: Number(feature.properties.bucket),
+        label: feature.properties.label,
+        color: feature.properties.color,
+      },
+    }))
+    .sort((a, b) => a.properties.bucket - b.properties.bucket);
+  return { type: 'FeatureCollection', features };
 }
 
 function formatProbabilityMetric(probability: number, drawableThreshold?: number): string {

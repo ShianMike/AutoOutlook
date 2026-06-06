@@ -42,6 +42,7 @@ from backend.ml.gridded_outlook import (
     apply_environmental_probability_caps,
     apply_offshore_probability_suppression,
     category_grid_from_probabilities,
+    constrain_hazard_probability_shapes_to_risk_support,
     gridded_features_from_fields,
     hazard_probability_shapes_from_grids,
     postprocess_category_grid,
@@ -262,7 +263,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
     def test_selected_hrrr_terms_filter_only_requested_records(self) -> None:
         idx_text = "\n".join([
             "1:0:d=2024050412:CAPE:surface:anl:",
-            "2:100:d=2024050412:REFC:entire atmosphere:anl:",
+            "2:100:d=2024050412:XYZ:entire atmosphere:anl:",
             "3:200:d=2024050412:HLCY:3000-0 m above ground:anl:",
             "4:300:d=2024050412:TMP:850 mb:anl:",
             "5:400:d=2024050412:VGRD:500 mb:anl:",
@@ -277,7 +278,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         idx_text = "\n".join([
             "1:0:d=2024050412:CAPE:surface:anl:",
             "2:100:d=2024050412:CIN:surface:anl:",
-            "3:200:d=2024050412:REFC:entire atmosphere:anl:",
+            "3:200:d=2024050412:XYZ:entire atmosphere:anl:",
             "4:260:d=2024050412:DPT:2 m above ground:anl:",
             "5:360:d=2024050412:TMP:2 m above ground:anl:",
             "6:900:d=2024050412:UGRD:10 m above ground:anl:",
@@ -2689,6 +2690,106 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         for feature in hail:
             self.assertIn(feature["geometry"]["type"], {"Polygon", "MultiPolygon"})
             self.assertEqual(feature["properties"]["forecastHour"], 3)
+
+    def test_hazard_probability_shapes_are_clipped_to_categorical_support(self) -> None:
+        def square(x0: float, y0: float, x1: float, y1: float) -> dict:
+            return {
+                "type": "Polygon",
+                "coordinates": [[
+                    [x0, y0],
+                    [x1, y0],
+                    [x1, y1],
+                    [x0, y1],
+                    [x0, y0],
+                ]],
+            }
+
+        risk_shapes = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": square(-105.0, 30.0, -95.0, 40.0),
+                    "properties": {"category": "TSTM", "ordinal": 1},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": square(-103.0, 32.0, -97.0, 38.0),
+                    "properties": {"category": "MRGL", "ordinal": 2},
+                },
+            ],
+        }
+        hazard_shapes = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": square(-106.0, 29.0, -94.0, 41.0),
+                    "properties": {"hazard": "thunder", "probability": 0.10},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": square(-104.0, 31.0, -96.0, 39.0),
+                    "properties": {"hazard": "hail", "probability": 0.05},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": square(-104.0, 31.0, -96.0, 39.0),
+                    "properties": {"hazard": "wind", "probability": 0.05},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": square(-104.0, 31.0, -96.0, 39.0),
+                    "properties": {"hazard": "hail", "probability": 0.15},
+                },
+            ],
+        }
+
+        constrained = constrain_hazard_probability_shapes_to_risk_support(
+            hazard_shapes,
+            risk_shapes,
+        )
+        from shapely.geometry import shape
+
+        self.assertTrue(all(shape(feature["geometry"]).is_valid for feature in constrained["features"]))
+        by_hazard_probability = {
+            (
+                feature["properties"]["hazard"],
+                feature["properties"]["probability"],
+            ): projected_geojson_geometry(feature["geometry"])
+            for feature in constrained["features"]
+        }
+        tstm = projected_geojson_geometry(risk_shapes["features"][0]["geometry"])
+        mrgl = projected_geojson_geometry(risk_shapes["features"][1]["geometry"])
+
+        self.assertLess(by_hazard_probability[("thunder", 0.10)].difference(tstm).area, 1.0)
+        self.assertLess(by_hazard_probability[("hail", 0.05)].difference(tstm).area, 1.0)
+        self.assertLess(by_hazard_probability[("wind", 0.05)].difference(tstm).area, 1.0)
+        self.assertGreater(by_hazard_probability[("hail", 0.05)].difference(mrgl).area, 1.0)
+        self.assertGreater(by_hazard_probability[("wind", 0.05)].difference(mrgl).area, 1.0)
+        self.assertLess(by_hazard_probability[("hail", 0.15)].difference(mrgl).area, 1.0)
+        self.assertEqual(
+            next(
+                feature["properties"]["vectorization"]["minimumSupportCategory"]
+                for feature in constrained["features"]
+                if (
+                    feature["properties"]["hazard"] == "hail"
+                    and feature["properties"]["probability"] == 0.05
+                )
+            ),
+            "TSTM",
+        )
+        self.assertEqual(
+            next(
+                feature["properties"]["vectorization"]["minimumSupportCategory"]
+                for feature in constrained["features"]
+                if (
+                    feature["properties"]["hazard"] == "hail"
+                    and feature["properties"]["probability"] == 0.15
+                )
+            ),
+            "MRGL",
+        )
 
     def test_hazard_probability_shapes_add_lower_probability_support(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)

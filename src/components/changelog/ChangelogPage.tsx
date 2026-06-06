@@ -84,10 +84,52 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.0',
+    codename: '2026 Risk Archive, SPC Hazard Layers & OpenFetch Sponsor',
+    date: '2026-06-06',
+    status: 'CURRENT',
+    summary:
+      'This release promotes the historical ENH+ verification workflow into a dedicated 2026 Risk Archive, adds official SPC Day 1 hazard probability layers for tornado, hail, and wind comparison, fixes malformed hazard polygons, and updates the landing page with direct archive access plus an OpenFetch repository sponsor strip.',
+    highlights: [
+      '2026 Risk Archive: Added a direct landing-page path into the in-app documentation archive for March through May ENH+ verification cases.',
+      'Official SPC hazard probability layers: Hazard maps can compare AutoOutlook-only, SPC Day 1 only, or overlay mode for tornado, hail, and wind outlooks.',
+      'Storm report verification: Historical tornado, hail, and wind reports remain visible on the same dashboard-style map controls.',
+      'Polygon rendering fix: Tiny malformed rings are filtered before GeoJSON serialization, preventing full-screen hazard fills and straight-line artifacts.',
+      'OpenFetch sponsor strip: The landing page footer area now links out to the OpenFetch repository.',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: '2026 Risk Archive landing route',
+        body: 'Added prominent landing-page buttons and navigation links that open the 2026 historical risk archive directly inside the docs tab.',
+      },
+      {
+        kind: 'NEW',
+        title: 'SPC hazard outlook comparison',
+        body: 'Hardcoded historical archive data now includes official SPC tornado, hail, and wind probability shapes for SPC-only and overlay comparison modes.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Hazard polygon rendering cleanup',
+        body: 'Dropped sub-threshold serialized rings from generated GeoJSON so hail, wind, tornado, and thunderstorm layers do not paint full-screen artifacts.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'OpenFetch repository sponsor',
+        body: 'Added a bottom landing-page sponsor panel linking to the OpenFetch GitHub repository.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.0',
+        body: 'Updated package metadata, app footers, docs badges, landing copy, and the in-app changelog current release to v1.0.',
+      },
+    ],
+  },
+  {
     version: 'v0.9',
     codename: 'Multi-Cycle Merge, Verification Archives & Storm Reports',
     date: '2026-06-03',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release introduces dynamic multi-cycle merging for SPC Day 1 comparison, automatic NOAA/SPC verification archive fetching for historical dates, daily SPC storm reports (Tornado, Hail, Wind) overlay on all outlook and hazard maps, singleflight concurrency locking, and optimized static bundle exports.',
     highlights: [
@@ -1115,7 +1157,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.9
+          AutoOutlook · Automated Convective Risk Intelligence · v1.0
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

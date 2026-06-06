@@ -42,6 +42,7 @@ from backend.ml.gridded_outlook import (
     apply_regional_strict_category_caps,
     category_counts,
     category_grid_from_probabilities,
+    constrain_hazard_probability_shapes_to_risk_support,
     feature_stats,
     gridded_features_from_fields,
     hazard_probability_shapes_from_grids,
@@ -1095,6 +1096,10 @@ def _build_hour_artifact(
         risk_map_category_grid,
         forecast_hour,
         valid_time_iso,
+    )
+    hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(
+        hazard_shapes,
+        polygons,
     )
     tile = probability_tile(
         fetched.lats,

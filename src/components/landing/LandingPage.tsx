@@ -46,12 +46,18 @@ const CAPABILITIES: { tag: string; title: string; body: string; accent: string }
   },
   {
     tag: 'C-05',
-    title: 'SPC Overlay Compare',
-    body: 'Switch the map between AutoOutlook only, official SPC Day 1 only, or overlay comparison. QC hatches mark true agreement, underforecast, and overforecast regions.',
+    title: '2026 Risk Archive',
+    body: 'Static historical ENH+ verification maps for March through May 2026. Each case reuses the dashboard outlook map, SPC hazard outlook layers, and tornado / hail / wind reports.',
     accent: 'bg-signal-lime',
   },
   {
     tag: 'C-06',
+    title: 'SPC Overlay Compare',
+    body: 'Switch the map between AutoOutlook only, official SPC Day 1 only, or overlay comparison. QC hatches mark true agreement, underforecast, and overforecast regions.',
+    accent: 'bg-signal-cyan',
+  },
+  {
+    tag: 'C-07',
     title: 'Focused Operator Navigation',
     body: 'The sidebar now prioritizes the operational path: outlook map, primary forecast, hazards, parameters, timeline, discussion, SPC verification, and system status.',
     accent: 'bg-signal-violet',
@@ -130,6 +136,9 @@ const TECH_PILLS = [
   'WEBP TILES',
   'SPC VERIFICATION',
   'SPC OVERLAY QC',
+  '2026 RISK ARCHIVE',
+  'SPC HAZARD OUTLOOKS',
+  'STORM REPORTS',
   'CATEGORY LEDGER',
 ];
 
@@ -201,6 +210,9 @@ function LandingNav() {
           <a href="#changelog" onClick={go('#changelog')} className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-ink/70 hover:text-ink">
             Changelog
           </a>
+          <a href="#docs-enh-verification" onClick={go('#docs-enh-verification')} className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-ink/70 hover:text-ink">
+            Risk Archive
+          </a>
           <a href="#docs" onClick={go('#docs')} className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-ink/70 hover:text-ink">
             Docs
           </a>
@@ -240,7 +252,7 @@ function Hero() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v0.9 · MULTI-CYCLE</RetroBadge>
+            <RetroBadge tone="paper">v1.0 · RISK ARCHIVE</RetroBadge>
           </div>
 
           <h1 className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
@@ -258,7 +270,7 @@ function Hero() {
             AutoOutlook ingests the latest extended-range model cycle, derives the severe-weather ingredient deck,
             runs gated tornado / hail / wind probability heads, and publishes
             SPC-style risk polygons + probability tiles for forecast hours <span className="font-mono font-bold text-ink">f00–f48</span>.
-            v0.9 enables dynamic multi-cycle merging, historical verification archives, and SPC daily storm report overlays.
+            v1.0 adds the 2026 ENH+ risk archive with official SPC hazard outlook layers and storm-report verification maps.
           </p>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -275,6 +287,13 @@ function Hero() {
               className="retro-button !px-5 !py-3 text-base"
             >
               Read the Docs
+            </a>
+            <a
+              href="#docs-enh-verification"
+              onClick={go('#docs-enh-verification')}
+              className="retro-button !px-5 !py-3 text-base"
+            >
+              2026 Risk Archive
             </a>
             <a
               href="#pipeline"
@@ -324,7 +343,7 @@ function Hero() {
                   HAZARD PROBABILITY · F+12H
                 </span>
                 <span className="font-mono text-[9px] uppercase tracking-[0.25em] text-paper/40">
-                  TILE STRIDE 4
+                  TILE STRIDE 1
                 </span>
               </div>
               <ProbabilityTile />
@@ -431,12 +450,14 @@ function LiveTickerBand() {
     '► 12Z CYCLE · 49 OUTLOOKS PUBLISHED',
     '► HAZARD PROBABILITY HEADS · ACTIVE',
     '► SPC QC · AGREEMENT + DISPLACEMENT + LEDGER',
+    '► 2026 RISK ARCHIVE · ENH+ VERIFICATION MAPS',
+    '► SPC HAZARD OUTLOOKS · TORN / HAIL / WIND',
     '► OVERLAY COMPARE · AUTO / SPC / QC HATCH',
     '► PROVIDER CHAIN: LIVE → FALLBACK → MOCK',
     '► MAIN HAZARD · TORNADO · CONF 72%',
     '► RUN-LOCK CLEAR · NEXT REFRESH 27 MIN',
     '► CYCLE COMPLETE · F00–F48 READY',
-    '► VERIFICATION GRID · 40 KM',
+    '► GRID STRIDE 2 · TILE STRIDE 1',
   ];
   const span = (
     <div className="flex shrink-0">
@@ -820,7 +841,7 @@ function FinalCTA() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v0.9</RetroBadge>
+            <RetroBadge tone="amber">v1.0</RetroBadge>
           </div>
 
           <h2
@@ -834,6 +855,7 @@ function FinalCTA() {
           <p className="mt-6 max-w-[640px] font-sans text-base leading-relaxed text-paper/75 sm:text-lg">
             No sign-up. No tour. The dashboard auto-loads the latest cycle, renders the outlook, and gives the
             SPC agreement panel enough detail to see where AutoOutlook matched, missed, or overcalled the Day 1.
+            The 2026 archive keeps the historical ENH+ verification maps available from the same map controls.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -851,10 +873,58 @@ function FinalCTA() {
             >
               Read the Docs
             </a>
+            <a
+              href="#docs-enh-verification"
+              onClick={go('#docs-enh-verification')}
+              className="retro-button !border-paper !bg-transparent !text-paper !px-6 !py-3 text-base hover:!bg-paper hover:!text-ink"
+            >
+              Open 2026 Risk Archive
+            </a>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/50">
               ► EDUCATIONAL · NOT AN OFFICIAL FORECAST
             </span>
           </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Section: sponsor
+// ---------------------------------------------------------------------------
+
+function OpenFetchSponsor() {
+  return (
+    <section className="border-b-[3px] border-ink bg-signal-amber">
+      <div className="mx-auto grid max-w-[1400px] grid-cols-1 gap-px border-x-[3px] border-ink bg-ink sm:grid-cols-[1fr_auto]">
+        <div className="bg-signal-amber px-4 py-8 sm:px-6 lg:px-8">
+          <div className="flex flex-wrap items-center gap-2">
+            <RetroBadge tone="ink">Sponsor Repository</RetroBadge>
+            <RetroBadge tone="paper">OpenFetch</RetroBadge>
+          </div>
+          <h2 className="mt-4 font-display text-3xl font-extrabold uppercase leading-none tracking-tight text-ink sm:text-5xl">
+            Support OpenFetch.
+          </h2>
+          <p className="mt-4 max-w-[720px] font-sans text-base leading-relaxed text-ink/75 sm:text-lg">
+            OpenFetch is our companion repository for fast, practical fetch tooling. Sponsor, star, or inspect the source from the AutoOutlook landing page footer.
+          </p>
+        </div>
+        <div className="flex min-h-44 flex-col justify-between bg-paper p-5 sm:min-w-[360px]">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/50">Repository</div>
+            <div className="mt-2 break-all font-mono text-sm font-bold uppercase leading-relaxed text-ink">
+              github.com/ShianMike/OpenFetch
+            </div>
+          </div>
+          <a
+            href="https://github.com/ShianMike/OpenFetch"
+            target="_blank"
+            rel="noreferrer"
+            className="retro-button retro-button-primary mt-5 w-fit !px-5 !py-3 text-sm"
+          >
+            Open Repository
+          </a>
         </div>
       </div>
     </section>
@@ -870,12 +940,14 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v0.9
+          AutoOutlook · Automated Convective Risk Intelligence · v1.0
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>
+          <a href="#docs-enh-verification" onClick={go('#docs-enh-verification')} className="hover:text-paper">2026 Risk Archive</a>
           <a href="#docs" onClick={go('#docs')} className="hover:text-paper">Docs</a>
           <a href="#changelog" onClick={go('#changelog')} className="hover:text-paper">Changelog</a>
+          <a href="https://github.com/ShianMike/OpenFetch" target="_blank" rel="noreferrer" className="hover:text-paper">OpenFetch</a>
           <a href="#capabilities" className="hover:text-paper">Capabilities</a>
           <span>LIVE → FALLBACK → MOCK</span>
         </div>
@@ -931,6 +1003,7 @@ export default function LandingPage() {
         <ProviderChain />
         <TechStack />
         <FinalCTA />
+        <OpenFetchSponsor />
       </main>
       <LandingFooter />
     </div>

@@ -52,11 +52,104 @@ const HAZARD_THRESHOLD_TABLE: Record<HazardKey, [number, RiskCategory][]> = {
   flood:   FLOOD_THRESHOLDS,
 };
 
-export function lvlFromProb(hazard: HazardKey, p: number): RiskCategory {
+export function lvlFromProb(hazard: HazardKey, p: number, ing?: Ingredients): RiskCategory {
+  let best: RiskCategory = 'TSTM';
   for (const [thr, cat] of HAZARD_THRESHOLD_TABLE[hazard]) {
-    if (p >= thr) return cat;
+    if (p >= thr) {
+      best = cat;
+      break;
+    }
   }
-  return 'TSTM';
+  if (!ing || hazard === 'flood') {
+    return best;
+  }
+
+  const ords = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MOD', 'HIGH'];
+  let ord = ords.indexOf(best);
+
+  const mucape = ing.mucape ?? 0;
+  const mlcape = ing.mlcape ?? 0;
+  const sfcDewpointF = ing.sfcDewpointF ?? 0;
+  const shear06Kt = ing.shear06Kt ?? 0;
+  const cin = ing.cin ?? 0;
+  const srh01 = ing.srh01 ?? 0;
+  const srh03 = ing.srh03 ?? 0;
+  const stormRelWindKt = ing.stormRelWindKt ?? 0;
+
+  const organizedSevereMask =
+    mucape >= 500.0 &&
+    sfcDewpointF >= 52.0 &&
+    shear06Kt >= 25.0 &&
+    cin > -225.0;
+
+  const severeKinematicMask =
+    shear06Kt >= 30.0 &&
+    (stormRelWindKt >= 24.0 ||
+      srh01 >= 75.0 ||
+      srh03 >= 150.0 ||
+      (shear06Kt >= 50.0 && mucape >= 1000.0));
+
+  const significantSevereMask =
+    mucape >= 1250.0 &&
+    sfcDewpointF >= 55.0 &&
+    shear06Kt >= 35.0 &&
+    cin > -175.0;
+
+  const significantKinematicMask =
+    shear06Kt >= 40.0 &&
+    (stormRelWindKt >= 30.0 ||
+      srh01 >= 125.0 ||
+      srh03 >= 220.0 ||
+      (shear06Kt >= 55.0 && mucape >= 1750.0));
+
+  const highEndMask =
+    mucape >= 2200.0 &&
+    sfcDewpointF >= 59.0 &&
+    shear06Kt >= 45.0 &&
+    cin > -150.0;
+
+  // Apply hazard-specific slight support
+  if (hazard === 'hail') {
+    const hailSlightSupport =
+      organizedSevereMask &&
+      severeKinematicMask &&
+      sfcDewpointF >= 55.0 &&
+      cin > -175.0 &&
+      ((mucape >= 1500.0 && shear06Kt >= 38.0) ||
+        (mucape >= 900.0 && shear06Kt >= 50.0 && stormRelWindKt >= 25.0));
+    if (!hailSlightSupport) {
+      ord = Math.min(ord, ords.indexOf('MRGL'));
+    }
+  } else if (hazard === 'wind') {
+    const windSlightSupport =
+      organizedSevereMask &&
+      severeKinematicMask &&
+      sfcDewpointF >= 55.0 &&
+      cin > -175.0 &&
+      ((mlcape >= 1250.0 && shear06Kt >= 38.0 && stormRelWindKt >= 24.0) ||
+        (mlcape >= 800.0 && shear06Kt >= 50.0 && stormRelWindKt >= 28.0));
+    if (!windSlightSupport) {
+      ord = Math.min(ord, ords.indexOf('MRGL'));
+    }
+  }
+
+  // Apply overall category clamps
+  if (!organizedSevereMask) {
+    ord = 0; // TSTM
+  } else {
+    if (!severeKinematicMask) {
+      const kinematicClamp = mucape >= 1500.0 ? 1 : 0; // 1 = MRGL, 0 = TSTM
+      ord = Math.min(ord, kinematicClamp);
+    }
+    if (!(significantSevereMask && significantKinematicMask)) {
+      ord = Math.min(ord, 2); // 2 = SLGT
+    }
+    if (!(highEndMask && significantKinematicMask)) {
+      ord = Math.min(ord, 4); // 4 = MOD
+    }
+  }
+
+  return (ords[ord] ?? 'TSTM') as RiskCategory;
 }
 
 // ── SPC Significant Severe thresholds ───────────────────────────────
@@ -366,13 +459,35 @@ const EVALS: Record<HazardKey, (i: Ingredients) => RawHazard> = {
   flood:   floodEval,
 };
 
+export function capProbabilityToCategory(hazard: HazardKey, probability: number, level: RiskCategory): number {
+  if (hazard === 'flood') {
+    return probability;
+  }
+  const ords = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MOD', 'HIGH'];
+  const ord = ords.indexOf(level);
+  if (ord <= 1) { // NONE or TSTM
+    return Math.min(probability, hazard === 'tornado' ? 0.019 : 0.049);
+  } else if (ord === 2) { // MRGL
+    return Math.min(probability, hazard === 'tornado' ? 0.049 : 0.149);
+  } else if (ord === 3) { // SLGT
+    return Math.min(probability, hazard === 'tornado' ? 0.099 : 0.299);
+  } else if (ord === 4) { // ENH
+    return Math.min(probability, hazard === 'tornado' ? 0.299 : 0.599);
+  } else if (ord === 5) { // MOD
+    return Math.min(probability, hazard === 'tornado' ? 0.449 : 1.0);
+  }
+  return probability;
+}
+
 export function buildHazards(ing: Ingredients): Record<HazardKey, HazardAssessment> {
   const out: Partial<Record<HazardKey, HazardAssessment>> = {};
   (Object.keys(EVALS) as HazardKey[]).forEach((k) => {
     const r = EVALS[k](ing);
+    const level = lvlFromProb(k, r.probability, ing);
+    const probability = capProbabilityToCategory(k, r.probability, level);
     out[k] = {
-      level: lvlFromProb(k, r.probability),
-      probability: r.probability,
+      level,
+      probability,
       confidence: r.baseConf,
       significantSevere: k !== 'flood' && r.sigSevereProb >= SIG_SEVERE_PROB_THRESHOLD,
       supporting: r.supporting,

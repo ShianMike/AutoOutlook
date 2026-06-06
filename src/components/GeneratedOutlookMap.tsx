@@ -34,6 +34,7 @@ interface GeneratedOutlookMapProps {
   comparisonMode?: SpcComparisonMode;
   stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
   stormReports?: SpcStormReport[];
+  spcDay1Override?: SpcCategoryFeatureCollection | null;
 }
 
 function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
@@ -289,6 +290,7 @@ export default function GeneratedOutlookMap({
   comparisonMode = 'auto',
   stormReportsMode = 'none',
   stormReports = [],
+  spcDay1Override = null,
 }: GeneratedOutlookMapProps) {
   const [spcDay1, setSpcDay1] = useState<SpcCategoryFeatureCollection | null>(null);
   const [spcStatus, setSpcStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
@@ -307,8 +309,13 @@ export default function GeneratedOutlookMap({
   const showAutoLayer = effectiveComparisonMode === 'auto' || effectiveComparisonMode === 'overlay';
   const showSpcLayer = effectiveComparisonMode === 'spc' || effectiveComparisonMode === 'overlay';
   const isOverlayMode = effectiveComparisonMode === 'overlay';
+  const effectiveSpcDay1 = spcDay1Override ?? spcDay1;
 
   useEffect(() => {
+    if (spcDay1Override) {
+      setSpcStatus('ready');
+      return;
+    }
     if (!showSpcLayer) {
       if (!spcDay1) setSpcStatus('idle');
       return;
@@ -343,7 +350,7 @@ export default function GeneratedOutlookMap({
       });
 
     return () => controller.abort();
-  }, [showSpcLayer, spcDay1]);
+  }, [showSpcLayer, spcDay1, spcDay1Override]);
 
   const selectedTile = useMemo(
     () => getArtifactHourTile(artifacts, selectedForecastHour),
@@ -378,7 +385,7 @@ export default function GeneratedOutlookMap({
   const usingTileRisk = selectedCollection === tileRiskCollection;
   const renderedCollection = selectedCollection;
   const hasGeneratedLayer = renderedCollection.features.length > 0;
-  const normalizedSpcDay1 = useMemo(() => normalizeSpcCollection(spcDay1), [spcDay1]);
+  const normalizedSpcDay1 = useMemo(() => normalizeSpcCollection(effectiveSpcDay1), [effectiveSpcDay1]);
   const hasSpcLayer = Boolean(normalizedSpcDay1?.features.length);
   const renderedMax = maxCategory(renderedCollection);
   const spcMax = normalizedSpcDay1 ? maxSpcCategory(normalizedSpcDay1) : undefined;
@@ -510,6 +517,8 @@ export default function GeneratedOutlookMap({
                           stroke: isOverlayMode ? style.stroke : 'none',
                           strokeWidth: isOverlayMode ? 1.65 : 0,
                           strokeOpacity: isOverlayMode ? 0.9 : undefined,
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -519,6 +528,8 @@ export default function GeneratedOutlookMap({
                           stroke: isOverlayMode ? style.stroke : 'none',
                           strokeWidth: isOverlayMode ? 1.65 : 0,
                           strokeOpacity: isOverlayMode ? 0.9 : undefined,
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -528,6 +539,8 @@ export default function GeneratedOutlookMap({
                           stroke: isOverlayMode ? style.stroke : 'none',
                           strokeWidth: isOverlayMode ? 1.65 : 0,
                           strokeOpacity: isOverlayMode ? 0.9 : undefined,
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -560,6 +573,8 @@ export default function GeneratedOutlookMap({
                           strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
                           strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
                           strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -570,6 +585,8 @@ export default function GeneratedOutlookMap({
                           strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
                           strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
                           strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },
@@ -580,6 +597,8 @@ export default function GeneratedOutlookMap({
                           strokeWidth: effectiveComparisonMode === 'spc' ? 0 : 2,
                           strokeOpacity: effectiveComparisonMode === 'spc' ? 0 : 0.92,
                           strokeDasharray: effectiveComparisonMode === 'spc' ? undefined : '7 4',
+                          strokeLinejoin: 'round',
+                          strokeLinecap: 'round',
                           outline: 'none',
                           pointerEvents: 'none',
                         },

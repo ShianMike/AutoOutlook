@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forecast-hours", type=int, nargs="+", help="Explicit forecast hours. Overrides start/end valid times.")
     parser.add_argument("--force", action="store_true", help="Regenerate ready hours instead of reusing existing artifacts.")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--no-spc-verify", action="store_true", help="Skip SPC fetching for fixed historical runs.")
     parser.add_argument("--include-hgt500", dest="include_hgt500", action="store_true", default=True, help="Fetch HGT 500 mb.")
     parser.add_argument("--omit-hgt500", dest="include_hgt500", action="store_false", help="Skip HGT 500 mb if height contours are not needed.")
     parser.add_argument("--stop-on-hour-failure", action="store_true")
@@ -207,7 +208,7 @@ def main() -> None:
         ),
         continue_on_hour_failure=not args.stop_on_hour_failure,
         publish_gcs_bucket=None,
-        verify_spc=True,
+        verify_spc=not args.no_spc_verify,
     )
     update_custom_metadata(args.output_dir, args.include_hgt500)
 

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import RetroPanel from '../retro/RetroPanel';
 import RetroBadge from '../retro/RetroBadge';
 import ForecastDisclaimer from '../ForecastDisclaimer';
+import HistoricalEnhPlusVerification from './HistoricalEnhPlusVerification';
 import { RISK_META } from '../../types/forecast';
 import { HAZARD_CONFIGS, type OutlookHazardKey } from '../../utils/hazardProbabilityBands';
 
@@ -421,6 +422,7 @@ export default function DocumentationPage() {
         <DocsLevels />
         <DocsPerformance />
         <DocsSpcQc />
+        <DocsEnhVerification />
         <DocsPredictability />
         <DocsHazards />
         <DocsSources />
@@ -446,12 +448,12 @@ function DocsHero() {
         </div>
         <div className="flex items-center gap-2">
           <RetroBadge tone="cyan">Static</RetroBadge>
-          <RetroBadge tone="ink">v0.9</RetroBadge>
+          <RetroBadge tone="ink">v1.0</RetroBadge>
         </div>
       </div>
       <div className="border-t-[2px] border-paper/20 bg-ink px-4 py-1.5 xl:px-5">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/55">
-          Ten sections · Architecture · Levels · Skill · SPC QC · Predictability · Bands · Providers · Glossary · Disclaimer · Research
+          Eleven sections · Architecture · Levels · Skill · SPC QC · 2026 risk archive · Predictability · Bands · Providers · Glossary · Disclaimer · Research
         </span>
       </div>
     </header>
@@ -845,6 +847,26 @@ function DocsSpcQc() {
   );
 }
 
+function DocsEnhVerification() {
+  return (
+    <section id="docs-enh-verification" className="scroll-mt-4">
+      <div className="mb-3 border-[3px] border-ink bg-ink px-3 py-2 text-paper shadow-retro-sm">
+        <div className="font-mono text-[10px] font-bold uppercase tracking-[0.26em] text-signal-amber">
+          DOC / 05 · 2026 HISTORICAL RISK VERIFICATION
+        </div>
+        <h2 className="mt-1 font-display text-xl font-extrabold uppercase leading-none tracking-wide">
+          2026 Risk Verification Map
+        </h2>
+        <p className="mt-2 max-w-5xl font-mono text-[10px] uppercase leading-relaxed tracking-[0.16em] text-paper/70">
+          Static local archive. Event-day 00Z HRRR, merged from f17 through f28
+          (17Z to 04Z), with SPC Day 1 category, hazard outlooks, and storm reports fetched after prediction.
+        </p>
+      </div>
+      <HistoricalEnhPlusVerification />
+    </section>
+  );
+}
+
 function SpcQcCard({
   title,
   badge,
@@ -873,7 +895,7 @@ function DocsPredictability() {
   return (
     <DocSection
       id="docs-predictability"
-      eyebrow="DOC / 05 · WHAT 0–48 H ACTUALLY MEANS"
+      eyebrow="DOC / 06 · WHAT 0–48 H ACTUALLY MEANS"
       title="Predictability Window"
     >
       <Lead>
@@ -925,7 +947,7 @@ function DocsHazards() {
   return (
     <DocSection
       id="docs-hazards"
-      eyebrow="DOC / 06 · PROBABILITY CONTOURS"
+      eyebrow="DOC / 07 · PROBABILITY CONTOURS"
       title="Hazard Probability Bands"
     >
       <Lead>
@@ -1054,7 +1076,7 @@ function DocsSources() {
   return (
     <DocSection
       id="docs-sources"
-      eyebrow="DOC / 07 · WHERE THE DATA COMES FROM"
+      eyebrow="DOC / 08 · WHERE THE DATA COMES FROM"
       title="Data Provider Chain"
     >
       <Lead>
@@ -1141,7 +1163,7 @@ function DocsGlossary() {
   return (
     <DocSection
       id="docs-glossary"
-      eyebrow="DOC / 08 · PARAMETER DICTIONARY"
+      eyebrow="DOC / 09 · PARAMETER DICTIONARY"
       title="Ingredients Glossary"
       badge={<RetroBadge tone="cyan">{totalTerms} terms</RetroBadge>}
     >
@@ -1289,7 +1311,7 @@ function DocsDisclaimerSection() {
   return (
     <DocSection
       id="docs-disclaimer"
-      eyebrow="DOC / 09 · USE & VERIFICATION"
+      eyebrow="DOC / 10 · USE & VERIFICATION"
       title="Verification & Disclaimer"
       badge={<RetroBadge tone="red">Experimental</RetroBadge>}
     >
@@ -1332,7 +1354,7 @@ function DocsResearchSources() {
   return (
     <DocSection
       id="docs-research"
-      eyebrow="DOC / 10 · FORMULATION REFERENCES"
+      eyebrow="DOC / 11 · FORMULATION REFERENCES"
       title="Research Sources"
       badge={<RetroBadge tone="lime">{RESEARCH_SOURCES.length} refs</RetroBadge>}
     >

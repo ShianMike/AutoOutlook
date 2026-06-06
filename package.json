@@ -1,13 +1,16 @@
 {
   "name": "autooutlook",
   "private": true,
-  "version": "0.9.0",
+  "version": "1.0.0",
   "license": "MIT",
   "type": "module",
   "description": "AutoOutlook — Automated Convective Risk Intelligence",
   "scripts": {
     "dev": "vite",
     "build:embed": "node scripts/build-embed-png.mjs",
+    "verification:enh-plus-fetch": "python scripts/fetch-enh-plus-verification-events.py",
+    "verification:enh-plus-data": "python scripts/generate-enh-plus-verification-data.py",
+    "verification:enh-plus-png": "python scripts/generate-enh-plus-verification-png.py",
     "build": "tsc -b && vite build",
     "export:static-api": "python scripts/export-static-api.py",
     "build:pages": "npm run build && npm run export:static-api",

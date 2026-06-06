@@ -1,4 +1,5 @@
-import type { RiskCategory } from '../types/forecast';
+import type { RiskCategory, Ingredients } from '../types/forecast';
+import { lvlFromProb } from './hazardEngine';
 import type {
   OutlookArtifactFeatureCollection,
   ArtifactRiskCategory,
@@ -171,20 +172,12 @@ export function measureArtifactBandRadius(
   return minDistToOutside;
 }
 
-export function getArtifactHazardLevel(hazard: ArtifactHazardKey, probability: number): RiskCategory {
-  if (hazard === 'tornado') {
-    if (probability >= 0.45) return 'HIGH';
-    if (probability >= 0.30) return 'MOD';
-    if (probability >= 0.10) return 'ENH';
-    if (probability >= 0.05) return 'SLGT';
-    if (probability >= 0.02) return 'MRGL';
-    return 'TSTM';
-  }
-  if (probability >= 0.60) return 'MOD';
-  if (probability >= 0.30) return 'ENH';
-  if (probability >= 0.15) return 'SLGT';
-  if (probability >= 0.05) return 'MRGL';
-  return 'TSTM';
+export function getArtifactHazardLevel(
+  hazard: ArtifactHazardKey,
+  probability: number,
+  ing?: Ingredients,
+): RiskCategory {
+  return lvlFromProb(hazard, probability, ing);
 }
 
 export function artifactProbabilityToFeatureCollection(
@@ -274,7 +267,7 @@ export function getArtifactThunderCoverage(tile: OutlookProbabilityTile | undefi
     validCells += 1;
     if (ordinal >= 1) thunderCells += 1;
   }));
-  return validCells > 0 ? thunderCells / validCells : 0;
+  return validCells > 0 ? thunderCells / validCells : undefined;
 }
 
 export function artifactRiskToFeatureCollection(

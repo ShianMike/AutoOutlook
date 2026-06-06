@@ -140,7 +140,7 @@ function HazardCard({
   const probPct = formatHazardProbability(probability, isArtifact ? minimumArtifactHazardThreshold(artifactHazard) : undefined);
   const confPct = artifactUnavailable ? 0 : hz ? Math.round(hz.confidence * 100) : 0;
   const riskLevel = artifactHazard && artifactPeak !== undefined
-    ? getArtifactHazardLevel(artifactHazard, artifactPeak)
+    ? getArtifactHazardLevel(artifactHazard, artifactPeak, snapshot?.ingredients ?? undefined)
     : artifactUnavailable ? 'TSTM' : hz?.level ?? 'TSTM';
   const riskMeta = RISK_META[riskLevel];
   const location = artifactPeakLocation && artifactPeakLocation.probability > 0

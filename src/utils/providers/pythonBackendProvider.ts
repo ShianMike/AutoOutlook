@@ -24,7 +24,7 @@ import type {
   UpperAirVector,
 } from '../../types/forecast';
 import { buildOutlook } from '../outlookEngine';
-import { buildHazards, lvlFromProb } from '../hazardEngine';
+import { buildHazards, lvlFromProb, capProbabilityToCategory } from '../hazardEngine';
 import { buildRiskPolygons } from '../polygonBuilder';
 import { applyLeadTimeUncertainty } from '../leadTimeUncertainty';
 import { apiUrl } from '../apiBase';
@@ -157,8 +157,9 @@ function buildHazardsFromMl(
 ): Record<HazardKey, HazardAssessment> {
   const hazards: Record<HazardKey, HazardAssessment> = { ...buildHazards(ing) };
   ML_HAZARD_KEYS.forEach((hazard) => {
-    const probability = clamp01(mlHazards[hazard]);
-    const level = lvlFromProb(hazard, probability);
+    const rawProb = clamp01(mlHazards[hazard]);
+    const level = lvlFromProb(hazard, rawProb, ing);
+    const probability = capProbabilityToCategory(hazard, rawProb, level);
     const prior = hazards[hazard];
     hazards[hazard] = {
       ...prior,

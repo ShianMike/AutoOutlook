@@ -296,6 +296,7 @@ export function useOutlookArtifacts(
   selectedValidTimeISO?: string,
   activeRegion: ActiveRegion = 'conus',
   refreshMs = 15 * 1000,
+  enabled = true,
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
   const probabilityHourCacheRef = useRef<Map<number, OutlookProbabilityHour>>(new Map());
@@ -357,6 +358,11 @@ export function useOutlookArtifacts(
   };
 
   useEffect(() => {
+    if (!enabled) {
+      setState(INITIAL_STATE);
+      return undefined;
+    }
+
     let cancelled = false;
     let loadInFlight = false;
     const controller = new AbortController();
@@ -731,7 +737,7 @@ export function useOutlookArtifacts(
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [refreshMs, selectedForecastHour, selectedValidTimeISO, activeRegion]);
+  }, [refreshMs, selectedForecastHour, selectedValidTimeISO, activeRegion, enabled]);
 
   return state;
 }
@@ -739,10 +745,16 @@ export function useOutlookArtifacts(
 export function useMergedD1Verification(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
+  enabled = true,
 ): MergedD1VerificationSummary | null {
   const [data, setData] = useState<MergedD1VerificationSummary | null>(null);
 
   useEffect(() => {
+    if (!enabled) {
+      setData(null);
+      return undefined;
+    }
+
     const controller = new AbortController();
     const url = selectedDate
       ? `/api/outlook/merged-d1-verification?date=${selectedDate}`
@@ -755,7 +767,7 @@ export function useMergedD1Verification(
       .then((result) => setData(result))
       .catch(() => setData(null));
     return () => controller.abort();
-  }, [activeRegion, selectedDate]);
+  }, [activeRegion, selectedDate, enabled]);
 
   return data;
 }
@@ -763,10 +775,17 @@ export function useMergedD1Verification(
 export function useMergedD1Artifacts(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
+  options: { enabled?: boolean } = {},
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
+  const enabled = options.enabled ?? true;
 
   useEffect(() => {
+    if (!enabled) {
+      setState(INITIAL_STATE);
+      return undefined;
+    }
+
     const controller = new AbortController();
     setState(INITIAL_STATE);
 
@@ -821,7 +840,7 @@ export function useMergedD1Artifacts(
 
     load();
     return () => controller.abort();
-  }, [activeRegion, selectedDate]);
+  }, [activeRegion, selectedDate, enabled]);
 
   return state;
 }
@@ -829,10 +848,16 @@ export function useMergedD1Artifacts(
 export function useSpcStormReports(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
+  enabled = true,
 ): SpcStormReport[] {
   const [reports, setReports] = useState<SpcStormReport[]>([]);
 
   useEffect(() => {
+    if (!enabled) {
+      setReports([]);
+      return undefined;
+    }
+
     const controller = new AbortController();
     const query = selectedDate ? `?date=${selectedDate}` : '';
     
@@ -853,9 +878,7 @@ export function useSpcStormReports(
       });
 
     return () => controller.abort();
-  }, [activeRegion, selectedDate]);
+  }, [activeRegion, selectedDate, enabled]);
 
   return reports;
 }
-
-

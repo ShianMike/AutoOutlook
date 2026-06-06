@@ -54,19 +54,25 @@ export default function App() {
   const [selectedMergedDate, setSelectedMergedDate] = useState<string>('');
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('hourly');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
+  const [view, setView] = useState<AppView>(() => viewFromHash());
 
-  const auto = useAutoForecast(activeRegion);
+  const dashboardDataEnabled = view === 'dashboard';
+  const auto = useAutoForecast(activeRegion, dashboardDataEnabled);
   const hour = useForecastHour(auto.bundle);
   const snapshot = hour.snapshot;
-  const outlookArtifacts = useOutlookArtifacts(snapshot?.forecastHour, snapshot?.validTimeISO, activeRegion);
-  const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate);
-  const stormReports = useSpcStormReports(activeRegion, selectedMergedDate);
+  const outlookArtifacts = useOutlookArtifacts(
+    snapshot?.forecastHour,
+    snapshot?.validTimeISO,
+    activeRegion,
+    15 * 1000,
+    dashboardDataEnabled,
+  );
+  const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate, dashboardDataEnabled);
+  const stormReports = useSpcStormReports(activeRegion, selectedMergedDate, dashboardDataEnabled);
   const mlDriven = Boolean(auto.bundle?.mlModel?.active && auto.bundle.mlHazardHours);
   const hourLabel = snapshot
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
     : undefined;
-
-  const [view, setView] = useState<AppView>(() => viewFromHash());
 
   useEffect(() => {
     const sync = () => setView(viewFromHash());
@@ -232,7 +238,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v0.9
+              AutoOutlook · Automated Convective Risk Intelligence · v1.0
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

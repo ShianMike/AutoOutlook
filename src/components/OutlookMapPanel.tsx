@@ -9,7 +9,13 @@ import GeneratedOutlookMap, { type SpcComparisonMode } from './GeneratedOutlookM
 import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
 import { useMergedD1Artifacts, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
-import type { OutlookArtifacts, MergedD1VerificationSummary, SpcStormReport } from '../types/outlookArtifacts';
+import type {
+  OutlookArtifacts,
+  MergedD1VerificationSummary,
+  OutlookProbabilityShapeFeatureCollection,
+  SpcCategoryFeatureCollection,
+  SpcStormReport,
+} from '../types/outlookArtifacts';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { recordCanvasesToGif } from '../utils/gifRecorder';
 import type { OutlookHazardKey } from '../utils/hazardProbabilityBands';
@@ -31,6 +37,12 @@ interface OutlookMapPanelProps {
   stormReportsMode?: StormReportsMode;
   setStormReportsMode?: (mode: StormReportsMode) => void;
   stormReports?: SpcStormReport[];
+  availableMergedDatesOverride?: string[];
+  mergedArtifactsOverride?: OutlookArtifactState;
+  spcDay1Override?: SpcCategoryFeatureCollection | null;
+  spcHazardProbabilityShapesOverride?: OutlookProbabilityShapeFeatureCollection | null;
+  initialSpcComparisonMode?: SpcComparisonMode;
+  staticStormReportsAvailable?: boolean;
 }
 
 type OutlookMode = 'levels' | 'hazards';
@@ -261,9 +273,15 @@ export default function OutlookMapPanel({
   stormReportsMode = 'none',
   setStormReportsMode,
   stormReports = [],
+  availableMergedDatesOverride,
+  mergedArtifactsOverride,
+  spcDay1Override = null,
+  spcHazardProbabilityShapesOverride = null,
+  initialSpcComparisonMode = 'auto',
+  staticStormReportsAvailable = false,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
-  const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>('auto');
+  const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>(initialSpcComparisonMode);
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
   const [isExporting, setIsExporting] = useState(false);
@@ -280,6 +298,14 @@ export default function OutlookMapPanel({
   // Fetch available merged D1 dates on mount
   const [availableMergedDates, setAvailableMergedDates] = useState<string[]>([]);
   useEffect(() => {
+    if (availableMergedDatesOverride) {
+      setAvailableMergedDates(availableMergedDatesOverride);
+      if (!selectedMergedDate && availableMergedDatesOverride.length > 0) {
+        setSelectedMergedDate(availableMergedDatesOverride[0]);
+      }
+      return undefined;
+    }
+
     const controller = new AbortController();
     const loadDates = async () => {
       try {
@@ -300,9 +326,12 @@ export default function OutlookMapPanel({
     };
     loadDates();
     return () => controller.abort();
-  }, []);
+  }, [availableMergedDatesOverride, selectedMergedDate, setSelectedMergedDate]);
 
-  const mergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate);
+  const liveMergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
+    enabled: !mergedArtifactsOverride,
+  });
+  const mergedArtifacts = mergedArtifactsOverride ?? liveMergedArtifacts;
 
   const effectiveArtifactState = viewType === 'merged' ? mergedArtifacts : outlookArtifacts;
   const effectiveMetadata = effectiveArtifactState.artifacts?.metadata;
@@ -335,6 +364,12 @@ export default function OutlookMapPanel({
     : effectiveSnapshot
       ? FORECAST_HOUR_LABELS[effectiveSnapshot.forecastHour] ?? `+${effectiveSnapshot.forecastHour}h`
       : '—';
+  const panelTitle = viewType === 'merged'
+    ? 'D1 Merged Automated Convective Outlook'
+    : `F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h Automated Convective Outlook`;
+  const exportHourTitle = viewType === 'merged'
+    ? 'D1 Merged'
+    : `F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h`;
 
   const validTime = effectiveSnapshot
     ? (() => {
@@ -352,7 +387,8 @@ export default function OutlookMapPanel({
     ? `${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowValidISO)} – ${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowExpireISO)}`
     : fmtUTC(effectiveSnapshot?.validTimeISO);
   const latestAvailableReportDate = latestAvailableSpcReportDate();
-  const reportsPendingForSelectedDate = viewType === 'merged'
+  const reportsPendingForSelectedDate = !staticStormReportsAvailable
+    && viewType === 'merged'
     && Boolean(selectedMergedDate)
     && selectedMergedDate > latestAvailableReportDate;
   const mapStormReportsMode: StormReportsMode = viewType === 'merged' && !reportsPendingForSelectedDate
@@ -532,7 +568,7 @@ export default function OutlookMapPanel({
 
   return (
     <RetroPanel
-      title={`F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h Automated Convective Outlook`}
+      title={panelTitle}
       eyebrow="01 / automated categorical + hazard outlook · auto-detected focus region"
       badge={<RetroBadge tone="paper">FCST · {hourLabel}</RetroBadge>}
       size="sm"
@@ -603,7 +639,7 @@ export default function OutlookMapPanel({
               Automated Convective Risk Intelligence
             </div>
             <div className="mt-1 font-display text-[18px] font-extrabold uppercase tracking-wide text-ink">
-              F{String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
+              {exportHourTitle} {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
             </div>
           </div>
           <div className="border-[2px] border-ink bg-ink px-2.5 py-1.5 font-mono text-[10px] font-bold uppercase tracking-widest text-paper shadow-retro-sm">
@@ -639,6 +675,7 @@ export default function OutlookMapPanel({
               comparisonMode={spcComparisonMode}
               stormReportsMode={mapStormReportsMode}
               stormReports={mapStormReports}
+              spcDay1Override={spcDay1Override}
             />
           </div>
         ) : (
@@ -663,6 +700,8 @@ export default function OutlookMapPanel({
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
+                    comparisonMode={spcComparisonMode}
+                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -673,6 +712,8 @@ export default function OutlookMapPanel({
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
+                    comparisonMode={spcComparisonMode}
+                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -683,6 +724,8 @@ export default function OutlookMapPanel({
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
+                    comparisonMode={spcComparisonMode}
+                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -693,6 +736,8 @@ export default function OutlookMapPanel({
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
+                    comparisonMode={spcComparisonMode}
+                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                   />
                 </>
               ) : (
@@ -713,6 +758,8 @@ export default function OutlookMapPanel({
                   activeRegion={activeRegion}
                   stormReportsMode={mapStormReportsMode}
                   stormReports={mapStormReports}
+                  comparisonMode={spcComparisonMode}
+                  spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                 />
               )
             ) : useRuleHazardFallback ? (
@@ -794,9 +841,9 @@ export default function OutlookMapPanel({
 
       {/* Unified Control Bar Row (Moved below the map) */}
       <div className="mt-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
-        <div className="flex flex-wrap items-center gap-4 p-2.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-2.5">
           {/* Dropdown 1: Forecast Type */}
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
               Type
             </label>
@@ -812,7 +859,7 @@ export default function OutlookMapPanel({
           </div>
 
           {/* Dropdown: View Mode (Hourly vs Merged D1) */}
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
               View
             </label>
@@ -829,7 +876,7 @@ export default function OutlookMapPanel({
 
           {/* Dropdown: Merged Date (Conditional) */}
           {viewType === 'merged' && availableMergedDates.length > 0 && (
-            <div className="flex items-center gap-2 animate-fadeIn">
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
               <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
                 Date
               </label>
@@ -859,8 +906,8 @@ export default function OutlookMapPanel({
 
           {/* Dropdown: Verified Reports (Conditional) */}
           {viewType === 'merged' && setStormReportsMode && (
-            <div className="flex items-center gap-2 animate-fadeIn min-w-0">
-              <div className="flex items-center gap-2">
+            <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 animate-fadeIn md:flex-nowrap">
+              <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
                 <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
                   Reports
                 </label>
@@ -878,7 +925,7 @@ export default function OutlookMapPanel({
                 </select>
               </div>
               <span className={[
-                'max-w-[13rem] truncate font-mono text-[9px] font-bold uppercase tracking-wider',
+                'basis-full truncate font-mono text-[9px] font-bold uppercase tracking-wider md:basis-auto md:max-w-[11rem]',
                 reportsPendingForSelectedDate ? 'text-signal-red' : 'text-ink/55',
               ].join(' ')}>
                 {reportStatusLabel}
@@ -888,7 +935,7 @@ export default function OutlookMapPanel({
 
           {/* Dropdown 2: Hazard View (Conditional) */}
           {mode === 'hazards' && (
-            <div className="flex items-center gap-2 animate-fadeIn">
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
               <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
                 Hazard
               </label>
@@ -915,8 +962,8 @@ export default function OutlookMapPanel({
             </div>
           )}
 
-          {mode === 'levels' && (
-            <div className="flex items-center gap-2 animate-fadeIn" data-spc-comparison-control="true">
+          {(mode === 'levels' || (mode === 'hazards' && spcHazardProbabilityShapesOverride?.features?.length)) && (
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn" data-spc-comparison-control="true">
               <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
                 SPC Compare
               </label>
@@ -934,7 +981,7 @@ export default function OutlookMapPanel({
           )}
 
           {/* Dropdown 3: Exporter Options */}
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
               Export
             </label>
