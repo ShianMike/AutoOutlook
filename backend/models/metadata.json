@@ -1,0 +1,76 @@
+{
+  "version": "xgb-hazards-20260502T221429Z",
+  "artifactType": "xgboost_joblib",
+  "trainedAtISO": "2026-05-02T22:14:29Z",
+  "featureSchemaVersion": "ml-features-v2-pure-ai",
+  "featureSchemaHash": "8b224c3c3bc305fd",
+  "featureNames": [
+    "forecastHour",
+    "mlcape",
+    "mucape",
+    "sbcape",
+    "cin",
+    "sfcDewpointF",
+    "pwatIn",
+    "lclM",
+    "moistureDepthM",
+    "srh01",
+    "srh03",
+    "shear06Kt",
+    "stormRelWindKt"
+  ],
+  "hazards": [
+    "tornado",
+    "hail",
+    "wind"
+  ],
+  "trainingRows": 5996,
+  "datasetQuality": {
+    "trainingRows": 5996,
+    "minimumRecommendedRows": 5000,
+    "uniqueRunDates": 25,
+    "duplicateFeatureLabelRows": 0,
+    "positiveCounts": {
+      "tornado": 112,
+      "hail": 182,
+      "wind": 152
+    },
+    "experimentalOnly": false,
+    "status": "candidate"
+  },
+  "metrics": {
+    "tornado": {
+      "samples": 5996,
+      "positives": 112,
+      "negatives": 5884,
+      "testSamples": 1678,
+      "calibrationCv": 3,
+      "average_precision_score": 0.3698552136762356,
+      "brier_score_loss": 0.020106214696290554,
+      "log_loss": 0.13202850324574408,
+      "roc_auc_score": 0.9110447336604792
+    },
+    "hail": {
+      "samples": 5996,
+      "positives": 182,
+      "negatives": 5814,
+      "testSamples": 1678,
+      "calibrationCv": 3,
+      "average_precision_score": 0.28214972545406736,
+      "brier_score_loss": 0.027012412856966823,
+      "log_loss": 0.13646051109914945,
+      "roc_auc_score": 0.8937576875768758
+    },
+    "wind": {
+      "samples": 5996,
+      "positives": 152,
+      "negatives": 5844,
+      "testSamples": 1678,
+      "calibrationCv": 3,
+      "average_precision_score": 0.5806507417535852,
+      "brier_score_loss": 0.02204521291655407,
+      "log_loss": 0.07877942891026259,
+      "roc_auc_score": 0.9583067206018026
+    }
+  }
+}

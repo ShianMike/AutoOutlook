@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .features import FEATURE_NAMES, HAZARD_KEYS, feature_schema_hash, feature_vector
+from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, feature_schema_hash, feature_vector
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,12 @@ _cached_fingerprint: tuple[tuple[str, float], ...] | None = None
 _cached_result: tuple[dict[str, Any], dict[str, Any] | None] | None = None
 
 
-def _status_from_metadata(metadata: Mapping[str, Any], active: bool, reason: str | None = None) -> dict[str, Any]:
+def _status_from_metadata(
+    metadata: Mapping[str, Any],
+    active: bool,
+    reason: str | None = None,
+    compatibility_mode: str | None = None,
+) -> dict[str, Any]:
     status: dict[str, Any] = {
         "active": active,
         "version": metadata.get("version", "unknown"),
@@ -35,15 +40,23 @@ def _status_from_metadata(metadata: Mapping[str, Any], active: bool, reason: str
     }
     if isinstance(metadata.get("datasetQuality"), Mapping):
         status["datasetQuality"] = dict(metadata["datasetQuality"])
+    if compatibility_mode:
+        status["featureCompatibilityMode"] = compatibility_mode
+        status["runtimeFeatureSchemaVersion"] = FEATURE_SCHEMA_VERSION
+        status["runtimeFeatureSchemaHash"] = feature_schema_hash()
     if reason:
         status["reason"] = reason
     return status
 
 
-def _inactive(reason: str, metadata: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _inactive(
+    reason: str,
+    metadata: Mapping[str, Any] | None = None,
+    compatibility_mode: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if metadata is None:
         return {"active": False, "reason": reason}, None
-    return _status_from_metadata(metadata, active=False, reason=reason), None
+    return _status_from_metadata(metadata, active=False, reason=reason, compatibility_mode=compatibility_mode), None
 
 
 class TermModel:
@@ -97,6 +110,30 @@ def _training_rows(metadata: Mapping[str, Any]) -> int:
         return 0
 
 
+def _resolve_model_feature_names(
+    metadata: Mapping[str, Any],
+    artifact_type: str,
+) -> tuple[tuple[str, ...], str | None] | tuple[None, str]:
+    expected_hash = feature_schema_hash()
+    model_feature_names = tuple(str(name) for name in metadata.get("featureNames", ()))
+    if metadata.get("featureSchemaHash") == expected_hash and model_feature_names == FEATURE_NAMES:
+        return FEATURE_NAMES, None
+
+    if artifact_type != "xgboost_joblib":
+        if metadata.get("featureSchemaHash") != expected_hash:
+            return None, f"feature schema mismatch: model={metadata.get('featureSchemaHash')} runtime={expected_hash}"
+        return None, "feature name/order mismatch"
+
+    if not model_feature_names:
+        return None, "XGBoost metadata missing featureNames"
+
+    missing_runtime_features = [name for name in model_feature_names if name not in FEATURE_NAMES]
+    if missing_runtime_features:
+        return None, f"XGBoost feature name mismatch: unavailable runtime features {missing_runtime_features}"
+
+    return model_feature_names, "runtime_subset_features"
+
+
 def _load_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
     global _cached_fingerprint, _cached_result
     if not MODEL_DIR.exists():
@@ -111,16 +148,11 @@ def _load_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
     except Exception as exc:  # noqa: BLE001
         return _inactive(f"model metadata unreadable: {exc}")
 
-    expected_hash = feature_schema_hash()
-    if metadata.get("featureSchemaHash") != expected_hash:
-        return _inactive(
-            f"feature schema mismatch: model={metadata.get('featureSchemaHash')} runtime={expected_hash}",
-            metadata,
-        )
-    if tuple(metadata.get("featureNames", ())) != FEATURE_NAMES:
-        return _inactive("feature name/order mismatch", metadata)
-
     artifact_type = metadata.get("artifactType", "xgboost_joblib")
+    model_feature_names, compatibility = _resolve_model_feature_names(metadata, str(artifact_type))
+    if model_feature_names is None:
+        return _inactive(str(compatibility), metadata)
+
     if artifact_type == TERM_MODEL_TYPE:
         if not metadata.get("allowBootstrapRuntime", False):
             return _inactive("bootstrap term model disabled until an archive-trained XGBoost artifact is available", metadata)
@@ -136,9 +168,9 @@ def _load_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
                 models[hazard] = TermModel(json.loads(path.read_text(encoding="utf-8")))
             except Exception as exc:  # noqa: BLE001
                 return _inactive(f"failed loading {path.name}: {exc}", metadata)
-        status = _status_from_metadata(metadata, active=True)
+        status = _status_from_metadata(metadata, active=True, compatibility_mode=compatibility)
         _cached_fingerprint = fingerprint
-        _cached_result = status, {"metadata": metadata, "models": models}
+        _cached_result = status, {"metadata": metadata, "models": models, "featureNames": model_feature_names}
         return _cached_result
 
     training_rows = _training_rows(metadata)
@@ -177,9 +209,15 @@ def _load_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
         except Exception as exc:  # noqa: BLE001
             return _inactive(f"failed loading {path.name}: {exc}", metadata)
 
-    status = _status_from_metadata(metadata, active=True)
+    status = _status_from_metadata(metadata, active=True, compatibility_mode=compatibility)
     _cached_fingerprint = fingerprint
-    _cached_result = status, {"metadata": metadata, "models": models}
+    feature_indexes = tuple(FEATURE_NAMES.index(name) for name in model_feature_names)
+    _cached_result = status, {
+        "metadata": metadata,
+        "models": models,
+        "featureNames": model_feature_names,
+        "featureIndexes": feature_indexes,
+    }
     return _cached_result
 
 
@@ -205,7 +243,9 @@ def predict_ml_hazards(
 
     vector = feature_vector(ingredients, forecast_hour)
     features = dict(zip(FEATURE_NAMES, vector, strict=True))
-    x = np.asarray([vector], dtype=float)
+    model_feature_names = tuple(bundle.get("featureNames", FEATURE_NAMES))
+    model_vector = [features[name] for name in model_feature_names]
+    x = np.asarray([model_vector], dtype=float)
     probabilities: dict[str, float] = {}
     for hazard in HAZARD_KEYS:
         model = bundle["models"][hazard]
@@ -233,6 +273,8 @@ def predict_ml_hazard_matrix(feature_matrix: np.ndarray) -> dict[str, np.ndarray
     x = np.asarray(feature_matrix, dtype=float)
     if x.ndim != 2 or x.shape[1] != len(FEATURE_NAMES):
         raise ValueError(f"feature_matrix must be shaped (n, {len(FEATURE_NAMES)})")
+    feature_indexes = tuple(bundle.get("featureIndexes", range(len(FEATURE_NAMES))))
+    model_x = x[:, feature_indexes]
 
     probabilities: dict[str, np.ndarray] = {}
     for hazard in HAZARD_KEYS:
@@ -244,10 +286,10 @@ def predict_ml_hazard_matrix(feature_matrix: np.ndarray) -> dict[str, np.ndarray
                     for row in x
                 ], dtype=float)
             elif hasattr(model, "predict_proba"):
-                proba = np.asarray(model.predict_proba(x), dtype=float)
+                proba = np.asarray(model.predict_proba(model_x), dtype=float)
                 values = proba[:, 1] if proba.ndim == 2 and proba.shape[1] > 1 else proba.reshape(-1)
             else:
-                values = np.asarray(model.predict(x), dtype=float).reshape(-1)
+                values = np.asarray(model.predict(model_x), dtype=float).reshape(-1)
         except Exception as exc:  # noqa: BLE001
             log.warning("ML gridded hazard inference failed for %s: %s", hazard, exc)
             return None

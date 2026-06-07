@@ -24,7 +24,13 @@ from backend.ml.gather_archive import (
     _parse_spc_datetime,
     iter_hrrr_refs,
 )
-from backend.ml.inference import MIN_XGBOOST_TRAINING_ROWS, model_status, predict_ml_hazards, reset_model_cache
+from backend.ml.inference import (
+    MIN_XGBOOST_TRAINING_ROWS,
+    model_status,
+    predict_ml_hazard_matrix,
+    predict_ml_hazards,
+    reset_model_cache,
+)
 from backend.ml.reports import labels_for_sample, report_matches_sample
 from backend.ml.validate_models import (
     average_precision_score,
@@ -488,6 +494,86 @@ class MlPipelineTests(unittest.TestCase):
                 self.assertFalse(status["active"])
                 self.assertIn("experimental/demo-only", status["reason"])
                 self.assertIsNone(predict_ml_hazards({"mlcape": 1000, "shear06Kt": 35}, 12))
+                reset_model_cache()
+
+    def test_older_xgboost_subset_schema_can_drive_current_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            model_features = (
+                "forecastHour",
+                "mlcape",
+                "mucape",
+                "sbcape",
+                "cin",
+                "sfcDewpointF",
+                "pwatIn",
+                "lclM",
+                "moistureDepthM",
+                "srh01",
+                "srh03",
+                "shear06Kt",
+                "stormRelWindKt",
+            )
+            metadata = {
+                "version": "legacy-candidate",
+                "artifactType": "xgboost_joblib",
+                "trainedAtISO": "2026-05-02T00:00:00Z",
+                "featureSchemaVersion": "ml-features-v2-pure-ai",
+                "featureSchemaHash": "legacy-v2-hash",
+                "featureNames": list(model_features),
+                "trainingRows": MIN_XGBOOST_TRAINING_ROWS,
+                "datasetQuality": {
+                    "experimentalOnly": False,
+                    "trainingRows": MIN_XGBOOST_TRAINING_ROWS,
+                    "minimumRecommendedRows": MIN_XGBOOST_TRAINING_ROWS,
+                },
+            }
+            (model_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            for hazard in HAZARD_KEYS:
+                with (model_dir / f"{hazard}_xgb.joblib").open("wb") as fh:
+                    pickle.dump(DummyProbabilityModel(0.2), fh)
+
+            fake_joblib = types.SimpleNamespace(load=fake_joblib_load)
+            with patch("backend.ml.inference.MODEL_DIR", model_dir), patch.dict(sys.modules, {"joblib": fake_joblib}):
+                reset_model_cache()
+                status = model_status()
+                self.assertTrue(status["active"])
+                self.assertEqual(status["featureCompatibilityMode"], "runtime_subset_features")
+                self.assertEqual(status["runtimeFeatureSchemaHash"], feature_schema_hash())
+                self.assertEqual(
+                    predict_ml_hazards({"mlcape": 1000, "mucape": 1200, "shear06Kt": 35}, 12),
+                    {"tornado": 0.2, "hail": 0.2, "wind": 0.2},
+                )
+                grid = np.zeros((2, len(FEATURE_NAMES)), dtype=float)
+                self.assertEqual(
+                    {hazard: values.tolist() for hazard, values in predict_ml_hazard_matrix(grid).items()},
+                    {"tornado": [0.2, 0.2], "hail": [0.2, 0.2], "wind": [0.2, 0.2]},
+                )
+                reset_model_cache()
+
+    def test_older_xgboost_schema_rejects_unavailable_runtime_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            metadata = {
+                "version": "legacy-with-extra-feature",
+                "artifactType": "xgboost_joblib",
+                "trainedAtISO": "2026-05-02T00:00:00Z",
+                "featureSchemaVersion": "ml-features-v1",
+                "featureSchemaHash": "legacy-v1-hash",
+                "featureNames": ["forecastHour", "mlcape", "initiationConf"],
+                "trainingRows": MIN_XGBOOST_TRAINING_ROWS,
+            }
+            (model_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            for hazard in HAZARD_KEYS:
+                with (model_dir / f"{hazard}_xgb.joblib").open("wb") as fh:
+                    pickle.dump(DummyProbabilityModel(0.2), fh)
+
+            fake_joblib = types.SimpleNamespace(load=fake_joblib_load)
+            with patch("backend.ml.inference.MODEL_DIR", model_dir), patch.dict(sys.modules, {"joblib": fake_joblib}):
+                reset_model_cache()
+                status = model_status()
+                self.assertFalse(status["active"])
+                self.assertIn("unavailable runtime features", status["reason"])
                 reset_model_cache()
 
     def test_validation_metrics_reward_ranked_probabilities(self) -> None:

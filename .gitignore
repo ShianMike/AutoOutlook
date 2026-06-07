@@ -20,7 +20,10 @@ __pycache__/
 .env
 backend/__pycache__/
 backend/*.pyc
-backend/models/
+backend/models/*
+!backend/models/
+!backend/models/metadata.json
+!backend/models/*_xgb.joblib
 backend/models_backup/
 backend/models_candidate/
 backend/ml_data/

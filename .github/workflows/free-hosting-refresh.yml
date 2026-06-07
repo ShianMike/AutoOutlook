@@ -187,8 +187,8 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r backend/requirements.txt
 
-      - name: Bootstrap runtime hazard models
-        run: python -m backend.ml.bootstrap_models
+      - name: Ensure runtime hazard models
+        run: python -m backend.ml.ensure_runtime_models
 
       - name: Cache HRRR GRIB files
         uses: actions/cache@v5
@@ -280,8 +280,8 @@ jobs:
           path: backend/artifacts/latest_incremental/hours
           merge-multiple: true
 
-      - name: Bootstrap runtime hazard models
-        run: python -m backend.ml.bootstrap_models
+      - name: Ensure runtime hazard models
+        run: python -m backend.ml.ensure_runtime_models
 
       - name: Cache HRRR GRIB files
         uses: actions/cache@v5
