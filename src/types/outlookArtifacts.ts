@@ -137,6 +137,7 @@ export interface SpcVerificationSummary {
 
 export interface MergedD1VerificationSummary extends SpcVerificationSummary {
   mergedCycles?: string[];
+  mergedCycleTimeISOs?: string[];
   d1WindowValidISO?: string;
   d1WindowExpireISO?: string;
   contributingHours?: Array<{ cycle: string; forecastHour: number; validTimeISO: string }>;

@@ -92,6 +92,7 @@ DEFAULT_HOUR_WORKERS = _env_int("AUTOOUTLOOK_HOUR_WORKERS", 4)
 DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
 DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 2)
 DEFAULT_GCS_LOCK_TTL_SECONDS = _env_int("AUTOOUTLOOK_RUN_LOCK_TTL_SECONDS", 5400)
+MERGED_D1_00Z_CACHE_MODEL = "hrrr"
 
 FetchHourFn = Callable[[HrrrHourRef, requests.Session], tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour]
 PredictorFn = Callable[[GriddedFeatures], dict[str, np.ndarray] | None]
@@ -1750,6 +1751,50 @@ def _publish_complete_incremental_snapshot(
     # Publish the index last so readers only switch to the new complete snapshot
     # after all referenced per-hour artifacts are present.
     _write_json(complete_dir / "index.json", index)
+    _publish_merged_d1_00z_cache(output_dir, index, requested_hours)
+
+
+def _publish_merged_d1_00z_cache(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    requested_hours: Iterable[int],
+) -> Path | None:
+    if not _incremental_index_covers_requested_hours(index, requested_hours):
+        return None
+    if not _is_hrrr_00z_incremental_index(index):
+        return None
+    cache_dir = _merged_d1_00z_cache_dir(output_dir)
+    _copy_incremental_snapshot_to_dir(output_dir, cache_dir, index)
+    return cache_dir
+
+
+def _copy_incremental_snapshot_to_dir(
+    output_dir: Path,
+    target_dir: Path,
+    index: Mapping[str, Any],
+) -> None:
+    output_dir = Path(output_dir)
+    target_dir = Path(target_dir)
+    tmp_dir = target_dir.with_name(f"{target_dir.name}.tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        files = sorted(path for path in output_dir.rglob("*") if path.is_file())
+        for source in files:
+            relative = source.relative_to(output_dir)
+            if relative == Path("index.json"):
+                continue
+            destination = tmp_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        _write_json(tmp_dir / "index.json", index)
+        if target_dir.exists():
+            shutil.rmtree(target_dir, ignore_errors=True)
+        shutil.move(str(tmp_dir), str(target_dir))
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> None:
@@ -1793,6 +1838,10 @@ def _publish_incremental_artifacts_to_gcs(
     previous_dir = output_dir.with_name(f"{output_dir.name}.previous")
     if previous_dir.exists():
         previous_files = _upload_directory_to_gcs(bucket, previous_dir, _gcs_join(prefix, previous_dir.name))
+    merged_d1_00z_files = 0
+    merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
+    if merged_d1_00z_dir.exists():
+        merged_d1_00z_files = _upload_directory_to_gcs(bucket, merged_d1_00z_dir, _gcs_join(prefix, merged_d1_00z_dir.name))
 
     result = {
         "enabled": True,
@@ -1801,11 +1850,13 @@ def _publish_incremental_artifacts_to_gcs(
         "currentFiles": current_files,
         "completeFiles": complete_files,
         "previousFiles": previous_files,
+        "mergedD1ZeroZFiles": merged_d1_00z_files,
         "latencyMs": int((time.perf_counter() - started) * 1000),
     }
     print(
         f"[gcs publish] bucket={bucket_name} prefix={result['prefix']} "
         f"currentFiles={current_files} completeFiles={complete_files} previousFiles={previous_files} "
+        f"mergedD1ZeroZFiles={merged_d1_00z_files} "
         f"latency={result['latencyMs']}ms",
         flush=True,
     )
@@ -1941,17 +1992,20 @@ def _hydrate_incremental_artifacts_from_gcs(
     current_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, output_dir.name), output_dir)
     complete_dir = _incremental_complete_output_dir(output_dir)
     complete_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, complete_dir.name), complete_dir)
+    merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
+    merged_d1_00z_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, merged_d1_00z_dir.name), merged_d1_00z_dir)
     result = {
         "enabled": True,
         "bucket": bucket_name,
         "prefix": prefix.strip("/"),
         "currentFiles": current_files,
         "completeFiles": complete_files,
+        "mergedD1ZeroZFiles": merged_d1_00z_files,
         "latencyMs": int((time.perf_counter() - started) * 1000),
     }
     print(
         f"[gcs hydrate] bucket={bucket_name} prefix={result['prefix']} "
-        f"currentFiles={current_files} completeFiles={complete_files} "
+        f"currentFiles={current_files} completeFiles={complete_files} mergedD1ZeroZFiles={merged_d1_00z_files} "
         f"latency={result['latencyMs']}ms",
         flush=True,
     )
@@ -2100,6 +2154,28 @@ def _incremental_complete_output_dir(output_dir: Path) -> Path:
     if configured and output_dir == DEFAULT_INCREMENTAL_OUTPUT_DIR:
         return Path(configured)
     return output_dir.with_name(f"{output_dir.name}_complete")
+
+
+def _merged_d1_00z_cache_dir(output_dir: Path) -> Path:
+    output_dir = Path(output_dir)
+    return output_dir.with_name(f"{output_dir.name}_{MERGED_D1_00Z_CACHE_MODEL}_00z")
+
+
+def _is_hrrr_00z_incremental_index(index: Mapping[str, Any]) -> bool:
+    cycle_time = _parse_iso(index.get("cycleTimeISO"))
+    if cycle_time is None or cycle_time.hour != 0:
+        return False
+    return _incremental_index_model_name(index) == MERGED_D1_00Z_CACHE_MODEL
+
+
+def _incremental_index_model_name(index: Mapping[str, Any]) -> str:
+    cycle_policy = index.get("cyclePolicy") or {}
+    policy_model = str(cycle_policy.get("model") or "")
+    cycle_label = str(index.get("cycle") or "")
+    token = f"{policy_model} {cycle_label}".upper()
+    if "ECMWF" in token:
+        return "ecmwf"
+    return "hrrr"
 
 
 def _incremental_index_covers_requested_hours(

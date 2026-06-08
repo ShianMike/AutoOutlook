@@ -42,6 +42,7 @@ jobs:
       reason: ${{ steps.gate.outputs.reason }}
       cycle: ${{ steps.detect.outputs.cycle }}
       cycle_time_iso: ${{ steps.detect.outputs.cycle_time_iso }}
+      cycle_date: ${{ steps.detect.outputs.cycle_date }}
     env:
       AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
 
@@ -71,7 +72,9 @@ jobs:
           cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"cycle={cycle.get('cycle', '')}", file=output)
-              print(f"cycle_time_iso={cycle.get('cycleTimeISO', '')}", file=output)
+              cycle_time_iso = cycle.get('cycleTimeISO', '')
+              print(f"cycle_time_iso={cycle_time_iso}", file=output)
+              print(f"cycle_date={cycle_time_iso[:10]}", file=output)
           print(json.dumps(cycle, indent=2))
           PY
 
@@ -290,6 +293,14 @@ jobs:
           key: hrrr-selected-${{ needs.preflight.outputs.cycle }}-deploy
           restore-keys: |
             hrrr-selected-${{ needs.preflight.outputs.cycle }}-
+
+      - name: Restore merged D1 00Z cache
+        uses: actions/cache@v5
+        with:
+          path: backend/artifacts/latest_incremental_hrrr_00z
+          key: merged-d1-hrrr-00z-${{ needs.preflight.outputs.cycle_date }}-${{ github.run_id }}
+          restore-keys: |
+            merged-d1-hrrr-00z-${{ needs.preflight.outputs.cycle_date }}-
 
       - name: Finalize incremental artifacts
         run: |

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react';
 
 import RetroBadge from '../retro/RetroBadge';
 import { HAZARD_META, RISK_META, type HazardKey, type RiskCategory } from '../../types/forecast';
@@ -167,6 +167,51 @@ function useUtcClock() {
   }, [now]);
 }
 
+function useLandingReveal() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-landing-reveal]'));
+    if (!targets.length) return undefined;
+
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion || !('IntersectionObserver' in window)) {
+      targets.forEach((target) => {
+        target.dataset.landingVisible = 'true';
+      });
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const target = entry.target as HTMLElement;
+          target.dataset.landingVisible = 'true';
+          observer.unobserve(target);
+        });
+      },
+      {
+        rootMargin: '0px 0px -10% 0px',
+        threshold: 0.14,
+      },
+    );
+
+    targets.forEach((target) => observer.observe(target));
+    return () => observer.disconnect();
+  }, []);
+}
+
+function revealDelay(ms: number): CSSProperties {
+  return { '--landing-reveal-delay': `${ms}ms` } as CSSProperties;
+}
+
+function heatDelay(index: number, cols: number): CSSProperties {
+  const row = Math.floor(index / cols);
+  const col = index % cols;
+  return { animationDelay: `${col * 24 + row * 70}ms` };
+}
+
 // Use the shared `viewLinkHandler` so internal links/buttons all route through
 // the same logic that App.tsx listens to (hashchange).
 const go = viewLinkHandler;
@@ -178,7 +223,7 @@ const go = viewLinkHandler;
 function LandingNav() {
   const clock = useUtcClock();
   return (
-    <header className="sticky top-0 z-40 border-b-[3px] border-ink bg-paper">
+    <header className="landing-nav sticky top-0 z-40 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto flex max-w-[1400px] items-center gap-4 px-4 py-2.5 sm:px-6">
         <a href="#" onClick={go('')} className="flex items-center gap-3">
           <div className="border-[3px] border-ink bg-ink px-2 py-1 font-mono text-[10px] font-bold tracking-[0.3em] text-paper">
@@ -226,7 +271,7 @@ function LandingNav() {
           <a
             href="#dashboard"
             onClick={go('#dashboard')}
-            className="retro-button retro-button-primary text-[11px]"
+            className="retro-button retro-button-primary whitespace-nowrap text-[11px]"
           >
             Launch Dashboard ▸
           </a>
@@ -243,67 +288,73 @@ function LandingNav() {
 function Hero() {
   const clock = useUtcClock();
   return (
-    <section className="relative border-b-[3px] border-ink bg-paper">
+    <section className="landing-atmosphere relative overflow-hidden border-b-[3px] border-ink bg-paper">
       <div className="pointer-events-none absolute inset-0 retro-grid-bg opacity-60" aria-hidden />
+      <div className="landing-drift-field" aria-hidden />
+      <div className="landing-front-line landing-front-line-a" aria-hidden />
+      <div className="landing-front-line landing-front-line-b" aria-hidden />
 
       <div className="relative mx-auto grid max-w-[1400px] grid-cols-1 gap-6 px-4 py-12 sm:px-6 lg:grid-cols-[1.4fr_1fr] lg:gap-10 lg:py-20">
         {/* Left: headline */}
-        <div className="flex flex-col gap-6">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="landing-hero-copy flex flex-col gap-6">
+          <div className="landing-hero-item flex flex-wrap items-center gap-2" style={revealDelay(60)}>
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v1.0 · RISK ARCHIVE</RetroBadge>
+            <RetroBadge tone="paper">v1.1 · 00Z LOCK</RetroBadge>
           </div>
 
-          <h1 className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
-              style={{ fontSize: 'clamp(3.5rem, 11vw, 9rem)' }}>
+          <h1 className="landing-hero-item landing-title font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
+              style={{ ...revealDelay(130), fontSize: 'clamp(3.5rem, 11vw, 9rem)' }}>
             Auto<span className="text-signal-amber">Outlook</span>
           </h1>
 
-          <p className="max-w-[640px] font-display text-xl font-bold uppercase leading-tight tracking-tight text-ink/80 sm:text-2xl lg:text-3xl">
+          <p className="landing-hero-item max-w-[640px] font-display text-xl font-bold uppercase leading-tight tracking-tight text-ink/80 sm:text-2xl lg:text-3xl"
+             style={revealDelay(210)}>
             Automated convective risk intelligence.
             <br />
             <span className="text-ink/55">From raw model data to verified outlook — without a human in the loop.</span>
           </p>
 
-          <p className="max-w-[640px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+          <p className="landing-hero-item max-w-[640px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg"
+             style={revealDelay(290)}>
             AutoOutlook ingests the latest extended-range model cycle, derives the severe-weather ingredient deck,
             runs gated tornado / hail / wind probability heads, and publishes
             SPC-style risk polygons + probability tiles for forecast hours <span className="font-mono font-bold text-ink">f00–f48</span>.
-            v1.0 adds the 2026 ENH+ risk archive with official SPC hazard outlook layers and storm-report verification maps.
+            v1.1 locks Merged D1 to the selected day's 00Z run, preserves that cache through later cycles,
+            and keeps the 2026 ENH+ risk archive with official SPC hazard outlook layers and storm-report verification maps.
           </p>
 
-          <div className="flex flex-wrap items-center gap-3 pt-2">
+          <div className="landing-hero-item flex flex-wrap items-center gap-3 pt-2" style={revealDelay(370)}>
             <a
               href="#dashboard"
               onClick={go('#dashboard')}
-              className="retro-button retro-button-primary !px-5 !py-3 text-base"
+              className="retro-button retro-button-primary landing-action-button !px-5 !py-3 text-base"
             >
               Launch Dashboard ▸
             </a>
             <a
               href="#docs"
               onClick={go('#docs')}
-              className="retro-button !px-5 !py-3 text-base"
+              className="retro-button landing-action-button !px-5 !py-3 text-base"
             >
               Read the Docs
             </a>
             <a
               href="#docs-enh-verification"
               onClick={go('#docs-enh-verification')}
-              className="retro-button !px-5 !py-3 text-base"
+              className="retro-button landing-action-button !px-5 !py-3 text-base"
             >
               2026 Risk Archive
             </a>
             <a
               href="#pipeline"
-              className="font-mono text-[11px] uppercase tracking-[0.25em] text-ink/60 underline-offset-4 hover:text-ink hover:underline"
+              className="font-mono text-[11px] uppercase tracking-[0.25em] text-ink/60 underline-offset-4 transition-colors hover:text-ink hover:underline"
             >
               ▾ How it works
             </a>
           </div>
 
-          <dl className="mt-6 grid grid-cols-2 gap-px border-[3px] border-ink bg-ink sm:grid-cols-4">
+          <dl className="landing-hero-item mt-6 grid grid-cols-2 gap-px border-[3px] border-ink bg-ink sm:grid-cols-4" style={revealDelay(450)}>
             <Stat label="FORECAST HOURS" value="f00–f48" sub="hourly resolution" />
             <Stat label="PROVIDER CHAIN" value="3-tier" sub="live · fallback · mock" />
             <Stat label="HAZARD HEADS" value="3 + 1" sub="tor · hail · wind · flood" />
@@ -312,8 +363,10 @@ function Hero() {
         </div>
 
         {/* Right: telemetry panel */}
-        <div className="relative">
-          <div className="retro-card-lg retro-scanline bg-ink p-0 text-paper">
+        <div className="landing-hero-panel relative">
+          <div className="retro-card-lg retro-scanline landing-telemetry-card relative overflow-hidden bg-ink p-0 text-paper">
+            <div className="landing-panel-glow" aria-hidden />
+            <div className="landing-sweep-line" aria-hidden />
             {/* corner crosshairs */}
             <CornerMarks />
 
@@ -331,7 +384,7 @@ function Hero() {
               <DarkStat label="UTC TIME" value={clock.timeFull} sub={clock.date} />
               <DarkStat label="CYCLE" value="12Z RUN" sub="auto-detected" />
               <DarkStat label="OUTLOOK" value="ENH" valueClass="bg-risk-enh text-paper px-2" sub="central plains" />
-              <DarkStat label="MAIN HAZARD" value="🌪 TORNADO" sub="conf 72%" />
+              <DarkStat label="MAIN HAZARD" value="TORNADO" sub="conf 72%" />
               <DarkStat label="SPC QC" value="LEDGER" valueClass="text-signal-lime" sub="risk counts" />
               <DarkStat label="SPC AGREE" value="35%" sub="QC sample" />
             </div>
@@ -381,7 +434,7 @@ function CornerMarks() {
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="bg-paper p-3">
+    <div className="landing-stat bg-paper p-3">
       <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink/50">{label}</div>
       <div className="mt-1 font-display text-xl font-extrabold uppercase tracking-tight text-ink">{value}</div>
       {sub && <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.2em] text-ink/50">{sub}</div>}
@@ -391,7 +444,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 
 function DarkStat({ label, value, sub, valueClass = '' }: { label: string; value: string; sub?: string; valueClass?: string }) {
   return (
-    <div className="bg-ink p-3">
+    <div className="landing-dark-stat bg-ink p-3">
       <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-paper/50">{label}</div>
       <div className={`mt-1 inline-block font-display text-base font-extrabold uppercase leading-none tracking-tight text-paper ${valueClass}`}>
         {value}
@@ -430,12 +483,12 @@ function ProbabilityTile() {
   };
   return (
     <div
-      className="grid gap-px border-[2px] border-paper/30 bg-paper/20 p-px"
+      className="landing-probability-grid grid gap-px border-[2px] border-paper/30 bg-paper/20 p-px"
       style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
       aria-hidden
     >
       {cells.map((v, i) => (
-        <div key={i} className={`aspect-square ${colorFor(v)}`} />
+        <div key={i} className={`landing-heat-cell aspect-square ${colorFor(v)}`} style={heatDelay(i, cols)} />
       ))}
     </div>
   );
@@ -469,7 +522,7 @@ function LiveTickerBand() {
     </div>
   );
   return (
-    <div className="border-b-[3px] border-ink bg-ink text-paper/80">
+    <div className="landing-ticker border-b-[3px] border-ink bg-ink text-paper/80">
       <div className="overflow-hidden font-mono text-[11px] uppercase tracking-[0.3em]">
         <div className="flex animate-ticker whitespace-nowrap">
           {span}
@@ -488,18 +541,25 @@ function RiskRamp() {
   return (
     <section className="border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="RAMP / 02" title="Six categories. One ladder." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          AutoOutlook honors the SPC categorical convention. Each step on the ramp narrows where, when, and how
-          confident the system is about severe convection. Risk polygons render as concentric annuli — never solid disks —
-          so each color band marks where <em>that</em> category is the highest applicable risk.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="RAMP / 02" title="Six categories. One ladder." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            AutoOutlook honors the SPC categorical convention. Each step on the ramp narrows where, when, and how
+            confident the system is about severe convection. Risk polygons render as concentric annuli — never solid disks —
+            so each color band marks where <em>that</em> category is the highest applicable risk.
+          </p>
+        </div>
 
         <div className="mt-10 grid grid-cols-1 gap-px border-[3px] border-ink bg-ink md:grid-cols-3 lg:grid-cols-6">
           {RISK_ORDER.map((code) => {
             const meta = RISK_META[code];
             return (
-              <div key={code} className={`relative flex flex-col p-4 ${meta.tw}`}>
+              <div
+                key={code}
+                className={`landing-risk-card landing-reveal relative flex flex-col p-4 ${meta.tw}`}
+                data-landing-reveal="true"
+                style={revealDelay(90 + meta.ord * 55)}
+              >
                 <div className="flex items-center justify-between">
                   <span className="font-mono text-[10px] uppercase tracking-[0.3em] opacity-70">
                     {String(meta.ord + 1).padStart(2, '0')} / 06
@@ -520,12 +580,12 @@ function RiskRamp() {
         </div>
 
         {/* gradient bar */}
-        <div className="mt-6 grid grid-cols-6 gap-0 border-[3px] border-ink shadow-retro">
+        <div className="landing-reveal mt-6 grid grid-cols-6 gap-0 border-[3px] border-ink shadow-retro" data-landing-reveal="true" style={revealDelay(260)}>
           {RISK_ORDER.map((code) => (
-            <div key={code} className={`${RISK_META[code].tw} h-4`} aria-hidden />
+            <div key={code} className={`landing-ramp-segment ${RISK_META[code].tw} h-4`} aria-hidden />
           ))}
         </div>
-        <div className="mt-1 grid grid-cols-6 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/60">
+        <div className="landing-reveal mt-1 grid grid-cols-6 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/60" data-landing-reveal="true" style={revealDelay(310)}>
           {RISK_ORDER.map((code) => (
             <span key={code} className="text-center">
               {RISK_META[code].chipText}
@@ -545,16 +605,23 @@ function CapabilitiesBento() {
   return (
     <section id="capabilities" className="scroll-mt-20 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="CAPABILITIES / 03" title="An operations console, not a chart." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          Every panel exists to answer one operational question. The dashboard refuses generic SaaS chrome —
-          controls are compact, labels are explicit, and the sidebar now stays focused on the panels that matter
-          during forecast review.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="CAPABILITIES / 03" title="An operations console, not a chart." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            Every panel exists to answer one operational question. The dashboard refuses generic SaaS chrome —
+            controls are compact, labels are explicit, and the sidebar now stays focused on the panels that matter
+            during forecast review.
+          </p>
+        </div>
 
         <div className="mt-10 grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-          {CAPABILITIES.map((c) => (
-            <article key={c.tag} className="retro-card group relative flex flex-col p-5 transition-transform hover:-translate-x-0.5 hover:-translate-y-0.5">
+          {CAPABILITIES.map((c, idx) => (
+            <article
+              key={c.tag}
+              className="retro-card landing-card-motion landing-reveal group relative flex flex-col p-5"
+              data-landing-reveal="true"
+              style={revealDelay(80 + idx * 50)}
+            >
               <div className="flex items-center justify-between">
                 <span className={`inline-block h-3 w-3 border-[2px] border-ink ${c.accent}`} aria-hidden />
                 <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/50">[ {c.tag} ]</span>
@@ -583,15 +650,22 @@ function HowItWorks() {
   return (
     <section id="pipeline" className="scroll-mt-20 relative border-b-[3px] border-ink bg-ink text-paper retro-scanline">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="PIPELINE / 04" title="From raw model data to verified outlook." dark />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-paper/70 sm:text-lg">
-          AutoOutlook is a hands-off pipeline. The outlook is generated automatically on a fixed cadence;
-          visitors never trigger expensive forecast work — by design. The site only ever shows fully-published bundles.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="PIPELINE / 04" title="From raw model data to verified outlook." dark />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-paper/70 sm:text-lg">
+            AutoOutlook is a hands-off pipeline. The outlook is generated automatically on a fixed cadence;
+            visitors never trigger expensive forecast work — by design. The site only ever shows fully-published bundles.
+          </p>
+        </div>
 
         <ol className="mt-10 grid grid-cols-1 gap-px border-[3px] border-paper/20 bg-paper/15 md:grid-cols-2 lg:grid-cols-5">
-          {PIPELINE_STEPS.map((step) => (
-            <li key={step.code} className="relative flex flex-col gap-3 bg-ink p-5">
+          {PIPELINE_STEPS.map((step, idx) => (
+            <li
+              key={step.code}
+              className="landing-pipeline-step landing-reveal relative flex flex-col gap-3 bg-ink p-5"
+              data-landing-reveal="true"
+              style={revealDelay(90 + idx * 70)}
+            >
               <div className="flex items-center justify-between">
                 <span className="font-display text-4xl font-extrabold leading-none tracking-tight text-signal-amber">
                   {step.code}
@@ -612,7 +686,7 @@ function HowItWorks() {
         </ol>
 
         {/* leakage guard callout */}
-        <div className="mt-8 grid grid-cols-1 gap-px border-[3px] border-signal-red bg-signal-red md:grid-cols-[auto_1fr]">
+        <div className="landing-leakage-card landing-reveal mt-8 grid grid-cols-1 gap-px border-[3px] border-signal-red bg-signal-red md:grid-cols-[auto_1fr]" data-landing-reveal="true" style={revealDelay(180)}>
           <div className="flex items-center justify-center bg-signal-red px-4 py-3">
             <span className="font-display text-2xl font-extrabold uppercase tracking-tight text-paper">
               ⚠ LEAKAGE GUARD
@@ -640,18 +714,25 @@ function HazardsSection() {
   return (
     <section id="landing-hazards" className="scroll-mt-20 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="HAZARDS / 05" title="Tornado · Hail · Wind · Flood." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          Each hazard head publishes its own probability surface plus a SIG (significant severe) overlay where
-          appropriate. Probability bands honor the SPC convention and the offset / morphing SIG layer matches the
-          rendering documented in <span className="font-mono font-bold">docs/hazard-outlooks.md</span>.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="HAZARDS / 05" title="Tornado · Hail · Wind · Flood." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            Each hazard head publishes its own probability surface plus a SIG (significant severe) overlay where
+            appropriate. Probability bands honor the SPC convention and the offset / morphing SIG layer matches the
+            rendering documented in <span className="font-mono font-bold">docs/hazard-outlooks.md</span>.
+          </p>
+        </div>
 
         <div className="mt-10 grid grid-cols-1 gap-5 md:grid-cols-2">
-          {HAZARDS.map((h) => {
+          {HAZARDS.map((h, idx) => {
             const meta = HAZARD_META[h.key];
             return (
-              <article key={h.key} className="retro-card relative flex flex-col p-0">
+              <article
+                key={h.key}
+                className="retro-card landing-card-motion landing-reveal relative flex flex-col p-0"
+                data-landing-reveal="true"
+                style={revealDelay(90 + idx * 65)}
+              >
                 <div className="flex items-center justify-between border-b-[3px] border-ink bg-ink px-4 py-2 text-paper">
                   <div className="flex items-center gap-3">
                     <span className="inline-flex h-9 w-9 items-center justify-center border-[2px] border-paper/40 bg-paper/5 text-xl">
@@ -737,12 +818,14 @@ function ProviderChain() {
   return (
     <section className="border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="RESILIENCE / 06" title="Three tiers. Always renders." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          The provider chain fails downward, never upward. Tier 1 is preferred. If it times out, the chain falls to
-          Tier 2. If both live tiers fail, the deterministic mock loads so the dashboard never goes dark — and the
-          source badge tells you exactly which tier won.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="RESILIENCE / 06" title="Three tiers. Always renders." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            The provider chain fails downward, never upward. Tier 1 is preferred. If it times out, the chain falls to
+            Tier 2. If both live tiers fail, the deterministic mock loads so the dashboard never goes dark — and the
+            source badge tells you exactly which tier won.
+          </p>
+        </div>
 
         <div className="mt-10 grid grid-cols-1 items-stretch gap-px border-[3px] border-ink bg-ink md:grid-cols-[1fr_auto_1fr_auto_1fr]">
           {PROVIDER_TIERS.map((t, idx) => (
@@ -763,7 +846,7 @@ function ProviderChain() {
 
 function Tier({ tier, tone, label, sub, copy, idx, total }: { tier: string; tone: TierTone; label: string; sub: string; copy: string; idx: number; total: number }) {
   return (
-    <div className="flex flex-col gap-3 bg-paper p-5">
+    <div className="landing-tier-card landing-reveal flex flex-col gap-3 bg-paper p-5" data-landing-reveal="true" style={revealDelay(90 + idx * 90)}>
       <div className="flex items-center justify-between">
         <RetroBadge tone={tone}>{tier}</RetroBadge>
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/50">
@@ -787,18 +870,22 @@ function TechStack() {
   return (
     <section id="stack" className="scroll-mt-20 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="STACK / 07" title="Boring tools. Loud results." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          AutoOutlook is built on widely-deployed primitives so the operations posture stays simple.
-          Vite + React + TypeScript power the interactive console. Every outlook ships as a pre-built bundle
-          — risk polygons, probability tiles, and metadata land together with no live computation per visitor.
-        </p>
+        <div className="landing-reveal" data-landing-reveal="true">
+          <SectionHead tag="STACK / 07" title="Boring tools. Loud results." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            AutoOutlook is built on widely-deployed primitives so the operations posture stays simple.
+            Vite + React + TypeScript power the interactive console. Every outlook ships as a pre-built bundle
+            — risk polygons, probability tiles, and metadata land together with no live computation per visitor.
+          </p>
+        </div>
 
         <div className="mt-10 flex flex-wrap gap-2">
-          {TECH_PILLS.map((t) => (
+          {TECH_PILLS.map((t, idx) => (
             <span
               key={t}
-              className="border-[2px] border-ink bg-paper px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.25em] shadow-retro-sm"
+              className="landing-tech-pill landing-reveal border-[2px] border-ink bg-paper px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.25em] shadow-retro-sm"
+              data-landing-reveal="true"
+              style={revealDelay(40 + idx * 24)}
             >
               {t}
             </span>
@@ -817,7 +904,7 @@ function TechStack() {
 
 function FactCard({ k, label, sub }: { k: string; label: string; sub: string }) {
   return (
-    <div className="retro-card flex flex-col p-5">
+    <div className="retro-card landing-card-motion landing-reveal flex flex-col p-5" data-landing-reveal="true">
       <div className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/50">{label}</div>
       <div className="mt-2 font-display font-extrabold uppercase leading-none tracking-[-0.03em]" style={{ fontSize: 'clamp(2.5rem, 6vw, 4.5rem)' }}>
         {k}
@@ -833,15 +920,18 @@ function FactCard({ k, label, sub }: { k: string; label: string; sub: string }) 
 
 function FinalCTA() {
   return (
-    <section className="relative overflow-hidden border-b-[3px] border-ink bg-paper">
+    <section className="landing-atmosphere relative overflow-hidden border-b-[3px] border-ink bg-paper">
       <div className="pointer-events-none absolute inset-0 retro-grid-bg opacity-60" aria-hidden />
+      <div className="landing-drift-field" aria-hidden />
       <div className="relative mx-auto max-w-[1400px] px-4 py-16 sm:px-6 lg:py-24">
-        <div className="retro-card-lg retro-scanline relative bg-ink p-8 text-paper sm:p-12">
+        <div className="retro-card-lg retro-scanline landing-final-card landing-reveal relative overflow-hidden bg-ink p-8 text-paper sm:p-12" data-landing-reveal="true">
+          <div className="landing-panel-glow" aria-hidden />
+          <div className="landing-sweep-line" aria-hidden />
           <CornerMarks />
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v1.0</RetroBadge>
+            <RetroBadge tone="amber">v1.1</RetroBadge>
           </div>
 
           <h2
@@ -897,7 +987,7 @@ function FinalCTA() {
 function OpenFetchSponsor() {
   return (
     <section className="border-b-[3px] border-ink bg-signal-amber">
-      <div className="mx-auto grid max-w-[1400px] grid-cols-1 gap-px border-x-[3px] border-ink bg-ink sm:grid-cols-[1fr_auto]">
+      <div className="landing-reveal mx-auto grid max-w-[1400px] grid-cols-1 gap-px border-x-[3px] border-ink bg-ink sm:grid-cols-[1fr_auto]" data-landing-reveal="true">
         <div className="bg-signal-amber px-4 py-8 sm:px-6 lg:px-8">
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="ink">Sponsor Repository</RetroBadge>
@@ -940,7 +1030,7 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.0
+          AutoOutlook · Automated Convective Risk Intelligence · v1.1
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>
@@ -983,6 +1073,8 @@ function SectionHead({ tag, title, dark = false }: { tag: string; title: string;
 // ---------------------------------------------------------------------------
 
 export default function LandingPage() {
+  useLandingReveal();
+
   // Scroll to top on initial mount of the landing page so anchors don't trap.
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -991,7 +1083,7 @@ export default function LandingPage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-paper text-ink">
+    <div className="landing-page min-h-screen bg-paper text-ink">
       <LandingNav />
       <main>
         <Hero />

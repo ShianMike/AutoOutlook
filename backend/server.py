@@ -293,67 +293,15 @@ def latest_outlook_spc_day1_category():
 
 
 def _available_merge_dates_list(model: str) -> list[str]:
-    from datetime import datetime, timezone, timedelta
+    from backend.ml.merged_outlook import available_merged_d1_dates
+
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
-    if not artifact_root.exists():
-        return []
-        
-    dates_set = set()
-    for child in artifact_root.iterdir():
-        if not child.is_dir():
-            continue
-        index_path = child / "index.json"
-        if not index_path.exists():
-            index_path = child / "metadata.json"
-        if not index_path.exists():
-            continue
-            
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-            
-        status = index.get("status")
-        if status not in ("complete", "partial"):
-            continue
-            
-        ready = index.get("readyForecastHours")
-        if not isinstance(ready, list) or not ready:
-            continue
-            
-        cycle_time_str = index.get("cycleTimeISO")
-        if not cycle_time_str:
-            continue
-            
-        try:
-            cycle_time = datetime.fromisoformat(cycle_time_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except ValueError:
-            continue
-            
-        # Check if model matches
-        cycle_policy = index.get("cyclePolicy") or {}
-        cycle_model = cycle_policy.get("model") or index.get("model", {}).get("name") or "HRRR"
-        if str(cycle_model).lower() != model.lower():
-            continue
-            
-        # Add dates of D1 windows overlapping with ready forecast hours
-        for h in ready:
-            try:
-                forecast_hour = int(h)
-            except (TypeError, ValueError):
-                continue
-            valid_time = cycle_time + timedelta(hours=forecast_hour)
-            d1_start = valid_time.date()
-            if valid_time.hour < 12:
-                d1_start -= timedelta(days=1)
-            dates_set.add(d1_start.isoformat())
-            
-    return sorted(list(dates_set), reverse=True)
+    return available_merged_d1_dates(artifact_root, model)
 
 
 def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> Path | None:
     """Ensure that the merged artifacts for target_date_str are generated and return path."""
-    from datetime import date, datetime, timezone, timedelta
+    from datetime import date, datetime, timezone
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
     
     # 1. Resolve target date
@@ -373,30 +321,43 @@ def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> P
     verification_path = merged_dir / "merged_verification_summary.json"
     tile_path = merged_dir / "merged_probability_tile.json"
     index_path = merged_dir / "merged_d1_index.json"
+
+    def target_cycle_dirs() -> list[Path]:
+        from backend.ml.merged_outlook import resolve_cycle_dirs_for_merged_d1_date
+
+        return resolve_cycle_dirs_for_merged_d1_date(artifact_root, target_date, model)
+
+    def cycle_time_isos(cycle_dirs: list[Path]) -> list[str]:
+        values: list[str] = []
+        for cycle_dir in cycle_dirs:
+            cycle_idx_path = cycle_dir / "index.json"
+            if not cycle_idx_path.exists():
+                cycle_idx_path = cycle_dir / "metadata.json"
+            if not cycle_idx_path.exists():
+                continue
+            try:
+                cycle_idx = json.loads(cycle_idx_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cycle_time_str = cycle_idx.get("cycleTimeISO")
+            if cycle_time_str and cycle_time_str not in values:
+                values.append(cycle_time_str)
+        return values
     
     def check_freshness() -> bool:
         if not (verification_path.exists() and tile_path.exists() and index_path.exists()):
             return False
-            
-        is_historical = True
-        now_utc = datetime.now(timezone.utc).date()
-        if abs((target_date - now_utc).days) <= 1:
-            is_historical = False
-            
-        if is_historical:
-            return True
-            
-        # For non-historical, check if cached files are up-to-date with contributing forecast cycle index files
-        d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
-        d1_expire = d1_valid + timedelta(days=1)
-        
-        from backend.ml.merged_outlook import resolve_cycle_dirs_for_window
-        cycle_dirs = resolve_cycle_dirs_for_window(artifact_root, d1_valid, d1_expire, model)
+
+        # Check if cached files are up-to-date with the selected run-anchored cycle.
+        cycle_dirs = target_cycle_dirs()
         if not cycle_dirs:
             return False
+        expected_cycle_time_isos = cycle_time_isos(cycle_dirs)
             
         try:
             cached_index = json.loads(index_path.read_text(encoding="utf-8"))
+            if cached_index.get("mergedCycleTimeISOs") != expected_cycle_time_isos:
+                return False
             cached_gen_time_str = cached_index.get("generatedAtISO")
             if not cached_gen_time_str:
                 return False
@@ -433,11 +394,9 @@ def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> P
         if check_freshness():
             return merged_dir
             
-        d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
-        d1_expire = d1_valid + timedelta(days=1)
-        
-        from backend.ml.merged_outlook import resolve_cycle_dirs_for_window, merge_cycles_for_spc_window
-        cycle_dirs = resolve_cycle_dirs_for_window(artifact_root, d1_valid, d1_expire, model)
+        from backend.ml.merged_outlook import merge_cycles_for_spc_window
+
+        cycle_dirs = target_cycle_dirs()
         if not cycle_dirs:
             return None
             

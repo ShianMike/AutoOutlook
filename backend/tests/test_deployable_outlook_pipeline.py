@@ -56,6 +56,7 @@ from backend.ml.outlook_pipeline import (
     FetchedHour,
     _cache_previous_incremental_cycle,
     _hydrate_incremental_artifacts_from_gcs,
+    _merged_d1_00z_cache_dir,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
     _publish_incremental_shard_artifacts_to_gcs,
@@ -3929,6 +3930,47 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(complete_index["cycle"], "new")
             self.assertTrue((complete_dir / "hours" / "f00" / "probability_tile.json").exists())
 
+    def test_complete_snapshot_publish_preserves_00z_cache_for_merged_d1(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            index_00z = {
+                "status": "complete",
+                "readyForecastHours": [0],
+                "requestedForecastHours": [0],
+                "cycle": "HRRR 00Z 20260608",
+                "cycleTimeISO": "2026-06-08T00:00:00Z",
+                "cyclePolicy": {"model": "HRRR"},
+            }
+            (output_dir / "index.json").write_text(json.dumps(index_00z), encoding="utf-8")
+            (output_dir / "metadata.json").write_text(json.dumps(index_00z), encoding="utf-8")
+            (hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "00z"}), encoding="utf-8")
+
+            _publish_complete_incremental_snapshot(output_dir, index_00z, [0])
+
+            cache_dir = _merged_d1_00z_cache_dir(output_dir)
+            cache_index = json.loads((cache_dir / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache_index["cycleTimeISO"], "2026-06-08T00:00:00Z")
+            self.assertTrue((cache_dir / "hours" / "f00" / "probability_tile.json").exists())
+
+            index_06z = {
+                **index_00z,
+                "cycle": "HRRR 06Z 20260608",
+                "cycleTimeISO": "2026-06-08T06:00:00Z",
+            }
+            (output_dir / "index.json").write_text(json.dumps(index_06z), encoding="utf-8")
+            (output_dir / "metadata.json").write_text(json.dumps(index_06z), encoding="utf-8")
+            (hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "06z"}), encoding="utf-8")
+
+            _publish_complete_incremental_snapshot(output_dir, index_06z, [0])
+
+            cache_index_after_06z = json.loads((cache_dir / "index.json").read_text(encoding="utf-8"))
+            cache_tile_after_06z = json.loads((cache_dir / "hours" / "f00" / "probability_tile.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache_index_after_06z["cycleTimeISO"], "2026-06-08T00:00:00Z")
+            self.assertEqual(cache_tile_after_06z["cycle"], "00z")
+
     def test_gcs_incremental_publish_uses_artifact_layout_and_index_last(self) -> None:
         uploads: list[str] = []
 
@@ -3965,6 +4007,11 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
                 (hour_dir / name).write_text(json.dumps({"name": name}), encoding="utf-8")
             _publish_complete_incremental_snapshot(output_dir, index, [0])
+            zeroz_cache = _merged_d1_00z_cache_dir(output_dir)
+            zeroz_hour_dir = zeroz_cache / "hours" / "f00"
+            zeroz_hour_dir.mkdir(parents=True)
+            (zeroz_cache / "index.json").write_text(json.dumps({"cycle": "HRRR 00Z 20260608"}), encoding="utf-8")
+            (zeroz_hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "00z"}), encoding="utf-8")
 
             result = _publish_incremental_artifacts_to_gcs(output_dir, index, [0], "bucket", "prod/artifacts")
 
@@ -3972,12 +4019,17 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         current_index_key = "prod/artifacts/latest_incremental/index.json"
         complete_hour_key = "prod/artifacts/latest_incremental_complete/hours/f00/probability_tile.json"
         complete_index_key = "prod/artifacts/latest_incremental_complete/index.json"
+        zeroz_hour_key = "prod/artifacts/latest_incremental_hrrr_00z/hours/f00/probability_tile.json"
+        zeroz_index_key = "prod/artifacts/latest_incremental_hrrr_00z/index.json"
         self.assertEqual(result["currentFiles"], 5)
         self.assertEqual(result["completeFiles"], 5)
+        self.assertEqual(result["mergedD1ZeroZFiles"], 2)
         self.assertIn(current_hour_key, uploads)
         self.assertIn(complete_hour_key, uploads)
+        self.assertIn(zeroz_hour_key, uploads)
         self.assertLess(uploads.index(current_hour_key), uploads.index(current_index_key))
         self.assertLess(uploads.index(complete_hour_key), uploads.index(complete_index_key))
+        self.assertLess(uploads.index(zeroz_hour_key), uploads.index(zeroz_index_key))
 
     def test_gcs_shard_publish_uploads_only_processed_hour_dirs(self) -> None:
         uploads: list[str] = []
@@ -4053,6 +4105,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                     FakeBlob("prod/latest_incremental/index.json", '{"status":"complete"}'),
                     FakeBlob("prod/latest_incremental/hours/f00/metadata.json", '{"forecastHour":0}'),
                     FakeBlob("prod/latest_incremental_complete/index.json", '{"status":"complete"}'),
+                    FakeBlob("prod/latest_incremental_hrrr_00z/index.json", '{"cycle":"HRRR 00Z 20260608"}'),
                 ]
 
             def list_blobs(self, prefix: str):
@@ -4072,9 +4125,11 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertTrue((output_dir / "index.json").exists())
             self.assertTrue((output_dir / "hours" / "f00" / "metadata.json").exists())
             self.assertTrue((Path(tmp) / "latest_incremental_complete" / "index.json").exists())
+            self.assertTrue((Path(tmp) / "latest_incremental_hrrr_00z" / "index.json").exists())
 
         self.assertEqual(result["currentFiles"], 2)
         self.assertEqual(result["completeFiles"], 1)
+        self.assertEqual(result["mergedD1ZeroZFiles"], 1)
 
     def test_gcs_hydrate_skips_objects_deleted_during_concurrent_publish(self) -> None:
         class NotFound(Exception):

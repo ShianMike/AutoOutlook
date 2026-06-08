@@ -309,7 +309,7 @@ export default function OutlookMapPanel({
     const controller = new AbortController();
     const loadDates = async () => {
       try {
-        const response = await fetch(apiUrl('/api/outlook/merged-d1-available-dates'), { signal: controller.signal });
+        const response = await fetch(apiUrl(`/api/outlook/merged-d1-available-dates?region=${activeRegion}`), { signal: controller.signal });
         if (response.ok) {
           const res = await response.json();
           if (res.dates && res.dates.length > 0) {
@@ -326,7 +326,7 @@ export default function OutlookMapPanel({
     };
     loadDates();
     return () => controller.abort();
-  }, [availableMergedDatesOverride, selectedMergedDate, setSelectedMergedDate]);
+  }, [activeRegion, availableMergedDatesOverride, selectedMergedDate, setSelectedMergedDate]);
 
   const liveMergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
     enabled: !mergedArtifactsOverride,
@@ -400,9 +400,10 @@ export default function OutlookMapPanel({
     : stormReportsMode !== 'none' && stormReports.length === 0
       ? `No reports · SPC thru ${fmtShortDate(latestAvailableReportDate)}`
       : `SPC thru ${fmtShortDate(latestAvailableReportDate)}`;
+  const mergedCycleLabel = (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.mergedCycles?.[0] ?? 'Merged D1';
 
   const timeRows = [
-    ['Cycle', viewType === 'merged' ? 'Merged Multi-Cycle' : (artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO))],
+    ['Cycle', viewType === 'merged' ? mergedCycleLabel : (artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO))],
     ['Forecast valid', validTimeText],
     ['Artifact generated', fmtUTC(artifactMetadata?.generatedAtISO)],
   ] as const;

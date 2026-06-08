@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 
 import RetroBadge from '../retro/RetroBadge';
 import { viewLinkHandler } from '../../utils/navigateView';
@@ -84,10 +84,57 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.1',
+    codename: 'Merged D1 00Z Lock & Animated Release Console',
+    date: '2026-06-08',
+    status: 'CURRENT',
+    summary:
+      'This release fixes the Merged Day 1 outlook so it displays the selected day\'s 00Z run, limits the date picker to the latest two available days, preserves the daily 00Z merged cache when later cycles arrive, and adds polished motion to the landing page and in-app changelog.',
+    highlights: [
+      'Merged D1 now uses the selected day\'s 00Z run: choosing March 25 points the merged outlook at March 25 00Z instead of a later cycle.',
+      'Date picker is capped to two available days so stale archive dates do not appear in the live Merged D1 control.',
+      '00Z cache is preserved: 06Z, 12Z, and 18Z refreshes no longer overwrite the Merged D1 source bundle for that day.',
+      'Landing page animations: Added atmospheric drift, staggered hero reveal, animated telemetry, hover glints, and reduced-motion support.',
+      'In-app changelog animations: Added release-tape motion, sticky filter treatment, animated release cards, and row-level change reveals.',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Merged D1 uses the selected day 00Z run',
+        body: 'The Merged D1 outlook now anchors to the selected calendar day at 00Z, so the visible forecast cycle matches the chosen date.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Later cycles do not overwrite merged D1',
+        body: 'The daily 00Z merged cache is stored separately, allowing 06Z, 12Z, and 18Z refreshes to update normal artifacts without replacing the Merged D1 source.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Merged D1 date list capped to two days',
+        body: 'The Merged D1 date dropdown now exposes only the latest two available dates to keep the live control focused on current guidance.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Animated landing page',
+        body: 'Added page-load sequencing, moving forecast texture, telemetry sweep effects, animated probability tiles, hover glints, and reduced-motion handling.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Animated in-app changelog',
+        body: 'Added release-tape atmosphere, diff panel sweeps, sticky animated filters, staged release cards, and change-row reveals.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.1',
+        body: 'Updated package metadata, app footers, docs badges, landing copy, transition copy, and the in-app changelog current release to v1.1.',
+      },
+    ],
+  },
+  {
     version: 'v1.0',
     codename: '2026 Risk Archive, SPC Hazard Layers & OpenFetch Sponsor',
     date: '2026-06-06',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release promotes the historical ENH+ verification workflow into a dedicated 2026 Risk Archive, adds official SPC Day 1 hazard probability layers for tornado, hail, and wind comparison, fixes malformed hazard polygons, and updates the landing page with direct archive access plus an OpenFetch repository sponsor strip.',
     highlights: [
@@ -675,11 +722,56 @@ function countByKind(release: VersionRelease, kind: ChangeKind): number {
   return release.changes.filter((c) => c.kind === kind).length;
 }
 
+function useChangelogReveal() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-changelog-reveal]'));
+    if (!targets.length) return undefined;
+
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion || !('IntersectionObserver' in window)) {
+      targets.forEach((target) => {
+        target.dataset.changelogVisible = 'true';
+      });
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const target = entry.target as HTMLElement;
+          target.dataset.changelogVisible = 'true';
+          observer.unobserve(target);
+        });
+      },
+      {
+        rootMargin: '0px 0px -10% 0px',
+        threshold: 0.12,
+      },
+    );
+
+    targets.forEach((target) => observer.observe(target));
+    return () => observer.disconnect();
+  }, []);
+}
+
+function revealDelay(ms: number): CSSProperties {
+  return { '--changelog-reveal-delay': `${ms}ms` } as CSSProperties;
+}
+
+function rowDelay(index: number): CSSProperties {
+  return { '--changelog-row-delay': `${Math.min(index, 6) * 55}ms` } as CSSProperties;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
 export default function ChangelogPage() {
+  useChangelogReveal();
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0 });
@@ -699,7 +791,7 @@ export default function ChangelogPage() {
   };
 
   return (
-    <div className="min-h-screen bg-paper text-ink">
+    <div className="changelog-page min-h-screen bg-paper text-ink">
       <ChangelogNav />
       <main>
         <ChangelogHero />
@@ -720,7 +812,7 @@ function ChangelogNav() {
   const time = useUtcClock();
   const current = RELEASES[0];
   return (
-    <header className="sticky top-0 z-40 border-b-[3px] border-ink bg-paper">
+    <header className="changelog-nav sticky top-0 z-40 border-b-[3px] border-ink bg-paper">
       <div className="mx-auto flex max-w-[1400px] items-center gap-4 px-4 py-2.5 sm:px-6">
         <a href="#" onClick={go('')} className="flex items-center gap-3">
           <div className="border-[3px] border-ink bg-ink px-2 py-1 font-mono text-[10px] font-bold tracking-[0.3em] text-paper">
@@ -759,7 +851,7 @@ function ChangelogNav() {
           <a
             href="#dashboard"
             onClick={go('#dashboard')}
-            className="retro-button retro-button-primary text-[11px]"
+            className="retro-button retro-button-primary whitespace-nowrap text-[11px]"
           >
             Launch Dashboard ▸
           </a>
@@ -777,50 +869,53 @@ function ChangelogHero() {
   const current = RELEASES[0];
   const previous = RELEASES[1];
   return (
-    <section className="relative border-b-[3px] border-ink bg-paper">
+    <section className="changelog-atmosphere relative overflow-hidden border-b-[3px] border-ink bg-paper">
       <div className="pointer-events-none absolute inset-0 retro-grid-bg opacity-60" aria-hidden />
+      <div className="changelog-drift-field" aria-hidden />
+      <div className="changelog-release-beam changelog-release-beam-a" aria-hidden />
+      <div className="changelog-release-beam changelog-release-beam-b" aria-hidden />
 
       <div className="relative mx-auto grid max-w-[1400px] grid-cols-1 gap-8 px-4 py-12 sm:px-6 lg:grid-cols-[1.3fr_1fr] lg:gap-10 lg:py-20">
         <div className="flex flex-col gap-6">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="changelog-hero-item flex flex-wrap items-center gap-2" style={revealDelay(60)}>
             <RetroBadge tone="ink">[ PATCH NOTES / 00 ]</RetroBadge>
             <RetroBadge tone="lime" pulse>CURRENT · {current.version}</RetroBadge>
             <RetroBadge tone="paper">Updated {formatDate(current.date)}</RetroBadge>
           </div>
 
           <h1
-            className="font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
-            style={{ fontSize: 'clamp(3rem, 9vw, 7.5rem)' }}
+            className="changelog-hero-item changelog-title font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
+            style={{ ...revealDelay(135), fontSize: 'clamp(3rem, 9vw, 7.5rem)' }}
           >
             Patch<span className="text-signal-amber">Notes</span>
           </h1>
 
-          <p className="max-w-[640px] font-display text-xl font-bold uppercase leading-tight tracking-tight text-ink/80 sm:text-2xl lg:text-3xl">
+          <p className="changelog-hero-item max-w-[640px] font-display text-xl font-bold uppercase leading-tight tracking-tight text-ink/80 sm:text-2xl lg:text-3xl" style={revealDelay(215)}>
             What shipped, what broke, what got fixed.
             <br />
             <span className="text-ink/55">{current.version} · {current.codename}.</span>
           </p>
 
-          <p className="max-w-[640px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+          <p className="changelog-hero-item max-w-[640px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg" style={revealDelay(295)}>
             {current.summary}
           </p>
 
-          <div className="flex flex-wrap items-center gap-3 pt-2">
+          <div className="changelog-hero-item flex flex-wrap items-center gap-3 pt-2" style={revealDelay(375)}>
             <a
               href={`#release-${current.version.replace('.', '-')}`}
-              className="retro-button retro-button-primary !px-5 !py-3 text-base"
+              className="retro-button retro-button-primary changelog-action-button !px-5 !py-3 text-base"
             >
               ▾ Read {current.version} in full
             </a>
             <a
               href={`#release-${previous.version.replace('.', '-')}`}
-              className="retro-button !px-5 !py-3 text-base"
+              className="retro-button changelog-action-button !px-5 !py-3 text-base"
             >
               See {previous.version}
             </a>
           </div>
 
-          <dl className="mt-6 grid grid-cols-2 gap-px border-[3px] border-ink bg-ink sm:grid-cols-4">
+          <dl className="changelog-hero-item mt-6 grid grid-cols-2 gap-px border-[3px] border-ink bg-ink sm:grid-cols-4" style={revealDelay(455)}>
             <HeroStat label="CURRENT" value={current.version} sub={current.codename} />
             <HeroStat label="PREVIOUS" value={previous.version} sub={previous.codename} />
             <HeroStat label="RELEASES" value={String(RELEASES.length)} sub="versions shipped" />
@@ -829,8 +924,10 @@ function ChangelogHero() {
         </div>
 
         {/* Right: version diff panel */}
-        <div className="relative">
-          <div className="retro-card-lg retro-scanline bg-ink p-0 text-paper">
+        <div className="changelog-hero-panel relative">
+          <div className="retro-card-lg retro-scanline changelog-diff-panel relative overflow-hidden bg-ink p-0 text-paper">
+            <div className="changelog-panel-glow" aria-hidden />
+            <div className="changelog-sweep-line" aria-hidden />
             <CornerMarks />
             <div className="flex items-center justify-between border-b-[3px] border-paper/15 px-4 py-2">
               <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
@@ -847,8 +944,8 @@ function ChangelogHero() {
                 {current.version} highlights
               </span>
               <ul className="mt-3 flex flex-col gap-2">
-                {current.highlights.map((h) => (
-                  <li key={h} className="flex items-start gap-3">
+                {current.highlights.map((h, idx) => (
+                  <li key={h} className="changelog-highlight-row flex items-start gap-3" style={rowDelay(idx)}>
                     <span className="mt-1 inline-block h-2 w-2 shrink-0 bg-signal-amber" aria-hidden />
                     <span className="font-sans text-sm leading-snug text-paper/90">{h}</span>
                   </li>
@@ -864,7 +961,7 @@ function ChangelogHero() {
                 {CHANGE_KINDS.map((kind) => {
                   const count = countByKind(current, kind);
                   return (
-                    <div key={kind} className="bg-ink p-2 text-center">
+                    <div key={kind} className="changelog-matrix-cell bg-ink p-2 text-center">
                       <div className="font-mono text-[9px] uppercase tracking-[0.25em] text-paper/55">
                         {kind}
                       </div>
@@ -901,7 +998,7 @@ function CornerMarks() {
 
 function HeroStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="bg-paper p-3">
+    <div className="changelog-stat bg-paper p-3">
       <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink/50">{label}</div>
       <div className="mt-1 font-display text-xl font-extrabold uppercase tracking-tight text-ink">{value}</div>
       {sub && <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.2em] text-ink/50">{sub}</div>}
@@ -921,7 +1018,7 @@ function FilterStrip({
   onToggle: (kind: ChangeKind) => void;
 }) {
   return (
-    <section className="border-b-[3px] border-ink bg-ink text-paper">
+    <section className="changelog-filter-bar border-b-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/55">
           ▸ FILTER ·
@@ -930,7 +1027,7 @@ function FilterStrip({
           const active = activeFilters.has(kind);
           const tone = KIND_TONE[kind];
           const baseClass =
-            'inline-flex items-center gap-2 border-[2px] px-3 py-1 font-mono text-[10px] font-bold uppercase tracking-[0.25em] transition-all';
+            'changelog-filter-button inline-flex items-center gap-2 border-[2px] px-3 py-1 font-mono text-[10px] font-bold uppercase tracking-[0.25em] transition-all';
           const onClass = `${TONE_BORDER[tone]} ${TONE_BG[tone]} ${TONE_TEXT[tone]} shadow-retro-sm`;
           const offClass = 'border-paper/30 bg-transparent text-paper/55 hover:border-paper/60 hover:text-paper';
           return (
@@ -959,12 +1056,14 @@ function Timeline({ activeFilters }: { activeFilters: Set<ChangeKind> }) {
   return (
     <section className="border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-14 sm:px-6 lg:py-20">
-        <SectionHead tag="RELEASES / 01" title="Versions, newest first." />
-        <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
-          Every release ships as a single bundle — the dashboard, the docs, and the static
-          outlook artifacts all move together. Major themes get codenames; everything else lands
-          in NEW / FIX / IMPROVE / REMOVE / DOCS.
-        </p>
+        <div className="changelog-reveal" data-changelog-reveal="true">
+          <SectionHead tag="RELEASES / 01" title="Versions, newest first." />
+          <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
+            Every release ships as a single bundle — the dashboard, the docs, and the static
+            outlook artifacts all move together. Major themes get codenames; everything else lands
+            in NEW / FIX / IMPROVE / REMOVE / DOCS.
+          </p>
+        </div>
 
         <ol className="mt-12 flex flex-col gap-12">
           {RELEASES.map((release, idx) => (
@@ -990,9 +1089,14 @@ function ReleaseCard({
   const statusTone = STATUS_TONE[release.status];
 
   return (
-    <li id={anchor} className="scroll-mt-24 relative grid grid-cols-1 gap-px border-[3px] border-ink bg-ink lg:grid-cols-[280px_1fr]">
+    <li
+      id={anchor}
+      className="changelog-release-card changelog-reveal scroll-mt-24 relative grid grid-cols-1 gap-px border-[3px] border-ink bg-ink lg:grid-cols-[280px_1fr]"
+      data-changelog-reveal="true"
+      style={revealDelay(90 + Math.min(index, 5) * 55)}
+    >
       {/* Left rail */}
-      <div className="flex flex-col gap-4 bg-paper p-5">
+      <div className="changelog-release-rail flex flex-col gap-4 bg-paper p-5">
         <div className="flex items-center gap-2">
           <RetroBadge tone={statusTone}>{release.status}</RetroBadge>
           <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/55">
@@ -1029,7 +1133,7 @@ function ReleaseCard({
             return (
               <span
                 key={kind}
-                className={`inline-flex items-center gap-1 border-[2px] border-ink ${TONE_BG[tone]} ${TONE_TEXT[tone]} px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[0.2em] shadow-retro-sm`}
+                className={`changelog-count-chip inline-flex items-center gap-1 border-[2px] border-ink ${TONE_BG[tone]} ${TONE_TEXT[tone]} px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[0.2em] shadow-retro-sm`}
               >
                 <span className="text-[11px] leading-none">{KIND_GLYPH[kind]}</span>
                 <span>{kind}</span>
@@ -1053,7 +1157,11 @@ function ReleaseCard({
         ) : (
           <ul className="flex flex-col gap-px border-[3px] border-ink bg-ink">
             {visibleChanges.map((change, i) => (
-              <li key={`${change.kind}-${i}`} className="grid grid-cols-1 gap-px bg-ink sm:grid-cols-[96px_1fr]">
+              <li
+                key={`${change.kind}-${i}`}
+                className="changelog-change-row grid grid-cols-1 gap-px bg-ink sm:grid-cols-[96px_1fr]"
+                style={rowDelay(i)}
+              >
                 <div className={`flex items-start justify-center ${TONE_BG[KIND_TONE[change.kind]]} px-3 py-3 sm:py-4`}>
                   <span className={`inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.25em] ${TONE_TEXT[KIND_TONE[change.kind]]}`}>
                     <span className="text-[12px] leading-none">{KIND_GLYPH[change.kind]}</span>
@@ -1085,7 +1193,7 @@ function BackLinks() {
   return (
     <section className="border-b-[3px] border-ink bg-paper">
       <div className="mx-auto max-w-[1400px] px-4 py-12 sm:px-6 lg:py-16">
-        <div className="grid grid-cols-1 gap-px border-[3px] border-ink bg-ink md:grid-cols-3">
+        <div className="changelog-reveal grid grid-cols-1 gap-px border-[3px] border-ink bg-ink md:grid-cols-3" data-changelog-reveal="true">
           <BackTile
             href="#"
             onClick={go('')}
@@ -1130,7 +1238,7 @@ function BackTile({
     <a
       href={href}
       onClick={onClick}
-      className="group relative flex flex-col gap-3 bg-paper p-5 transition-all hover:bg-ink hover:text-paper"
+      className="changelog-back-tile group relative flex flex-col gap-3 bg-paper p-5 transition-all hover:bg-ink hover:text-paper"
     >
       <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-ink/50 group-hover:text-paper/55">
         ◢ {kicker}
@@ -1157,7 +1265,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.0
+          AutoOutlook · Automated Convective Risk Intelligence · v1.1
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

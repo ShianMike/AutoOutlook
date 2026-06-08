@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,9 @@ import numpy as np
 
 from backend.ml.merged_outlook import (
     _spc_geojson_max_category_ordinal,
+    available_merged_d1_dates,
     merge_cycles_for_spc_window,
+    resolve_cycle_dirs_for_merged_d1_date,
     resolve_merge_cycle_dirs,
     spc_d1_window,
 )
@@ -189,6 +191,33 @@ class TestResolveMergeCycleDirs(unittest.TestCase):
 
     def test_nonexistent_root(self) -> None:
         self.assertEqual(resolve_merge_cycle_dirs(Path("/nonexistent/path")), [])
+
+
+class TestMergedD1DateSelection(unittest.TestCase):
+    def test_limits_latest_cycle_to_two_run_anchored_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            _write_cycle_artifacts(root, "18z", "2026-06-07T18:00:00Z", list(range(49)), grid)
+
+            dates = available_merged_d1_dates(root)
+
+            self.assertEqual(dates, ["2026-06-08", "2026-06-07"])
+            self.assertNotIn("2026-06-09", dates)
+
+    def test_prefers_same_day_00z_cycle_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_00z = _write_cycle_artifacts(root, "00z", "2026-06-08T00:00:00Z", list(range(49)), grid)
+            _write_cycle_artifacts(root, "18z", "2026-06-08T18:00:00Z", list(range(49)), grid)
+
+            dirs = resolve_cycle_dirs_for_merged_d1_date(
+                root,
+                date(2026, 6, 8),
+            )
+
+            self.assertEqual(dirs, [cycle_00z])
 
 
 class TestMergeCyclesForSpcWindow(unittest.TestCase):

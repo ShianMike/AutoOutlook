@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -20,6 +20,7 @@ from backend.ml.gridded_outlook import (
 
 
 SpcFetchFn = Callable[[requests.Session, Path | None], dict[str, Any]]
+MERGED_D1_AVAILABLE_DAY_COUNT = 2
 
 
 def spc_d1_window(
@@ -121,6 +122,58 @@ def resolve_cycle_dirs_for_window(
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [path for _, path in candidates]
+
+
+def available_merged_d1_dates(
+    artifact_root: Path,
+    model: str = "hrrr",
+    *,
+    day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+) -> list[str]:
+    """Return visible merged-D1 dates anchored to one forecast run.
+
+    The merged-D1 selector should not expose every D1 date touched by f00..f48.
+    It is a small run-anchored product, so only the latest eligible run date and
+    the next in-range day are considered.
+    """
+    anchor = _select_merged_d1_anchor_cycle(artifact_root, model)
+    if anchor is None or day_count <= 0:
+        return []
+
+    cycle_time, _cycle_dir, index = anchor
+    ready_hours = _int_list(index.get("readyForecastHours"))
+    if not ready_hours:
+        return []
+
+    cycle_date = cycle_time.date()
+    max_date = cycle_date + timedelta(days=day_count - 1)
+    dates: set[date] = set()
+    for forecast_hour in ready_hours:
+        valid_time = cycle_time + timedelta(hours=forecast_hour)
+        d1_start = valid_time.date()
+        if valid_time.hour < 12:
+            d1_start -= timedelta(days=1)
+        if cycle_date <= d1_start <= max_date:
+            dates.add(d1_start)
+
+    return [item.isoformat() for item in sorted(dates, reverse=True)]
+
+
+def resolve_cycle_dirs_for_merged_d1_date(
+    artifact_root: Path,
+    target_date: date,
+    model: str = "hrrr",
+    *,
+    day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+) -> list[Path]:
+    """Resolve the single run used by the public merged-D1 date selector."""
+    anchor = _select_merged_d1_anchor_cycle(artifact_root, model)
+    if anchor is None:
+        return []
+    allowed = set(available_merged_d1_dates(artifact_root, model, day_count=day_count))
+    if target_date.isoformat() not in allowed:
+        return []
+    return [anchor[1]]
 
 
 def fetch_archived_spc_day1_category(
@@ -342,6 +395,7 @@ def merge_cycles_for_spc_window(
         }
         contributing_hours: list[dict[str, Any]] = []
         merged_cycles: list[str] = []
+        merged_cycle_time_isos: list[str] = []
         grid_shape: tuple[int, ...] | None = None
         source_tile_stride: int | None = None
 
@@ -403,7 +457,11 @@ def merge_cycles_for_spc_window(
                 cycle_contributed = True
 
             if cycle_contributed:
-                merged_cycles.append(cycle_label)
+                if cycle_label not in merged_cycles:
+                    merged_cycles.append(cycle_label)
+                cycle_time_iso = cycle_time.isoformat().replace("+00:00", "Z")
+                if cycle_time_iso not in merged_cycle_time_isos:
+                    merged_cycle_time_isos.append(cycle_time_iso)
 
         if tile_lats is None or tile_lons is None or not category_grids:
             raise ValueError(
@@ -444,6 +502,7 @@ def merge_cycles_for_spc_window(
 
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
         summary["mergedCycles"] = merged_cycles
+        summary["mergedCycleTimeISOs"] = merged_cycle_time_isos
         summary["d1WindowValidISO"] = d1_valid.isoformat().replace("+00:00", "Z")
         summary["d1WindowExpireISO"] = d1_expire.isoformat().replace("+00:00", "Z")
         summary["contributingHours"] = contributing_hours
@@ -487,6 +546,7 @@ def merge_cycles_for_spc_window(
             _write_json(output_dir / "merged_d1_index.json", {
                 "generatedAtISO": summary["generatedAtISO"],
                 "mergedCycles": merged_cycles,
+                "mergedCycleTimeISOs": merged_cycle_time_isos,
                 "d1WindowValidISO": summary["d1WindowValidISO"],
                 "d1WindowExpireISO": summary["d1WindowExpireISO"],
                 "contributingHourCount": len(contributing_hours),
@@ -528,6 +588,67 @@ def _tile_grid_payload(tile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray,
 
 def _read_index(path: Path) -> dict[str, Any] | None:
     return _read_json(path / "index.json") or _read_json(path / "metadata.json")
+
+
+def _select_merged_d1_anchor_cycle(
+    artifact_root: Path,
+    model: str,
+) -> tuple[datetime, Path, dict[str, Any]] | None:
+    candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
+    if not artifact_root.exists():
+        return None
+
+    for child in artifact_root.iterdir():
+        if not child.is_dir():
+            continue
+        index = _read_index(child)
+        if not isinstance(index, dict):
+            continue
+        status = index.get("status")
+        if status not in ("complete", "partial"):
+            continue
+        ready = _int_list(index.get("readyForecastHours"))
+        if not ready:
+            continue
+        cycle_time = _parse_iso(index.get("cycleTimeISO"))
+        if cycle_time is None:
+            continue
+        if not _index_model_matches(index, model):
+            continue
+        candidates.append((cycle_time, child, index))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=_merged_d1_cycle_rank, reverse=True)
+    latest_cycle_date = candidates[0][0].date()
+    same_day_00z = [
+        item for item in candidates
+        if item[0].date() == latest_cycle_date and item[0].hour == 0
+    ]
+    if same_day_00z:
+        same_day_00z.sort(key=_merged_d1_cycle_rank, reverse=True)
+        return same_day_00z[0]
+    return candidates[0]
+
+
+def _merged_d1_cycle_rank(item: tuple[datetime, Path, dict[str, Any]]) -> tuple[Any, ...]:
+    cycle_time, path, index = item
+    status_rank = 1 if index.get("status") == "complete" else 0
+    ready_count = len(_int_list(index.get("readyForecastHours")))
+    name = path.name.lower()
+    path_rank = 0
+    if "complete" in name:
+        path_rank += 2
+    if name.startswith("latest_incremental"):
+        path_rank += 1
+    return (cycle_time, status_rank, ready_count, path_rank)
+
+
+def _index_model_matches(index: Mapping[str, Any], model: str) -> bool:
+    cycle_policy = index.get("cyclePolicy") or {}
+    cycle_model = cycle_policy.get("model") or index.get("model", {}).get("name") or "HRRR"
+    return str(cycle_model).lower() == model.lower()
 
 
 def _read_json(path: Path) -> Any:

@@ -32,7 +32,7 @@ const VIEW_META: Record<TransitionView, ViewMeta> = {
       '> RESUME PROVIDER CHAIN',
       '> RENDER LANDING DECK',
       '> BIND NAV CONTROLS',
-      '> READY · v1.0',
+      '> READY · v1.1',
     ],
   },
   dashboard: {
@@ -70,14 +70,14 @@ const VIEW_META: Record<TransitionView, ViewMeta> = {
     brand: 'Patch',
     brandAccent: 'Notes',
     title: 'Loading patch notes',
-    subtitle: 'v0.9 → v1.0 · release ladder',
+    subtitle: 'v1.0 → v1.1 · release ladder',
     badge: '◢ CHANGELOG',
     tone: 'lime',
     lines: [
       '> INDEX RELEASES',
-      '> DIFF v0.9 → v1.0',
+      '> DIFF v1.0 → v1.1',
       '> RESOLVE CHANGE KINDS',
-      '> READY · v1.0 CURRENT',
+      '> READY · v1.1 CURRENT',
     ],
   },
 };
@@ -273,7 +273,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
             <span className={`inline-block h-1.5 w-1.5 animate-pulse-dot ${tone.bg}`} aria-hidden />
             STAND BY
           </span>
-          <span>v1.0 · STREAM OK</span>
+          <span>v1.1 · STREAM OK</span>
         </div>
       </div>
     </div>
