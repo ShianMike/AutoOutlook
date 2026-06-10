@@ -1,9 +1,10 @@
-import { Fragment, useMemo } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts, OutlookProbabilityShapeFeatureCollection, SpcStormReport } from '../types/outlookArtifacts';
 import type { SpcComparisonMode } from './GeneratedOutlookMap';
 import {
+  artifactCigShapesToFeatureCollection,
   artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
   artifactThunderToFeatureCollection,
@@ -91,6 +92,13 @@ export default function GeneratedHazardProbabilityMap({
     () => vectorFeatureCollection ?? tileFeatureCollection,
     [tileFeatureCollection, vectorFeatureCollection],
   );
+  const cigCollection = useMemo(
+    () => (hazard === 'thunder' ? undefined : artifactCigShapesToFeatureCollection(tile, hazard as ArtifactHazardKey)),
+    [tile, hazard],
+  );
+  const [showCigOverlay, setShowCigOverlay] = useState(true);
+  const hasCigOverlay = Boolean(cigCollection?.features.length);
+  const visibleCigCollection = showCigOverlay ? cigCollection : undefined;
   const spcFeatureCollection = useMemo(
     () => spcHazardShapesToFeatureCollection(spcHazardProbabilityShapes, hazard),
     [hazard, spcHazardProbabilityShapes],
@@ -236,6 +244,17 @@ export default function GeneratedHazardProbabilityMap({
           {headerTitle}
         </span>
         <div className="flex shrink-0 items-center gap-2">
+          {hasCigOverlay && showAutoLayer && (
+            <label className="flex h-6 items-center gap-1.5 border border-paper/40 px-1.5 font-mono text-[9px] font-bold uppercase tracking-wider text-paper">
+              <input
+                type="checkbox"
+                checked={showCigOverlay}
+                onChange={(event) => setShowCigOverlay(event.currentTarget.checked)}
+                className="h-3 w-3 accent-paper"
+              />
+              <span>CIG</span>
+            </label>
+          )}
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
             {metricLabel}
           </span>
@@ -249,6 +268,17 @@ export default function GeneratedHazardProbabilityMap({
           projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
+          <defs>
+            <pattern id="generated-hazard-cig-dashedDiagonal" patternUnits="userSpaceOnUse" width="12" height="12">
+              <path d="M-3 12 L12 -3 M3 15 L15 3" stroke="#111111" strokeWidth="1.6" strokeDasharray="5 4" />
+            </pattern>
+            <pattern id="generated-hazard-cig-solidDiagonal" patternUnits="userSpaceOnUse" width="10" height="10">
+              <path d="M-3 10 L10 -3 M2 13 L13 2" stroke="#111111" strokeWidth="1.55" />
+            </pattern>
+            <pattern id="generated-hazard-cig-cross" patternUnits="userSpaceOnUse" width="12" height="12">
+              <path d="M-3 12 L12 -3 M3 15 L15 3 M-3 0 L12 15 M3 -3 L15 9" stroke="#111111" strokeWidth="1.35" />
+            </pattern>
+          </defs>
           <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
@@ -359,6 +389,38 @@ export default function GeneratedHazardProbabilityMap({
                         default: spcStyle,
                         hover: spcStyle,
                         pressed: spcStyle,
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {showAutoLayer && visibleCigCollection && visibleCigCollection.features.length > 0 && (
+            <Geographies geography={visibleCigCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const pattern = String(geo.properties.hatchPattern || 'dashedDiagonal');
+                  const fill = `url(#generated-hazard-cig-${pattern})`;
+                  const cigStyle = {
+                    fill,
+                    fillOpacity: 0.72,
+                    stroke: '#111111',
+                    strokeWidth: 0.55,
+                    strokeOpacity: 0.78,
+                    outline: 'none',
+                    pointerEvents: 'none' as const,
+                  };
+                  return (
+                    <Geography
+                      key={`generated-hazard-cig-${hazard}-${geo.properties.cig}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: cigStyle,
+                        hover: cigStyle,
+                        pressed: cigStyle,
                       }}
                     />
                   );
@@ -586,7 +648,7 @@ export default function GeneratedHazardProbabilityMap({
                 <span className="text-ink">{item.label}</span>
               </div>
             ))}
-            {cfg.sigThreshold !== undefined && (
+          {cfg.sigThreshold !== undefined && (
               <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
                 <span
                   className="inline-block w-3 h-2 border-[1.5px] shrink-0"
@@ -597,6 +659,29 @@ export default function GeneratedHazardProbabilityMap({
               </div>
             )}
           </div>
+          {hasCigOverlay && showCigOverlay && showAutoLayer && (
+            <div className="mt-1 border-t-[1px] border-ink/20 pt-1">
+              <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
+                CIG Overlay
+              </div>
+              <div className="grid grid-cols-1 gap-y-0.5">
+                <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
+                  <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px,transparent_6.5px,transparent_11px)]" aria-hidden />
+                  <span>CIG1 dashed</span>
+                </div>
+                <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
+                  <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
+                  <span>CIG2 solid</span>
+                </div>
+                {hazard !== 'hail' && (
+                  <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
+                    <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px),repeating-linear-gradient(45deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
+                    <span>CIG3 cross</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {stormReportsMode && stormReportsMode !== 'none' && (
             <div className="mt-1 border-t-[1px] border-ink/20 pt-1 flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[8px] font-bold leading-none text-ink">
               {hazard === 'tornado' && (stormReportsMode === 'all' || stormReportsMode === 'tornado') && (

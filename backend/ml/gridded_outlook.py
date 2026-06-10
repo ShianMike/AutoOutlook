@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import threading
 from typing import Any, Mapping
 
@@ -19,13 +20,18 @@ import numpy as np
 
 
 from .features import FEATURE_NAMES
-from .inference import predict_ml_hazard_matrix
+from .inference import predict_cig_intensity_matrix, predict_ml_hazard_matrix
+from .spc_categories import category_conversion_from_probability_and_cig, category_ordinal
 from backend import metpy_diagnostics as diag
 
 SPC_RISK_LABELS = ("NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
+SPC_CIG_CATEGORY_FEATURE_FLAG = "AUTOOUTLOOK_SPC_CIG_CATEGORIES"
+CIG_SOURCE_ENVIRONMENTAL = "environmental_estimator_v1"
+CIG_SOURCE_TRAINED_INTENSITY = "trained_intensity_with_environment_fallback_v1"
 _MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
 _CATEGORY_VECTORIZATION_METHOD = "marching_squares_cumulative_contours"
 _PROBABILITY_VECTORIZATION_METHOD = "marching_squares_probability_contours"
+_CIG_VECTORIZATION_METHOD = "marching_squares_cig_contours"
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
 _THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
@@ -193,8 +199,6 @@ def gridded_features_from_fields(
         raw["refc"] = _finite(np.asarray(fields["refc"], dtype=float), 0.0)
     normalized = {key: normalize_feature(key, value) for key, value in raw.items()}
     matrix = np.column_stack([raw[name].reshape(-1) for name in FEATURE_NAMES]).astype(float)
-    if lons is not None and np.any(lons > 0):
-        raw["is_philippines"] = True
     return GriddedFeatures(raw=raw, normalized=normalized, matrix=matrix, shape=shape)
 
 
@@ -936,85 +940,6 @@ def apply_environmental_probability_caps(
         storm_modes=modes,
     )
 
-    philippines_land = np.zeros(shape, dtype=bool)
-    philippines_gust_buffer = np.zeros(shape, dtype=bool)
-    philippines_hail_buffer = np.zeros(shape, dtype=bool)
-    philippines_tornado_buffer = np.zeros(shape, dtype=bool)
-    philippines_domain = lat_grid is not None and lon_grid is not None and _is_philippines_grid(lat_grid, lon_grid)
-    if philippines_domain and lat_grid is not None and lon_grid is not None:
-        features.raw["is_philippines"] = True
-        philippines_land = _philippines_activity_land_mask(lat_grid, lon_grid)
-        cape_peak = np.maximum(mucape, mlcape)
-        tropical_moisture = (dewpoint >= 70.0) & (features.raw["pwatIn"] >= 1.35)
-        weak_tropical_pulse = (
-            philippines_land
-            & tropical_moisture
-            & (cape_peak >= 250.0)
-            & (cin > -175.0)
-            & ((shear < 25.0) | (storm_rel < 18.0))
-        )
-        organized_tropical = (
-            philippines_land
-            & tropical_moisture
-            & (cape_peak >= 750.0)
-            & (shear >= 25.0)
-            & (cin > -175.0)
-            & ((storm_rel >= 18.0) | (srh03 >= 100.0))
-        )
-        strong_organized_tropical = (
-            organized_tropical
-            & (cape_peak >= 1250.0)
-            & (shear >= 35.0)
-            & ((storm_rel >= 24.0) | (srh03 >= 150.0))
-            & (cin > -150.0)
-        )
-        exceptional_tropical = (
-            strong_organized_tropical
-            & (cape_peak >= 2200.0)
-            & (shear >= 45.0)
-            & ((storm_rel >= 30.0) | (srh03 >= 220.0))
-            & (cin > -125.0)
-        )
-        rotating_tropical = (
-            strong_organized_tropical
-            & (mlcape >= 500.0)
-            & (srh01 >= 100.0)
-            & (srh03 >= 150.0)
-            & (lcl <= 1500.0)
-        )
-
-        before_caps = {"tornado": tornado_cap.copy(), "hail": hail_cap.copy(), "wind": wind_cap.copy()}
-
-        tornado_cap = np.where(philippines_land, np.minimum(tornado_cap, 0.019), tornado_cap)
-        tornado_cap = np.where(rotating_tropical, np.maximum(tornado_cap, 0.049), tornado_cap)
-        tornado_cap = np.where(rotating_tropical & (srh01 >= 150.0) & (lcl <= 1250.0), np.maximum(tornado_cap, 0.099), tornado_cap)
-
-        hail_cap = np.where(philippines_land, np.minimum(hail_cap, 1.0), hail_cap)
-        hail_cap = np.where(organized_tropical & (mucape >= 1000.0) & (features.raw["hgt500"] <= 5900.0), np.maximum(hail_cap, 0.149), hail_cap)
-        hail_cap = np.where(strong_organized_tropical & (mucape >= 2000.0) & (features.raw["hgt500"] <= 5850.0), np.maximum(hail_cap, 0.299), hail_cap)
-        hail_cap = np.where(exceptional_tropical & (mucape >= 2500.0), np.maximum(hail_cap, 0.449), hail_cap)
-
-        wind_cap = np.where(philippines_land, np.minimum(wind_cap, 1.0), wind_cap)
-        wind_cap = np.where(weak_tropical_pulse, np.maximum(wind_cap, 0.099), wind_cap)
-        wind_cap = np.where(organized_tropical, np.maximum(wind_cap, 0.149), wind_cap)
-        wind_cap = np.where(strong_organized_tropical, np.maximum(wind_cap, 0.299), wind_cap)
-        wind_cap = np.where(exceptional_tropical, np.maximum(wind_cap, 0.449), wind_cap)
-
-        philippines_gust_buffer = (
-            philippines_land
-            & (before_caps["wind"] > wind_cap)
-        )
-        philippines_hail_buffer = (
-            philippines_land
-            & (before_caps["hail"] > hail_cap)
-        )
-        philippines_tornado_buffer = (
-            philippines_land
-            & (before_caps["tornado"] > tornado_cap)
-        )
-
-
-
     # Apply storm-mode-aware cap adjustments
     # Landspout: relax tornado cap to 0.049 if active
     tornado_cap = np.where(modes["landspout"] & (tornado_cap < 0.049), 0.049, tornado_cap)
@@ -1222,8 +1147,6 @@ def apply_environmental_probability_caps(
 
     report = {
         "environmentalCapsApplied": True,
-        "philippinesRegionalCalibrationApplied": philippines_domain,
-        "philippinesGustBufferCells": int(np.sum(philippines_gust_buffer)) if philippines_domain else 0,
         "modelCategoryCap": SPC_RISK_LABELS[model_cap],
         "rawProbabilityMax": _probability_max(raw),
         "cappedProbabilityMax": _probability_max(capped),
@@ -1358,9 +1281,15 @@ def category_grid_from_probabilities(
     features: GriddedFeatures,
     model_metadata: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
-    tornado = _hazard_ord("tornado", np.asarray(probabilities["tornado"], dtype=float))
-    hail = _hazard_ord("hail", np.asarray(probabilities["hail"], dtype=float))
-    wind = _hazard_ord("wind", np.asarray(probabilities["wind"], dtype=float))
+    if _spc_cig_categories_enabled():
+        hazard_ordinals = _cig_hazard_ordinals(probabilities, features)
+        tornado = hazard_ordinals["tornado"]
+        hail = hazard_ordinals["hail"]
+        wind = hazard_ordinals["wind"]
+    else:
+        tornado = _hazard_ord("tornado", np.asarray(probabilities["tornado"], dtype=float))
+        hail = _hazard_ord("hail", np.asarray(probabilities["hail"], dtype=float))
+        wind = _hazard_ord("wind", np.asarray(probabilities["wind"], dtype=float))
     organized_severe_mask = (
         (features.raw["mucape"] >= 500.0)
         & (features.raw["sfcDewpointF"] >= 52.0)
@@ -1455,27 +1384,202 @@ def category_grid_from_probabilities(
     )
     category_cap = _model_category_cap(model_metadata)
     severe_ord = np.minimum(severe_ord, category_cap)
-    is_ph_grid = False
-    if features.raw.get("is_philippines") or features.shape == (73, 57):
-        is_ph_grid = True
-    elif model_metadata and isinstance(model_metadata, dict):
-        model_version = str(model_metadata.get("version", "")).lower()
-        if "ecmwf" in model_version or "philippines" in model_version:
-            is_ph_grid = True
-
-    if is_ph_grid:
-        tstm_mask = (
-            (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 1000.0)
-            & (features.raw["sfcDewpointF"] >= 65.0)
-            & (features.raw["cin"] >= -150.0)
-        )
-    else:
-        tstm_mask = (
-            (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 250.0)
-            & (features.raw["sfcDewpointF"] >= 48.0)
-            & (features.raw["cin"] > -225.0)
-        )
+    tstm_mask = (
+        (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 250.0)
+        & (features.raw["sfcDewpointF"] >= 48.0)
+        & (features.raw["cin"] > -225.0)
+    )
     return np.where(severe_ord > 0, severe_ord, np.where(tstm_mask, 1, 0)).astype(np.int16)
+
+
+def _spc_cig_categories_enabled() -> bool:
+    return os.environ.get(SPC_CIG_CATEGORY_FEATURE_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def estimate_cig_grids(features: GriddedFeatures) -> dict[str, np.ndarray]:
+    """Estimate SPC CIG levels from available runtime ingredients.
+
+    This is an interim CIG source until direct intensity heads are trained from
+    report intensity labels. It deliberately uses hazard-specific ingredients
+    already present in live HRRR features, so the category table can be tested
+    without changing the runtime model feature schema.
+    """
+    raw = features.raw
+    shape = np.asarray(raw["forecastHour"]).shape
+    zero = np.zeros(shape, dtype=np.int16)
+
+    tornado = zero.copy()
+    tornado_cig1 = (
+        (raw["stp"] >= 0.75)
+        | ((raw["ehi"] >= 0.8) & (raw["srh01"] >= 100.0) & (raw["shear06Kt"] >= 30.0))
+        | ((raw["srh03"] >= 175.0) & (raw["lclM"] <= 1400.0) & (raw["mucape"] >= 750.0))
+    )
+    tornado_cig2 = (
+        (raw["stp"] >= 1.75)
+        | ((raw["ehi"] >= 1.5) & (raw["srh01"] >= 150.0) & (raw["shear06Kt"] >= 35.0))
+        | ((raw["srh03"] >= 250.0) & (raw["lclM"] <= 1100.0) & (raw["mucape"] >= 1250.0))
+    )
+    tornado_cig3 = (
+        (raw["stp"] >= 3.0)
+        | ((raw["ehi"] >= 2.5) & (raw["srh01"] >= 220.0) & (raw["shear06Kt"] >= 45.0))
+        | ((raw["srh03"] >= 350.0) & (raw["lclM"] <= 900.0) & (raw["mucape"] >= 1800.0))
+    )
+    tornado = np.where(tornado_cig1, 1, tornado)
+    tornado = np.where(tornado_cig2, 2, tornado)
+    tornado = np.where(tornado_cig3, 3, tornado)
+
+    hail = zero.copy()
+    hail_cig1 = (
+        (raw["ship"] >= 0.75)
+        | ((raw["lapseRate700500CPerKm"] >= 6.8) & (raw["mucape"] >= 1250.0) & (raw["shear06Kt"] >= 30.0))
+    )
+    hail_cig2 = (
+        (raw["ship"] >= 1.75)
+        | ((raw["lapseRate700500CPerKm"] >= 7.4) & (raw["mucape"] >= 2000.0) & (raw["shear06Kt"] >= 40.0))
+    )
+    hail = np.where(hail_cig1, 1, hail)
+    hail = np.where(hail_cig2, 2, hail)
+
+    wind = zero.copy()
+    wind_cig1 = (
+        ((raw["stormRelWindKt"] >= 24.0) & (raw["shear06Kt"] >= 30.0) & (raw["mlcape"] >= 750.0))
+        | ((raw["lapseRate700500CPerKm"] >= 6.8) & (raw["sfcDewpointF"] >= 55.0) & (raw["mucape"] >= 1000.0))
+    )
+    wind_cig2 = (
+        ((raw["stormRelWindKt"] >= 32.0) & (raw["shear06Kt"] >= 40.0) & (raw["mlcape"] >= 1250.0))
+        | ((raw["lapseRate700500CPerKm"] >= 7.4) & (raw["mucape"] >= 1800.0) & (raw["shear06Kt"] >= 45.0))
+    )
+    wind_cig3 = (
+        ((raw["stormRelWindKt"] >= 42.0) & (raw["shear06Kt"] >= 55.0) & (raw["mlcape"] >= 2000.0))
+        | ((raw["lapseRate700500CPerKm"] >= 8.0) & (raw["mucape"] >= 2750.0) & (raw["shear06Kt"] >= 55.0))
+    )
+    wind = np.where(wind_cig1, 1, wind)
+    wind = np.where(wind_cig2, 2, wind)
+    wind = np.where(wind_cig3, 3, wind)
+
+    return {
+        "tornado": tornado.astype(np.int16),
+        "hail": hail.astype(np.int16),
+        "wind": wind.astype(np.int16),
+    }
+
+
+def _target_grid(
+    target_probabilities: Mapping[str, np.ndarray],
+    target: str,
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    values = np.asarray(target_probabilities.get(target, np.zeros(int(np.prod(shape)))), dtype=float)
+    if values.shape == shape:
+        return values
+    return values.reshape(shape)
+
+
+def _conditional_intensity_probability(
+    intensity_probability: np.ndarray,
+    hazard_probability: np.ndarray,
+    floor: float,
+) -> np.ndarray:
+    hazard = np.asarray(hazard_probability, dtype=float)
+    intensity = np.asarray(intensity_probability, dtype=float)
+    return np.where(hazard >= floor, intensity / np.maximum(hazard, floor), 0.0)
+
+
+def model_based_cig_grids(
+    features: GriddedFeatures,
+    probabilities: Mapping[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], str]:
+    """Return CIG grids from trained intensity heads, falling back to environment.
+
+    The trained labels are unconditional report-intensity probabilities. Runtime
+    CIG is conditional, so the mapping divides each intensity head by the base
+    hazard probability and also requires a tiny raw-intensity probability floor.
+    """
+    environmental = estimate_cig_grids(features)
+    target_probabilities = predict_cig_intensity_matrix(features.matrix)
+    if target_probabilities is None:
+        return environmental, CIG_SOURCE_ENVIRONMENTAL
+
+    shape = np.asarray(features.raw["forecastHour"]).shape
+    tornado_prob = np.asarray(probabilities["tornado"], dtype=float)
+    hail_prob = np.asarray(probabilities["hail"], dtype=float)
+    wind_prob = np.asarray(probabilities["wind"], dtype=float)
+
+    ef2 = _target_grid(target_probabilities, "tornado_ef2_plus", shape)
+    ef3 = _target_grid(target_probabilities, "tornado_ef3_plus", shape)
+    hail2 = _target_grid(target_probabilities, "hail_2in_plus", shape)
+    hail35 = _target_grid(target_probabilities, "hail_3_5in_plus", shape)
+    wind56 = _target_grid(target_probabilities, "wind_56kt_plus", shape)
+    wind65 = _target_grid(target_probabilities, "wind_65kt_plus", shape)
+    wind74 = _target_grid(target_probabilities, "wind_74kt_plus", shape)
+    wind83 = _target_grid(target_probabilities, "wind_83kt_plus", shape)
+
+    tor_ef2_cond = _conditional_intensity_probability(ef2, tornado_prob, 0.005)
+    tor_ef3_cond = _conditional_intensity_probability(ef3, tornado_prob, 0.005)
+    hail2_cond = _conditional_intensity_probability(hail2, hail_prob, 0.02)
+    hail35_cond = _conditional_intensity_probability(hail35, hail_prob, 0.02)
+    wind56_cond = _conditional_intensity_probability(wind56, wind_prob, 0.02)
+    wind65_cond = _conditional_intensity_probability(wind65, wind_prob, 0.02)
+    wind74_cond = _conditional_intensity_probability(wind74, wind_prob, 0.02)
+    wind83_cond = _conditional_intensity_probability(wind83, wind_prob, 0.02)
+
+    zero = np.zeros(shape, dtype=np.int16)
+    tornado_model = zero.copy()
+    tornado_model = np.where((tor_ef2_cond >= 0.08) | (ef2 >= 0.003), 1, tornado_model)
+    tornado_model = np.where((tor_ef3_cond >= 0.03) | (ef3 >= 0.001), 2, tornado_model)
+    tornado_model = np.where((environmental["tornado"] >= 3) & (tornado_model >= 2), 3, tornado_model)
+
+    hail_model = zero.copy()
+    hail_model = np.where((hail2_cond >= 0.12) | (hail2 >= 0.008), 1, hail_model)
+    hail_model = np.where((hail35_cond >= 0.04) | (hail35 >= 0.0015), 2, hail_model)
+
+    wind_model = zero.copy()
+    wind_model = np.where((wind56_cond >= 0.12) | (wind65_cond >= 0.08) | (wind56 >= 0.010), 1, wind_model)
+    wind_model = np.where((wind74_cond >= 0.04) | (wind74 >= 0.0015), 2, wind_model)
+    wind_model = np.where((wind83_cond >= 0.025) | (wind83 >= 0.0008), 3, wind_model)
+
+    return {
+        "tornado": np.maximum(environmental["tornado"], tornado_model).astype(np.int16),
+        "hail": np.maximum(environmental["hail"], hail_model).astype(np.int16),
+        "wind": np.maximum(environmental["wind"], wind_model).astype(np.int16),
+    }, CIG_SOURCE_TRAINED_INTENSITY
+
+
+def cig_grids_for_runtime(
+    features: GriddedFeatures,
+    probabilities: Mapping[str, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], str]:
+    if probabilities is None or not _spc_cig_categories_enabled():
+        return estimate_cig_grids(features), CIG_SOURCE_ENVIRONMENTAL
+    return model_based_cig_grids(features, probabilities)
+
+
+def _cig_hazard_ordinals(probabilities: Mapping[str, np.ndarray], features: GriddedFeatures) -> dict[str, np.ndarray]:
+    cig_grids, _source = cig_grids_for_runtime(features, probabilities)
+    return {
+        hazard: _category_ord_from_probability_and_cig_grid(
+            hazard,
+            np.asarray(probabilities[hazard], dtype=float),
+            cig_grids[hazard],
+        )
+        for hazard in ("tornado", "hail", "wind")
+    }
+
+
+def _category_ord_from_probability_and_cig_grid(
+    hazard: str,
+    probability_grid: np.ndarray,
+    cig_grid: np.ndarray,
+) -> np.ndarray:
+    out = np.zeros(probability_grid.shape, dtype=np.int16)
+    for index in np.ndindex(probability_grid.shape):
+        conversion = category_conversion_from_probability_and_cig(
+            hazard,
+            float(probability_grid[index]),
+            int(cig_grid[index]),
+        )
+        out[index] = category_ordinal(conversion.category)
+    return out
 
 
 def postprocess_category_grid(
@@ -1778,7 +1882,7 @@ def hazard_probability_shapes_from_grids(
         ),
         "thunder": (
             thunder_probability,
-            (0.30, 0.60, 0.90) if _is_philippines_grid(lat_grid, lon_grid) else _THUNDER_PROBABILITY_THRESHOLDS,
+            _THUNDER_PROBABILITY_THRESHOLDS,
             grid >= SPC_RISK_LABELS.index("TSTM"),
             "category_thunder",
         ),
@@ -1864,6 +1968,111 @@ def hazard_probability_shapes_from_grids(
                 },
             })
     features = _display_gap_features(features, order_property="bucket", group_property="hazard")
+    return {"type": "FeatureCollection", "features": features}
+
+
+def cig_shapes_from_grids(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    cig_grids: Mapping[str, np.ndarray],
+    forecast_hour: int,
+    valid_time_iso: str,
+    cig_source: str = CIG_SOURCE_ENVIRONMENTAL,
+    min_cells: int = 8,
+) -> dict[str, Any]:
+    """Build CIG hatch overlay polygons from hazard-specific CIG grids."""
+    first = next(iter(cig_grids.values()), None)
+    if first is None:
+        return {"type": "FeatureCollection", "features": []}
+    shape = np.asarray(first).shape
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, shape)
+    regional_max_grid = _regional_strict_max_category_grid(lat_grid, lon_grid)
+    regional_allowed = regional_max_grid >= SPC_RISK_LABELS.index("MRGL")
+    try:
+        from scipy import ndimage
+    except Exception:
+        ndimage = None
+
+    features: list[dict[str, Any]] = []
+    for hazard in ("tornado", "hail", "wind"):
+        grid = np.asarray(cig_grids.get(hazard, np.zeros(shape)), dtype=np.int16)
+        max_cig = 2 if hazard == "hail" else 3
+        masks_by_level: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]] = {}
+        for cig in range(1, max_cig + 1):
+            mask = (grid >= cig) & regional_allowed
+            if not np.any(mask):
+                continue
+            settings = _category_generalization_settings(mask, min(cig + 1, len(SPC_RISK_LABELS) - 1), min_cells)
+            support_mask = (grid >= 1) & regional_allowed
+            limit_mask = _cartographic_limit_mask(support_mask, ndimage, int(settings["closeIterations"]) + 1)
+            if limit_mask is not None:
+                limit_mask &= regional_allowed
+            generalized = _generalize_mask(
+                mask,
+                ndimage,
+                min_cells=int(settings["minimumComponentCells"]),
+                close_iterations=int(settings["closeIterations"]),
+                prune_iterations=int(settings["tendrilPruneIterations"]),
+                max_hole_cells=int(settings["maximumHoleCells"]),
+                limit_mask=limit_mask,
+            )
+            generalized &= regional_allowed
+            if np.any(generalized):
+                masks_by_level[cig] = (generalized, settings)
+
+        for higher in range(max_cig, 1, -1):
+            if higher not in masks_by_level or higher - 1 not in masks_by_level:
+                continue
+            masks_by_level[higher] = (
+                masks_by_level[higher][0] & masks_by_level[higher - 1][0],
+                masks_by_level[higher][1],
+            )
+
+        for cig in range(1, max_cig + 1):
+            item = masks_by_level.get(cig)
+            if item is None:
+                continue
+            mask, settings = item
+            rings, component_count, cell_count = _mask_polygons(
+                lon_grid,
+                lat_grid,
+                mask,
+                min_cells=1 if ndimage is not None else int(settings["minimumComponentCells"]),
+                ndimage=ndimage,
+                smoothing_iterations=int(settings["smoothingIterations"]),
+                simplify_tolerance=float(settings["simplifyTolerance"]),
+            )
+            if not rings:
+                continue
+            source_cell_count = int(np.sum((grid >= cig) & regional_allowed))
+            features.append({
+                "type": "Feature",
+                "geometry": _rings_geometry(rings),
+                "properties": {
+                    "hazard": hazard,
+                    "cig": cig,
+                    "label": f"{hazard.upper()} CIG{cig}",
+                    "forecastHour": forecast_hour,
+                    "validTimeISO": valid_time_iso,
+                    "cellCount": cell_count,
+                    "sourceCellCount": source_cell_count,
+                    "componentCount": component_count,
+                    "cigSource": cig_source,
+                    "hatchPattern": "cross" if cig == 3 else ("solidDiagonal" if cig == 2 else "dashedDiagonal"),
+                    "vectorization": {
+                        "method": _CIG_VECTORIZATION_METHOD,
+                        "cumulativeMask": True,
+                        "cartographicGeneralization": True,
+                        "smoothingIterations": int(settings["smoothingIterations"]),
+                        "simplifyTolerance": float(settings["simplifyTolerance"]),
+                        "closeIterations": int(settings["closeIterations"]),
+                        "tendrilPruneIterations": int(settings["tendrilPruneIterations"]),
+                        "maximumHoleCells": int(settings["maximumHoleCells"]),
+                        "minimumComponentCells": int(settings["minimumComponentCells"]),
+                    },
+                },
+            })
+    features = _display_gap_features(features, order_property="cig", group_property="hazard")
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -2328,17 +2537,6 @@ def _thunder_probability_from_category_grid(
     lon_grid: np.ndarray = None,
 ) -> np.ndarray:
     grid = np.asarray(category_grid, dtype=np.int16)
-    is_phil = lat_grid is not None and lon_grid is not None and _is_philippines_grid(lat_grid, lon_grid)
-    if is_phil:
-        return np.where(
-            grid >= SPC_RISK_LABELS.index("ENH"),
-            0.90,
-            np.where(
-                grid >= SPC_RISK_LABELS.index("MRGL"),
-                0.60,
-                np.where(grid >= SPC_RISK_LABELS.index("TSTM"), 0.30, 0.0),
-            ),
-        )
     return np.where(
         grid >= SPC_RISK_LABELS.index("ENH"),
         0.70,
@@ -3298,8 +3496,6 @@ def _component_has_high_end_support(features: GriddedFeatures, component: np.nda
 
 
 def _rough_conus_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
-    if _is_philippines_grid(lat_grid, lon_grid):
-        return _philippines_land_mask(lat_grid, lon_grid)
     # Coarse coastline-following polygon used only to damp isolated offshore
     # artifacts. It is intentionally conservative and not a cartographic mask.
     conus_ring = [
@@ -3408,14 +3604,6 @@ def _texas_mexico_border_mrgl_cap_mask(lat_grid: np.ndarray, lon_grid: np.ndarra
 
 
 def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
-    if _is_philippines_grid(lat_grid, lon_grid):
-        offshore = ~_philippines_land_mask(lat_grid, lon_grid, buffer_deg=0.3)
-        return {
-            "philippinesOffshore": offshore,
-            "gulfOfMexico": offshore,
-            "floridaGulf": np.zeros_like(lat_grid, dtype=bool),
-            "atlanticOcean": np.zeros_like(lat_grid, dtype=bool),
-        }
     land = _rough_conus_land_mask(lat_grid, lon_grid)
     return {
         "gulfOfMexico": _gulf_of_mexico_offshore_mask(lat_grid, lon_grid) & ~land,
@@ -3425,10 +3613,6 @@ def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[s
 
 
 def _strict_category_cap_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
-    if _is_philippines_grid(lat_grid, lon_grid):
-        return {
-            "texasMexicoBorder": np.zeros_like(lat_grid, dtype=bool),
-        }
     return {
         "texasMexicoBorder": _texas_mexico_border_mrgl_cap_mask(lat_grid, lon_grid),
     }
@@ -3823,108 +4007,3 @@ def _signed_ring_area(coords: list[list[float]]) -> float:
 
 def _round_nested(values: np.ndarray, digits: int = 3) -> list[list[float]]:
     return np.round(np.asarray(values, dtype=float), digits).tolist()
-
-
-_philippines_land_polygon = None
-_philippines_land_polygon_lock = threading.Lock()
-
-
-def _load_philippines_land_polygon() -> Any:
-    global _philippines_land_polygon
-    if _philippines_land_polygon is not None:
-        return _philippines_land_polygon
-    with _philippines_land_polygon_lock:
-        if _philippines_land_polygon is not None:
-            return _philippines_land_polygon
-        import json
-        import os
-        from shapely.geometry import Polygon
-        from shapely.ops import unary_union
-        
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(base_dir, "public", "philippines-provinces.json")
-        if not os.path.exists(path):
-            path = os.path.join(os.getcwd(), "public", "philippines-provinces.json")
-            
-        with open(path, "r") as f:
-            topo = json.load(f)
-            
-        transform = topo["transform"]
-        scale = transform["scale"]
-        translate = transform["translate"]
-        arcs = topo["arcs"]
-        
-        decoded_arcs = []
-        for arc in arcs:
-            x, y = 0, 0
-            decoded_arc = []
-            for pt in arc:
-                x += pt[0]
-                y += pt[1]
-                real_x = x * scale[0] + translate[0]
-                real_y = y * scale[1] + translate[1]
-                decoded_arc.append((real_x, real_y))
-            decoded_arcs.append(decoded_arc)
-            
-        polygons = []
-        for geom in topo["objects"]["default"]["geometries"]:
-            g_type = geom["type"]
-            g_arcs = geom["arcs"]
-            
-            if g_type == "Polygon":
-                poly_rings = []
-                for ring in g_arcs:
-                    coords = []
-                    for arc_idx in ring:
-                        if arc_idx < 0:
-                            arc_coords = decoded_arcs[~arc_idx][::-1]
-                        else:
-                            arc_coords = decoded_arcs[arc_idx]
-                        
-                        if not coords:
-                            coords.extend(arc_coords)
-                        else:
-                            coords.extend(arc_coords[1:])
-                    if len(coords) >= 4:
-                        poly_rings.append(coords)
-                if poly_rings:
-                    polygons.append(Polygon(poly_rings[0], poly_rings[1:]))
-                    
-            elif g_type == "MultiPolygon":
-                for poly in g_arcs:
-                    poly_rings = []
-                    for ring in poly:
-                        coords = []
-                        for arc_idx in ring:
-                            if arc_idx < 0:
-                                arc_coords = decoded_arcs[~arc_idx][::-1]
-                            else:
-                                arc_coords = decoded_arcs[arc_idx]
-                            
-                            if not coords:
-                                coords.extend(arc_coords)
-                            else:
-                                coords.extend(arc_coords[1:])
-                        if len(coords) >= 4:
-                            poly_rings.append(coords)
-                    if poly_rings:
-                        polygons.append(Polygon(poly_rings[0], poly_rings[1:]))
-                        
-        _philippines_land_polygon = unary_union(polygons)
-        return _philippines_land_polygon
-
-
-def _is_philippines_grid(lat_grid: np.ndarray, lon_grid: np.ndarray) -> bool:
-    return lat_grid is not None and lon_grid is not None and np.any(lon_grid > 0)
-
-
-def _philippines_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray, buffer_deg: float = 0.0) -> np.ndarray:
-    poly = _load_philippines_land_polygon()
-    if buffer_deg > 0:
-        poly = poly.buffer(buffer_deg)
-    import shapely.vectorized
-    return shapely.vectorized.contains(poly, lon_grid, lat_grid)
-
-
-def _philippines_activity_land_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
-    return _philippines_land_mask(lat_grid, lon_grid, buffer_deg=0.0)

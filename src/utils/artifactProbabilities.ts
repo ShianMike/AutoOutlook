@@ -4,6 +4,7 @@ import type {
   OutlookArtifactFeatureCollection,
   ArtifactRiskCategory,
   OutlookArtifacts,
+  OutlookCigShapeFeatureCollection,
   OutlookProbabilityShapeFeatureCollection,
   OutlookProbabilityTile,
 } from '../types/outlookArtifacts';
@@ -26,6 +27,22 @@ export interface ArtifactProbabilityFeature {
 export interface ArtifactProbabilityFeatureCollection {
   type: 'FeatureCollection';
   features: ArtifactProbabilityFeature[];
+}
+
+export interface ArtifactCigFeature {
+  type: 'Feature';
+  properties: {
+    hazard: ArtifactHazardKey;
+    cig: number;
+    label: string;
+    hatchPattern: string;
+  };
+  geometry: { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] };
+}
+
+export interface ArtifactCigFeatureCollection {
+  type: 'FeatureCollection';
+  features: ArtifactCigFeature[];
 }
 
 export interface ArtifactHazardPeakLocation {
@@ -85,6 +102,37 @@ export function artifactProbabilityShapesToFeatureCollection(
       },
     }))
     .sort((a, b) => a.properties.bucket - b.properties.bucket);
+  return { type: 'FeatureCollection', features };
+}
+
+export function artifactCigShapesToFeatureCollection(
+  tile: OutlookProbabilityTile | undefined,
+  hazard?: ArtifactHazardKey,
+): ArtifactCigFeatureCollection | undefined {
+  const collection: OutlookCigShapeFeatureCollection | undefined = tile?.cigShapes;
+  if (!collection || !Array.isArray(collection.features)) return undefined;
+  const features = collection.features
+    .filter((feature) => {
+      const normalized = normalizeHazardName(String(feature.properties.hazard));
+      return normalized !== 'thunder' && (!hazard || normalized === hazard);
+    })
+    .map((feature): ArtifactCigFeature => {
+      const normalized = normalizeHazardName(String(feature.properties.hazard)) as ArtifactHazardKey;
+      return {
+        type: 'Feature',
+        geometry: normalizeArtifactGeometry(feature.geometry),
+        properties: {
+          hazard: normalized,
+          cig: Number(feature.properties.cig),
+          label: feature.properties.label,
+          hatchPattern: feature.properties.hatchPattern ?? hatchPatternForCig(Number(feature.properties.cig)),
+        },
+      };
+    })
+    .sort((a, b) => {
+      if (a.properties.hazard !== b.properties.hazard) return a.properties.hazard.localeCompare(b.properties.hazard);
+      return a.properties.cig - b.properties.cig;
+    });
   return { type: 'FeatureCollection', features };
 }
 
@@ -335,6 +383,12 @@ function hazardLabels(hazard: ArtifactHazardKey): string[] {
 
 function hazardColors(hazard: ArtifactHazardKey): string[] {
   return hazard === 'tornado' ? TORNADO_COLORS : SEVERE_COLORS;
+}
+
+function hatchPatternForCig(cig: number): string {
+  if (cig >= 3) return 'cross';
+  if (cig === 2) return 'solidDiagonal';
+  return 'dashedDiagonal';
 }
 
 function normalizeHazardName(hazard: string): GeneratedArtifactHazardKey {

@@ -78,6 +78,32 @@ export interface OutlookProbabilityShapeFeatureCollection {
   features: OutlookProbabilityShapeFeature[];
 }
 
+export interface OutlookCigShapeFeature {
+  type: 'Feature';
+  geometry: {
+    type: 'Polygon' | 'MultiPolygon';
+    coordinates: number[][][] | number[][][][];
+  };
+  properties: {
+    hazard: 'tornado' | 'hail' | 'wind';
+    cig: 1 | 2 | 3 | number;
+    label: string;
+    hatchPattern?: 'dashedDiagonal' | 'solidDiagonal' | 'cross' | string;
+    forecastHour?: number;
+    validTimeISO?: string;
+    cellCount?: number;
+    sourceCellCount?: number;
+    componentCount?: number;
+    cigSource?: string;
+    vectorization?: Record<string, unknown>;
+  };
+}
+
+export interface OutlookCigShapeFeatureCollection {
+  type: 'FeatureCollection';
+  features: OutlookCigShapeFeature[];
+}
+
 export interface OutlookCycleCheck {
   runDate?: string;
   runCycle?: number;
@@ -206,6 +232,7 @@ export interface OutlookProbabilityTile {
   };
   riskShapes?: OutlookArtifactFeatureCollection;
   hazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection;
+  cigShapes?: OutlookCigShapeFeatureCollection;
 }
 
 export interface OutlookProbabilityHour {

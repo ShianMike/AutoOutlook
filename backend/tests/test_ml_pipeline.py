@@ -18,12 +18,17 @@ from backend.bundle_builder import _classify_cap, _classify_storm_mode, _ingredi
 from backend.ml.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, feature_row, feature_schema_hash
 from backend.ml.gather_archive import (
     NEGATIVE_POINTS,
+    SPC_DAILY_REPORT_BASE_URL,
+    SPC_INDEX_URL,
     _candidate_points,
     _dedupe_feature_label_rows,
     _ingredients_at,
     _parse_spc_datetime,
+    _parse_spc_daily_report_csv,
     iter_hrrr_refs,
+    load_spc_reports,
 )
+from backend.ml.add_intensity_labels import enrich_frame_with_intensity_labels
 from backend.ml.inference import (
     MIN_XGBOOST_TRAINING_ROWS,
     model_status,
@@ -31,7 +36,14 @@ from backend.ml.inference import (
     predict_ml_hazards,
     reset_model_cache,
 )
-from backend.ml.reports import labels_for_sample, report_matches_sample
+from backend.ml.merge_archive_training_data import merge_archive
+from backend.ml.reports import intensity_labels_for_sample, labels_for_sample, report_matches_sample
+from backend.ml.spc_categories import (
+    category_conversion_from_probability_and_cig,
+    category_from_probability_and_cig,
+    category_ordinal,
+    normalize_category,
+)
 from backend.ml.validate_models import (
     average_precision_score,
     category_for_probability,
@@ -51,6 +63,26 @@ class DummyProbabilityModel:
 def fake_joblib_load(path: str | Path) -> DummyProbabilityModel:
     with Path(path).open("rb") as fh:
         return pickle.load(fh)
+
+
+class FakeHttpResponse:
+    def __init__(self, text: str, status_code: int = 200) -> None:
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeHttpSession:
+    def __init__(self, responses: dict[str, FakeHttpResponse]) -> None:
+        self.responses = responses
+        self.requested_urls: list[str] = []
+
+    def get(self, url: str, timeout: int = 30) -> FakeHttpResponse:  # noqa: ARG002
+        self.requested_urls.append(url)
+        return self.responses.get(url, FakeHttpResponse("", 404))
 
 
 class MlPipelineTests(unittest.TestCase):
@@ -136,6 +168,81 @@ class MlPipelineTests(unittest.TestCase):
             labels_for_sample(reports, sample_time, 35.22, -97.44),
             {"tornado": 1, "hail": 0, "wind": 1},
         )
+
+    def test_daily_report_parser_preserves_normalized_magnitude_fields(self) -> None:
+        report_date = datetime(2024, 5, 6, tzinfo=timezone.utc).date()
+
+        hail = _parse_spc_daily_report_csv(
+            "Time,Location,Lat,Lon,Mag\n2130,Norman,35.2,-97.5,200\n",
+            "hail",
+            report_date,
+            "https://example.test/hail.csv",
+        )
+        wind = _parse_spc_daily_report_csv(
+            "Time,Location,Lat,Lon,Speed,Unit\n2145,Norman,35.2,-97.5,70,mph\n",
+            "wind",
+            report_date,
+            "https://example.test/wind.csv",
+        )
+        tornado = _parse_spc_daily_report_csv(
+            "Time,Location,Lat,Lon,F_Scale\n2155,Norman,35.2,-97.5,EF2\n",
+            "tornado",
+            report_date,
+            "https://example.test/torn.csv",
+        )
+
+        self.assertEqual(hail[0]["hailSizeIn"], 2.0)
+        self.assertAlmostEqual(wind[0]["windSpeedKt"], 60.82832, places=4)
+        self.assertEqual(tornado[0]["efScale"], 2)
+
+    def test_intensity_labels_for_sample_maps_cig_threshold_targets(self) -> None:
+        sample_time = datetime(2024, 5, 6, 21, tzinfo=timezone.utc)
+        reports = [
+            {"hazard": "tornado", "time": sample_time, "lat": 35.2, "lon": -97.5, "efScale": 3},
+            {"hazard": "hail", "time": sample_time, "lat": 35.2, "lon": -97.5, "hailSizeIn": 3.75},
+            {"hazard": "wind", "time": sample_time, "lat": 35.2, "lon": -97.5, "windSpeedKt": 78.0},
+        ]
+
+        labels = intensity_labels_for_sample(reports, sample_time, 35.22, -97.44)
+
+        self.assertEqual(labels["tornado_ef2_plus"], 1)
+        self.assertEqual(labels["tornado_ef3_plus"], 1)
+        self.assertEqual(labels["hail_2in_plus"], 1)
+        self.assertEqual(labels["hail_3_5in_plus"], 1)
+        self.assertEqual(labels["wind_56kt_plus"], 1)
+        self.assertEqual(labels["wind_65kt_plus"], 1)
+        self.assertEqual(labels["wind_74kt_plus"], 1)
+        self.assertEqual(labels["wind_83kt_plus"], 0)
+
+    def test_enrich_frame_with_intensity_labels_adds_training_targets(self) -> None:
+        pd = __import__("pandas")
+        sample_time = datetime(2024, 5, 6, 21, tzinfo=timezone.utc)
+        frame = pd.DataFrame(
+            [
+                {
+                    "runDate": "20240506",
+                    "validTimeISO": "2024-05-06T21:00:00Z",
+                    "sampleLat": 35.22,
+                    "sampleLon": -97.44,
+                    "label_hail": 1,
+                }
+            ]
+        )
+        reports = [
+            {
+                "hazard": "hail",
+                "time": sample_time.replace(minute=20),
+                "lat": 35.2,
+                "lon": -97.5,
+                "hailSizeIn": 2.25,
+            }
+        ]
+
+        enriched = enrich_frame_with_intensity_labels(frame, reports)
+
+        self.assertEqual(int(enriched.loc[0, "label_hail_2in_plus"]), 1)
+        self.assertEqual(int(enriched.loc[0, "label_hail_3_5in_plus"]), 0)
+        self.assertEqual(int(enriched.loc[0, "label_tornado_ef2_plus"]), 0)
 
     def test_spc_datetime_parser_accepts_colon_and_hhmm_times(self) -> None:
         row_with_colons = {"yr": 2024, "mo": 5, "dy": 8, "time": "21:32:00"}
@@ -364,6 +471,37 @@ class MlPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(selected_negative_count, 3)
         self.assertEqual(len(points), 8)
 
+    def test_spc_report_loader_daily_fallback_uses_requested_run_dates(self) -> None:
+        index_html = """
+        <a href="2024_torn.csv">2024 tornado</a>
+        <a href="2024_hail.csv">2024 hail</a>
+        <a href="2024_wind.csv">2024 wind</a>
+        """
+        jan_torn_url = f"{SPC_DAILY_REPORT_BASE_URL}/250101_rpts_torn.csv"
+        feb_wind_url = f"{SPC_DAILY_REPORT_BASE_URL}/260228_rpts_wind.csv"
+        session = FakeHttpSession(
+            {
+                SPC_INDEX_URL: FakeHttpResponse(index_html),
+                jan_torn_url: FakeHttpResponse("Time,Location,Lat,Lon\n2355,Norman,35.2,-97.4\n"),
+                feb_wind_url: FakeHttpResponse("Time,Location,Lat,Lon\n0005,Memphis,35.1,-90.0\n"),
+            }
+        )
+
+        reports = load_spc_reports(
+            session,
+            [2025, 2026],
+            list(range(1, 13)),
+            run_dates=["20250101", "20260228"],
+        )
+
+        self.assertEqual([report["hazard"] for report in reports], ["tornado", "wind"])
+        self.assertEqual(reports[0]["time"], datetime(2025, 1, 1, 23, 55, tzinfo=timezone.utc))
+        self.assertEqual(reports[1]["time"], datetime(2026, 3, 1, 0, 5, tzinfo=timezone.utc))
+        requested = "\n".join(session.requested_urls)
+        self.assertIn("250101_rpts_torn.csv", requested)
+        self.assertIn("260228_rpts_wind.csv", requested)
+        self.assertNotIn("260301", requested)
+
     def test_feature_label_row_dedupe_drops_duplicates(self) -> None:
         base_row = {
             "forecastHour": 12.0,
@@ -401,6 +539,96 @@ class MlPipelineTests(unittest.TestCase):
         deduped, dropped = _dedupe_feature_label_rows(rows)
         self.assertEqual(len(deduped), 2)
         self.assertEqual(dropped, 1)
+
+    def test_merge_archive_prefers_lightning_rows_for_duplicate_keys(self) -> None:
+        try:
+            import pandas as pd
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"pandas/pyarrow unavailable: {exc}")
+
+        base = {name: 1.0 for name in FEATURE_NAMES}
+        base.update(
+            {
+                "runDate": "20230128",
+                "runCycle": 0,
+                "forecastHour": 12.0,
+                "sampleLat": 35.0,
+                "sampleLon": -97.0,
+                "label_tornado": 0,
+                "label_hail": 1,
+                "label_wind": 0,
+            }
+        )
+        raw_row = {**base, "hrrrLightningAvailable": False, "hrrrLtng": None, "hrrrLightningFieldCount": 0}
+        lightning_row = {**base, "hrrrLightningAvailable": True, "hrrrLtng": 4.5, "hrrrLightningFieldCount": 1}
+        next_row = {**base, "runDate": "20230129", "sampleLat": 36.0, "hrrrLightningAvailable": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_path = tmp_path / "raw.parquet"
+            lightning_path = tmp_path / "lightning.parquet"
+            output = tmp_path / "merged.parquet"
+            summary = tmp_path / "summary.json"
+            pd.DataFrame([raw_row, next_row]).to_parquet(raw_path, index=False)
+            pd.DataFrame([lightning_row]).to_parquet(lightning_path, index=False)
+
+            result = merge_archive([raw_path, lightning_path], output, summary)
+            merged = pd.read_parquet(output)
+
+        self.assertEqual(result["rowsBeforeDedupe"], 3)
+        self.assertEqual(result["rows"], 2)
+        self.assertEqual(result["duplicatesDropped"], 1)
+        duplicate_key = merged.loc[merged["runDate"] == "20230128"].iloc[0]
+        self.assertTrue(bool(duplicate_key["hrrrLightningAvailable"]))
+        self.assertEqual(float(duplicate_key["hrrrLtng"]), 4.5)
+
+    def test_spc_probability_cig_category_tables_match_2026_rules(self) -> None:
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.60, 0), "ENH")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.60, 1), "HIGH")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.45, "CIG1"), "MDT")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.30, "CIG2"), "HIGH")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.15, "CIG3"), "MDT")
+        self.assertEqual(category_from_probability_and_cig("tornado", 10, "CIG1"), "ENH")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.05, "CIG2"), "ENH")
+        self.assertEqual(category_from_probability_and_cig("tornado", 0.02, None), "MRGL")
+
+        self.assertEqual(category_from_probability_and_cig("wind", 0.90, 0), "ENH")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.75, "CIG1"), "MDT")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.60, "CIG2"), "HIGH")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.45, "CIG3"), "HIGH")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.30, 0), "SLGT")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.15, "CIG2"), "ENH")
+        self.assertEqual(category_from_probability_and_cig("wind", 0.05, "CIG1"), "MRGL")
+
+        self.assertEqual(category_from_probability_and_cig("hail", 0.60, 0), "ENH")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.60, "CIG1"), "MDT")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.45, "CIG2"), "MDT")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.30, 0), "SLGT")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.15, "CIG2"), "ENH")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.05, None), "MRGL")
+
+    def test_spc_probability_cig_not_used_cells_are_reported_as_clamps(self) -> None:
+        tornado = category_conversion_from_probability_and_cig("tornado", 0.05, "CIG3")
+        self.assertEqual(tornado.category, "ENH")
+        self.assertTrue(tornado.clamped)
+        self.assertEqual(tornado.reason, "cig_not_used_for_probability_row")
+
+        wind = category_conversion_from_probability_and_cig("wind", 0.30, "CIG3")
+        self.assertEqual(wind.category, "ENH")
+        self.assertTrue(wind.clamped)
+        self.assertEqual(wind.reason, "cig_not_used_for_probability_row")
+
+        hail = category_conversion_from_probability_and_cig("hail", 0.45, "CIG3")
+        self.assertEqual(hail.category, "MDT")
+        self.assertTrue(hail.clamped)
+        self.assertEqual(hail.reason, "cig_above_supported_range")
+
+    def test_spc_category_labels_use_mdt_and_normalize_legacy_mod(self) -> None:
+        self.assertEqual(normalize_category("MOD"), "MDT")
+        self.assertEqual(category_ordinal("MOD"), category_ordinal("MDT"))
+        self.assertLess(category_ordinal("ENH"), category_ordinal("MDT"))
+        self.assertEqual(category_from_probability_and_cig("hail", 0.0, "CIG2"), "NONE")
+        self.assertEqual(category_from_probability_and_cig("hail", 0.01, "CIG2"), "TSTM")
 
     def test_missing_model_artifacts_disable_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -587,10 +815,10 @@ class MlPipelineTests(unittest.TestCase):
         self.assertGreater(metrics["brierSkillScore"], 0.0)
         self.assertEqual(category_for_probability("tornado", 0.10), "ENH")
         self.assertEqual(category_for_probability("tornado", 0.15), "ENH")
-        self.assertEqual(category_for_probability("tornado", 0.30), "MOD")
+        self.assertEqual(category_for_probability("tornado", 0.30), "MDT")
         self.assertEqual(category_for_probability("wind", 0.30), "ENH")
         self.assertEqual(category_for_probability("wind", 0.45), "ENH")
-        self.assertEqual(category_for_probability("wind", 0.60), "MOD")
+        self.assertEqual(category_for_probability("wind", 0.60), "MDT")
 
 
 if __name__ == "__main__":

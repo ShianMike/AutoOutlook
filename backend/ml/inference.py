@@ -10,16 +10,20 @@ from typing import Any, Mapping
 import numpy as np
 
 from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, feature_schema_hash, feature_vector
+from .reports import INTENSITY_LABEL_KEYS
 
 log = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
+CIG_MODEL_DIR = MODEL_DIR / "cig_intensity"
 METADATA_FILE = "metadata.json"
 TERM_MODEL_TYPE = "calibrated_linear_terms_v1"
 MIN_XGBOOST_TRAINING_ROWS = 5000
 
 _cached_fingerprint: tuple[tuple[str, float], ...] | None = None
 _cached_result: tuple[dict[str, Any], dict[str, Any] | None] | None = None
+_cached_cig_fingerprint: tuple[tuple[str, float], ...] | None = None
+_cached_cig_result: tuple[dict[str, Any], dict[str, Any] | None] | None = None
 
 
 def _status_from_metadata(
@@ -100,6 +104,12 @@ def _artifact_fingerprint(metadata: Mapping[str, Any]) -> tuple[tuple[str, float
     artifact_type = metadata.get("artifactType", "xgboost_joblib")
     suffix = "_model.json" if artifact_type == TERM_MODEL_TYPE else "_xgb.joblib"
     paths.extend(MODEL_DIR / f"{hazard}{suffix}" for hazard in HAZARD_KEYS)
+    return tuple((str(path), path.stat().st_mtime if path.exists() else -1.0) for path in paths)
+
+
+def _cig_artifact_fingerprint(metadata: Mapping[str, Any]) -> tuple[tuple[str, float], ...]:
+    paths = [CIG_MODEL_DIR / METADATA_FILE]
+    paths.extend(CIG_MODEL_DIR / f"{target}_xgb.joblib" for target in INTENSITY_LABEL_KEYS)
     return tuple((str(path), path.stat().st_mtime if path.exists() else -1.0) for path in paths)
 
 
@@ -221,15 +231,81 @@ def _load_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
     return _cached_result
 
 
+def _load_cig_bundle() -> tuple[dict[str, Any], dict[str, Any] | None]:
+    global _cached_cig_fingerprint, _cached_cig_result
+    if not CIG_MODEL_DIR.exists():
+        return _inactive(f"CIG model directory missing: {CIG_MODEL_DIR}")
+
+    metadata_path = CIG_MODEL_DIR / METADATA_FILE
+    if not metadata_path.exists():
+        return _inactive(f"CIG model metadata missing: {metadata_path}")
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return _inactive(f"CIG model metadata unreadable: {exc}")
+
+    artifact_type = metadata.get("artifactType", "xgboost_joblib")
+    model_feature_names, compatibility = _resolve_model_feature_names(metadata, str(artifact_type))
+    if artifact_type != "xgboost_joblib":
+        return _inactive(f"unsupported CIG model artifactType: {artifact_type}", metadata, compatibility)
+    if model_feature_names is None:
+        return _inactive(str(compatibility), metadata)
+
+    training_rows = _training_rows(metadata)
+    if training_rows < MIN_XGBOOST_TRAINING_ROWS and not metadata.get("allowSmallTrainingSet", False):
+        return _inactive(
+            f"CIG XGBoost trainingRows {training_rows} below required {MIN_XGBOOST_TRAINING_ROWS}",
+            metadata,
+        )
+
+    fingerprint = _cig_artifact_fingerprint(metadata)
+    if _cached_cig_fingerprint == fingerprint and _cached_cig_result is not None:
+        return _cached_cig_result
+
+    try:
+        import joblib
+    except Exception as exc:  # noqa: BLE001
+        return _inactive(f"joblib unavailable for CIG model loading: {exc}")
+
+    models: dict[str, Any] = {}
+    for target in INTENSITY_LABEL_KEYS:
+        path = CIG_MODEL_DIR / f"{target}_xgb.joblib"
+        if not path.exists():
+            return _inactive(f"CIG model artifact missing: {path}", metadata)
+        try:
+            models[target] = joblib.load(path)
+        except Exception as exc:  # noqa: BLE001
+            return _inactive(f"failed loading CIG {path.name}: {exc}", metadata)
+
+    status = _status_from_metadata(metadata, active=True, compatibility_mode=compatibility)
+    _cached_cig_fingerprint = fingerprint
+    feature_indexes = tuple(FEATURE_NAMES.index(name) for name in model_feature_names)
+    _cached_cig_result = status, {
+        "metadata": metadata,
+        "models": models,
+        "featureNames": model_feature_names,
+        "featureIndexes": feature_indexes,
+    }
+    return _cached_cig_result
+
+
 def model_status() -> dict[str, Any]:
     status, _ = _load_bundle()
     return dict(status)
 
 
+def cig_model_status() -> dict[str, Any]:
+    status, _ = _load_cig_bundle()
+    return dict(status)
+
+
 def reset_model_cache() -> None:
-    global _cached_fingerprint, _cached_result
+    global _cached_fingerprint, _cached_result, _cached_cig_fingerprint, _cached_cig_result
     _cached_fingerprint = None
     _cached_result = None
+    _cached_cig_fingerprint = None
+    _cached_cig_result = None
 
 
 def predict_ml_hazards(
@@ -294,4 +370,32 @@ def predict_ml_hazard_matrix(feature_matrix: np.ndarray) -> dict[str, np.ndarray
             log.warning("ML gridded hazard inference failed for %s: %s", hazard, exc)
             return None
         probabilities[hazard] = np.clip(values, 0.0, 1.0)
+    return probabilities
+
+
+def predict_cig_intensity_matrix(feature_matrix: np.ndarray) -> dict[str, np.ndarray] | None:
+    """Return gridded probabilities for trained SPC CIG/intensity targets."""
+    status, bundle = _load_cig_bundle()
+    if not status.get("active") or bundle is None:
+        return None
+
+    x = np.asarray(feature_matrix, dtype=float)
+    if x.ndim != 2 or x.shape[1] != len(FEATURE_NAMES):
+        raise ValueError(f"feature_matrix must be shaped (n, {len(FEATURE_NAMES)})")
+    feature_indexes = tuple(bundle.get("featureIndexes", range(len(FEATURE_NAMES))))
+    model_x = x[:, feature_indexes]
+
+    probabilities: dict[str, np.ndarray] = {}
+    for target in INTENSITY_LABEL_KEYS:
+        model = bundle["models"][target]
+        try:
+            if hasattr(model, "predict_proba"):
+                proba = np.asarray(model.predict_proba(model_x), dtype=float)
+                values = proba[:, 1] if proba.ndim == 2 and proba.shape[1] > 1 else proba.reshape(-1)
+            else:
+                values = np.asarray(model.predict(model_x), dtype=float).reshape(-1)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ML gridded CIG intensity inference failed for %s: %s", target, exc)
+            return None
+        probabilities[target] = np.clip(values, 0.0, 1.0)
     return probabilities

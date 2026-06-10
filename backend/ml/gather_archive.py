@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import csv
 import io
 import json
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin
@@ -20,10 +21,11 @@ import requests
 from backend.grib2 import decode_grib2
 from backend.hrrr_filter import _messages_to_fields
 from backend.ml.features import FEATURE_NAMES, HAZARD_KEYS, feature_row
-from backend.ml.reports import labels_for_sample
+from backend.ml.reports import labels_for_sample, normalize_report_magnitude
 
 SPC_INDEX_URL = "https://origin-west-www-spc.woc.noaa.gov/wcm/index.html"
 SPC_DATA_BASE_URL = "https://www.spc.noaa.gov/wcm/index.html"
+SPC_DAILY_REPORT_BASE_URL = "https://www.spc.noaa.gov/climo/reports"
 HRRR_BASE_URL = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 DEFAULT_OUTPUT = (
     Path(__file__).resolve().parents[1] / "ml_data" / "archive_samples.parquet"
@@ -189,8 +191,18 @@ def selected_spc_csv_urls(
             annual_urls.extend(
                 [url for url in urls if url.rsplit("/", 1)[-1].startswith(f"{year}_")]
             )
-        selected[hazard] = annual_urls or urls
+        selected[hazard] = annual_urls
     return selected
+
+
+def _annual_years_from_urls(selected: dict[str, list[str]]) -> set[int]:
+    years: set[int] = set()
+    for urls in selected.values():
+        for url in urls:
+            match = re.match(r"(\d{4})_", url.rsplit("/", 1)[-1])
+            if match:
+                years.add(int(match.group(1)))
+    return years
 
 
 def _first_col(frame: Any, candidates: Iterable[str]) -> str | None:
@@ -231,6 +243,9 @@ def _normalize_spc_frame(
     time_col = _first_col(frame, ("time", "utc_time"))
     lat_col = _first_col(frame, ("slat", "lat", "latitude"))
     lon_col = _first_col(frame, ("slon", "lon", "longitude"))
+    magnitude_col = _first_col(frame, ("mag", "magnitude", "size", "speed", "wind_speed", "hail_size", "f_scale", "ef_scale"))
+    units_col = _first_col(frame, ("unit", "units", "mag_unit", "magnitude_unit"))
+    ef_col = _first_col(frame, ("f_scale", "ef_scale", "scale"))
     if not all((year_col, month_col, day_col, time_col, lat_col, lon_col)):
         return []
 
@@ -250,12 +265,137 @@ def _normalize_spc_frame(
             continue
         if not (20.0 <= lat <= 55.0 and -130.0 <= lon <= -60.0):
             continue
-        rows.append({"hazard": hazard, "time": report_time, "lat": lat, "lon": lon})
+        magnitude_value = row[magnitude_col] if magnitude_col else None
+        unit_hint = row[units_col] if units_col else None
+        ef_value = row[ef_col] if ef_col else None
+        rows.append(
+            {
+                "hazard": hazard,
+                "time": report_time,
+                "lat": lat,
+                "lon": lon,
+                **normalize_report_magnitude(hazard, magnitude_value, unit_hint, ef_value),
+            }
+        )
     return rows
 
 
+def _report_dates_for_window(
+    years: Iterable[int], months: Iterable[int], run_dates: Iterable[str] | None = None
+) -> list[date]:
+    year_set = set(int(y) for y in years)
+    month_set = set(int(m) for m in months)
+    selected: list[date] = []
+    seen: set[date] = set()
+    if run_dates:
+        for token in run_dates:
+            try:
+                parsed = datetime.strptime(str(token), "%Y%m%d").date()
+            except ValueError:
+                continue
+            if parsed.year in year_set and parsed.month in month_set and parsed not in seen:
+                selected.append(parsed)
+                seen.add(parsed)
+        return selected
+    for year in sorted(year_set):
+        for month in sorted(month_set):
+            for day in range(1, calendar.monthrange(year, month)[1] + 1):
+                selected.append(date(year, month, day))
+    return selected
+
+
+def _daily_report_time(report_date: date, value: Any) -> datetime | None:
+    raw = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
+    if len(raw) < 3:
+        return None
+    raw = raw[-4:].zfill(4)
+    try:
+        hour = int(raw[:2])
+        minute = int(raw[2:])
+    except ValueError:
+        return None
+    if hour > 23 or minute > 59:
+        return None
+    valid_date = report_date if hour >= 12 else report_date + timedelta(days=1)
+    return datetime(valid_date.year, valid_date.month, valid_date.day, hour, minute, tzinfo=timezone.utc)
+
+
+def _daily_row_value(row: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in row:
+            return row[name]
+    return None
+
+
+def _normalize_daily_header(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _parse_spc_daily_report_csv(text: str, hazard: str, report_date: date, source_url: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    reader = csv.DictReader(io.StringIO(text))
+    for raw_row in reader:
+        normalized = {
+            _normalize_daily_header(key): value
+            for key, value in raw_row.items()
+            if key is not None
+        }
+        report_time = _daily_report_time(report_date, _daily_row_value(normalized, "time", "utctime"))
+        if report_time is None:
+            continue
+        try:
+            lat = float(_daily_row_value(normalized, "lat", "slat", "latitude"))
+            lon = float(_daily_row_value(normalized, "lon", "slon", "longitude"))
+        except (TypeError, ValueError):
+            continue
+        if not (20.0 <= lat <= 55.0 and -130.0 <= lon <= -60.0):
+            continue
+        magnitude_value = _daily_row_value(
+            normalized,
+            "mag",
+            "magnitude",
+            "size",
+            "speed",
+            "windspeed",
+            "hail",
+            "haildiameter",
+            "fscale",
+            "efscale",
+        )
+        unit_hint = _daily_row_value(normalized, "unit", "units", "magunit", "magnitudeunit")
+        rows.append(
+            {
+                "hazard": hazard,
+                "time": report_time,
+                "lat": lat,
+                "lon": lon,
+                "sourceUrl": source_url,
+                **normalize_report_magnitude(hazard, magnitude_value, unit_hint),
+            }
+        )
+    return rows
+
+
+def fetch_spc_daily_report_rows(session: requests.Session, report_date: date) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for hazard_token, hazard in (("torn", "tornado"), ("hail", "hail"), ("wind", "wind")):
+        url = f"{SPC_DAILY_REPORT_BASE_URL}/{report_date:%y%m%d}_rpts_{hazard_token}.csv"
+        try:
+            response = session.get(url, timeout=20)
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            reports.extend(_parse_spc_daily_report_csv(response.text, hazard, report_date, url))
+        except Exception as exc:  # noqa: BLE001
+            print(f"Skipping daily SPC report CSV {url}: {exc}")
+    return reports
+
+
 def load_spc_reports(
-    session: requests.Session, years: Iterable[int], months: Iterable[int]
+    session: requests.Session,
+    years: Iterable[int],
+    months: Iterable[int],
+    run_dates: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     pd = _require_frame_deps()
     year_set = set(int(y) for y in years)
@@ -273,6 +413,46 @@ def load_spc_reports(
                 reports.extend(_normalize_spc_frame(frame, hazard, year_set, month_set))
             except Exception as exc:  # noqa: BLE001
                 print(f"Skipping SPC CSV {url}: {exc}")
+    missing_annual_years = year_set - _annual_years_from_urls(selected_urls_by_hazard)
+    daily_dates = [
+        report_date
+        for report_date in _report_dates_for_window(year_set, month_set, run_dates)
+        if report_date.year in missing_annual_years
+    ]
+    if daily_dates:
+        print(
+            f"Falling back to daily SPC report CSVs for {len(daily_dates)} dates "
+            f"({daily_dates[0]:%Y%m%d}..{daily_dates[-1]:%Y%m%d})",
+            flush=True,
+        )
+        if isinstance(session, requests.Session):
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _fetch_daily(report_date: date) -> list[dict[str, Any]]:
+                worker_session = requests.Session()
+                worker_session.headers["User-Agent"] = session.headers.get(
+                    "User-Agent", "AutoOutlook-archive-gatherer/1.0"
+                )
+                return fetch_spc_daily_report_rows(worker_session, report_date)
+
+            with ThreadPoolExecutor(max_workers=min(12, len(daily_dates))) as executor:
+                for index, daily_rows in enumerate(executor.map(_fetch_daily, daily_dates), start=1):
+                    reports.extend(daily_rows)
+                    if index == 1 or index % 50 == 0 or index == len(daily_dates):
+                        print(
+                            f"  daily SPC reports: {index}/{len(daily_dates)} dates, "
+                            f"{len(reports)} total reports",
+                            flush=True,
+                        )
+        else:
+            for index, report_date in enumerate(daily_dates, start=1):
+                reports.extend(fetch_spc_daily_report_rows(session, report_date))
+                if index == 1 or index % 50 == 0 or index == len(daily_dates):
+                    print(
+                        f"  daily SPC reports: {index}/{len(daily_dates)} dates, "
+                        f"{len(reports)} total reports",
+                        flush=True,
+                    )
     return reports
 
 
@@ -609,7 +789,7 @@ def gather(args: argparse.Namespace) -> int:
         )
         return 0
 
-    reports = load_spc_reports(session, args.years, args.months)
+    reports = load_spc_reports(session, args.years, args.months, args.run_dates)
     print(f"Loaded {len(reports)} SPC reports for pilot window", flush=True)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -743,7 +923,7 @@ def gather(args: argparse.Namespace) -> int:
     new_df = pd.DataFrame(rows)
     if args.start_from:
         ckpt_path = args.output.with_suffix(".ckpt.parquet")
-        base_path = ckpt_path if ckpt_path.exists() else args.output
+        base_path = args.output if args.output.exists() else ckpt_path
         if base_path.exists():
             existing_df = pd.read_parquet(base_path)
             new_df = pd.concat([existing_df, new_df], ignore_index=True)

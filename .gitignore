@@ -24,6 +24,9 @@ backend/models/*
 !backend/models/
 !backend/models/metadata.json
 !backend/models/*_xgb.joblib
+!backend/models/cig_intensity/
+!backend/models/cig_intensity/metadata.json
+!backend/models/cig_intensity/*_xgb.joblib
 backend/models_backup/
 backend/models_candidate/
 backend/ml_data/

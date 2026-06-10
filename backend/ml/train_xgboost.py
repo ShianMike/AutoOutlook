@@ -66,7 +66,66 @@ def _metric_block(y_true: Any, y_prob: Any, metric_fns: dict[str, Any]) -> dict[
     return out
 
 
-def train(input_path: Path, models_dir: Path, test_size: float, random_state: int) -> dict[str, Any]:
+def _time_based_split(frame: Any, test_start_date: str) -> tuple[Any, Any, dict[str, Any]]:
+    if "runDate" not in frame.columns:
+        raise SystemExit("Time-based training split requires a runDate column")
+    run_dates = frame["runDate"].astype(str)
+    train_idx = frame.index[run_dates < test_start_date]
+    test_idx = frame.index[run_dates >= test_start_date]
+    if len(train_idx) == 0 or len(test_idx) == 0:
+        raise SystemExit(
+            f"Time-based split produced empty train/test partitions: "
+            f"test_start_date={test_start_date}, train={len(train_idx)}, test={len(test_idx)}"
+        )
+    return train_idx, test_idx, {
+        "strategy": "time",
+        "testStartDate": test_start_date,
+        "trainRows": int(len(train_idx)),
+        "testRows": int(len(test_idx)),
+        "trainRunDateMin": str(run_dates.loc[train_idx].min()),
+        "trainRunDateMax": str(run_dates.loc[train_idx].max()),
+        "testRunDateMin": str(run_dates.loc[test_idx].min()),
+        "testRunDateMax": str(run_dates.loc[test_idx].max()),
+    }
+
+
+def _group_shuffle_split(
+    frame: Any,
+    x: Any,
+    y: Any,
+    groups: Any,
+    test_size: float,
+    random_state: int,
+) -> tuple[Any, Any, dict[str, Any]]:
+    _, _, _, _, GroupShuffleSplit, _, _, _ = _require_training_deps()
+    gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    train_idx, test_idx = next(gss.split(x, y, groups=groups))
+    run_dates = frame["runDate"].astype(str) if "runDate" in frame.columns else None
+    split: dict[str, Any] = {
+        "strategy": "group-shuffle",
+        "testSize": test_size,
+        "trainRows": int(len(train_idx)),
+        "testRows": int(len(test_idx)),
+    }
+    if run_dates is not None:
+        split.update({
+            "trainRunDateMin": str(run_dates.iloc[train_idx].min()),
+            "trainRunDateMax": str(run_dates.iloc[train_idx].max()),
+            "testRunDateMin": str(run_dates.iloc[test_idx].min()),
+            "testRunDateMax": str(run_dates.iloc[test_idx].max()),
+        })
+    return train_idx, test_idx, split
+
+
+def train(
+    input_path: Path,
+    models_dir: Path,
+    test_size: float,
+    random_state: int,
+    split_strategy: str,
+    test_start_date: str,
+    n_estimators: int,
+) -> dict[str, Any]:
     joblib, pd, CalibratedClassifierCV, train_test_split, GroupShuffleSplit, StratifiedKFold, XGBClassifier, metric_fns = _require_training_deps()
     frame = pd.read_parquet(input_path)
 
@@ -82,6 +141,7 @@ def train(input_path: Path, models_dir: Path, test_size: float, random_state: in
     x = frame.loc[:, FEATURE_NAMES].astype(float)
     groups = frame["runDate"]
     metrics: dict[str, Any] = {}
+    split_metadata: dict[str, Any] | None = None
 
     for hazard in HAZARD_KEYS:
         label_col = f"label_{hazard}"
@@ -93,15 +153,18 @@ def train(input_path: Path, models_dir: Path, test_size: float, random_state: in
                 f"Not enough positive/negative samples for {hazard}: positives={positives}, negatives={negatives}"
             )
 
-        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-        train_idx, test_idx = next(gss.split(x, y, groups=groups))
+        if split_strategy == "time":
+            train_idx, test_idx, split = _time_based_split(frame, test_start_date)
+        else:
+            train_idx, test_idx, split = _group_shuffle_split(frame, x, y, groups, test_size, random_state)
+        split_metadata = split
 
         x_train, x_test = x.iloc[train_idx], x.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
         scale_pos_weight = max(1.0, float((len(y_train) - int(y_train.sum())) / max(1, int(y_train.sum()))))
         base = XGBClassifier(
-            n_estimators=300,
+            n_estimators=n_estimators,
             max_depth=4,
             learning_rate=0.04,
             subsample=0.85,
@@ -122,6 +185,9 @@ def train(input_path: Path, models_dir: Path, test_size: float, random_state: in
             "positives": positives,
             "negatives": negatives,
             "testSamples": int(len(y_test)),
+            "trainSamples": int(len(y_train)),
+            "trainPositives": int(y_train.sum()),
+            "testPositives": int(y_test.sum()),
             "calibrationCv": cv_folds,
             **_metric_block(y_test, y_prob, metric_fns),
         }
@@ -138,6 +204,8 @@ def train(input_path: Path, models_dir: Path, test_size: float, random_state: in
         "featureNames": list(FEATURE_NAMES),
         "hazards": list(HAZARD_KEYS),
         "trainingRows": int(len(frame)),
+        "trainingInput": str(input_path),
+        "split": split_metadata,
         "datasetQuality": quality,
         "metrics": metrics,
     }
@@ -149,14 +217,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True, help="Parquet dataset from gather_archive.py")
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    parser.add_argument("--split-strategy", choices=("time", "group-shuffle"), default="time")
+    parser.add_argument("--test-start-date", default="20250101")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--n-estimators", type=int, default=300)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    metadata = train(args.input, args.models_dir, args.test_size, args.random_state)
+    metadata = train(
+        args.input,
+        args.models_dir,
+        args.test_size,
+        args.random_state,
+        args.split_strategy,
+        args.test_start_date,
+        args.n_estimators,
+    )
     print(json.dumps({
         "modelsDir": str(args.models_dir),
         "version": metadata["version"],

@@ -37,12 +37,17 @@ from backend.hrrr_selected import (
     validate_decoded_hrrr_fields,
 )
 from backend.ml.gridded_outlook import (
+    GriddedFeatures,
     SPC_RISK_LABELS,
     apply_category_probability_ceiling,
     apply_environmental_probability_caps,
     apply_offshore_probability_suppression,
     category_grid_from_probabilities,
+    cig_grids_for_runtime,
+    cig_shapes_from_grids,
     constrain_hazard_probability_shapes_to_risk_support,
+    estimate_cig_grids,
+    model_based_cig_grids,
     gridded_features_from_fields,
     hazard_probability_shapes_from_grids,
     postprocess_category_grid,
@@ -72,6 +77,7 @@ from backend.ml.outlook_pipeline import (
     run_pipeline,
 )
 from backend.ml.spc_verification import compare_prediction_to_spc, official_category_grid
+from backend.ml.verify_cig_categories import _max_spc_category_label
 
 
 def small_fields(shape: tuple[int, int] = (5, 5)) -> dict[str, np.ndarray]:
@@ -93,6 +99,70 @@ def small_fields(shape: tuple[int, int] = (5, 5)) -> dict[str, np.ndarray]:
         "srh01": np.full(shape, 80.0),
         "srh03": np.full(shape, 160.0),
     }
+
+
+def supportive_gridded_features(shape: tuple[int, int] = (1, 1)) -> GriddedFeatures:
+    raw = {
+        "forecastHour": np.zeros(shape),
+        "mlcape": np.full(shape, 1800.0),
+        "mucape": np.full(shape, 2200.0),
+        "sbcape": np.full(shape, 1700.0),
+        "cape3km": np.full(shape, 250.0),
+        "cape180": np.full(shape, 1800.0),
+        "cin": np.full(shape, -50.0),
+        "cinSb": np.full(shape, -45.0),
+        "cinMl": np.full(shape, -50.0),
+        "cinMu": np.full(shape, -55.0),
+        "cin180": np.full(shape, -50.0),
+        "sfcDewpointF": np.full(shape, 65.0),
+        "pwatIn": np.full(shape, 1.5),
+        "lclM": np.full(shape, 900.0),
+        "moistureDepthM": np.full(shape, 2200.0),
+        "srh01": np.full(shape, 160.0),
+        "srh03": np.full(shape, 260.0),
+        "shear06Kt": np.full(shape, 45.0),
+        "stormRelWindKt": np.full(shape, 35.0),
+        "stp": np.full(shape, 2.0),
+        "scp": np.full(shape, 6.0),
+        "ehi": np.full(shape, 1.7),
+        "ship": np.full(shape, 2.0),
+        "lapseRate700500CPerKm": np.full(shape, 7.5),
+        "freezingLevelM": np.full(shape, 3200.0),
+        "surfacePressurePa": np.full(shape, 101000.0),
+        "hgt500": np.full(shape, 5700.0),
+    }
+    feature_matrix = np.column_stack([
+        raw[name].reshape(-1)
+        for name in (
+            "forecastHour",
+            "mlcape",
+            "mucape",
+            "sbcape",
+            "cape3km",
+            "cape180",
+            "cin",
+            "cinSb",
+            "cinMl",
+            "cinMu",
+            "cin180",
+            "sfcDewpointF",
+            "pwatIn",
+            "lclM",
+            "moistureDepthM",
+            "srh01",
+            "srh03",
+            "shear06Kt",
+            "stormRelWindKt",
+            "stp",
+            "scp",
+            "ehi",
+            "ship",
+            "lapseRate700500CPerKm",
+            "freezingLevelM",
+            "surfacePressurePa",
+        )
+    ]).astype(float)
+    return GriddedFeatures(raw=raw, normalized={}, matrix=feature_matrix, shape=shape)
 
 
 def skipped_category_adjacencies(grid: np.ndarray) -> list[tuple[int, int]]:
@@ -674,6 +744,103 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             ["TSTM", "MRGL", "SLGT", "ENH"],
             ["ENH", "MDT", "HIGH", "HIGH"],
         ])
+
+    def test_cig_category_flag_uses_probability_plus_estimated_cig(self) -> None:
+        features = supportive_gridded_features()
+        probabilities = {
+            "tornado": np.array([[0.05]]),
+            "hail": np.zeros((1, 1)),
+            "wind": np.zeros((1, 1)),
+        }
+
+        with patch.dict(os.environ, {"AUTOOUTLOOK_SPC_CIG_CATEGORIES": ""}, clear=False):
+            legacy = category_grid_from_probabilities(probabilities, features)
+        with patch.dict(os.environ, {"AUTOOUTLOOK_SPC_CIG_CATEGORIES": "1"}, clear=False), patch(
+            "backend.ml.gridded_outlook.predict_cig_intensity_matrix",
+            return_value=None,
+        ):
+            cig_based = category_grid_from_probabilities(probabilities, features)
+
+        self.assertEqual(SPC_RISK_LABELS[int(legacy[0, 0])], "SLGT")
+        self.assertEqual(SPC_RISK_LABELS[int(cig_based[0, 0])], "ENH")
+
+    def test_estimated_cig_grids_are_hazard_specific(self) -> None:
+        features = supportive_gridded_features()
+
+        cig = estimate_cig_grids(features)
+
+        self.assertEqual(int(cig["tornado"][0, 0]), 2)
+        self.assertEqual(int(cig["hail"][0, 0]), 2)
+        self.assertEqual(int(cig["wind"][0, 0]), 2)
+
+    def test_model_based_cig_grids_use_trained_intensity_predictions(self) -> None:
+        features = gridded_features_from_fields(small_fields((1, 2)), forecast_hour=0)
+        probabilities = {
+            "tornado": np.full((1, 2), 0.05),
+            "hail": np.full((1, 2), 0.15),
+            "wind": np.full((1, 2), 0.10),
+        }
+        target_probs = {
+            "tornado_ef2_plus": np.array([0.006, 0.006]),
+            "tornado_ef3_plus": np.array([0.002, 0.002]),
+            "hail_2in_plus": np.array([0.02, 0.02]),
+            "hail_3_5in_plus": np.array([0.004, 0.004]),
+            "wind_56kt_plus": np.array([0.02, 0.02]),
+            "wind_65kt_plus": np.array([0.012, 0.012]),
+            "wind_74kt_plus": np.array([0.004, 0.004]),
+            "wind_83kt_plus": np.array([0.002, 0.002]),
+        }
+
+        with patch("backend.ml.gridded_outlook.predict_cig_intensity_matrix", return_value=target_probs):
+            cig, source = model_based_cig_grids(features, probabilities)
+
+        self.assertEqual(source, "trained_intensity_with_environment_fallback_v1")
+        self.assertGreaterEqual(int(cig["tornado"][0, 0]), 2)
+        self.assertGreaterEqual(int(cig["hail"][0, 0]), 2)
+        self.assertEqual(int(cig["wind"][0, 0]), 3)
+
+    def test_runtime_cig_grids_fall_back_without_feature_flag(self) -> None:
+        features = supportive_gridded_features()
+
+        with patch.dict(os.environ, {"AUTOOUTLOOK_SPC_CIG_CATEGORIES": ""}, clear=False), patch(
+            "backend.ml.gridded_outlook.predict_cig_intensity_matrix",
+            side_effect=AssertionError("model CIG should stay disabled without the rollout flag"),
+        ):
+            cig, source = cig_grids_for_runtime(features)
+
+        self.assertEqual(source, "environmental_estimator_v1")
+        self.assertEqual(int(cig["hail"][0, 0]), 2)
+
+    def test_cig_shapes_from_grids_emit_hazard_hatch_overlays(self) -> None:
+        lats = np.linspace(34.0, 38.0, 8)
+        lons = np.linspace(-101.0, -97.0, 8)
+        cig_grids = {
+            "tornado": np.full((8, 8), 3, dtype=np.int16),
+            "hail": np.full((8, 8), 2, dtype=np.int16),
+            "wind": np.full((8, 8), 3, dtype=np.int16),
+        }
+
+        shapes = cig_shapes_from_grids(
+            lats,
+            lons,
+            cig_grids,
+            24,
+            "2024-05-05T00:00:00Z",
+            cig_source="trained_intensity_with_environment_fallback_v1",
+            min_cells=1,
+        )
+
+        self.assertEqual(shapes["type"], "FeatureCollection")
+        props = [feature["properties"] for feature in shapes["features"]]
+        by_hazard_cig = {(prop["hazard"], prop["cig"]): prop for prop in props}
+        self.assertIn(("tornado", 3), by_hazard_cig)
+        self.assertIn(("wind", 3), by_hazard_cig)
+        self.assertIn(("hail", 2), by_hazard_cig)
+        self.assertNotIn(("hail", 3), by_hazard_cig)
+        self.assertEqual(by_hazard_cig[("tornado", 1)]["hatchPattern"], "dashedDiagonal")
+        self.assertEqual(by_hazard_cig[("hail", 2)]["hatchPattern"], "solidDiagonal")
+        self.assertEqual(by_hazard_cig[("wind", 3)]["hatchPattern"], "cross")
+        self.assertEqual(by_hazard_cig[("wind", 3)]["cigSource"], "trained_intensity_with_environment_fallback_v1")
 
     def test_probability_categories_use_spc_day1_non_sig_wind_hail_table(self) -> None:
         fields = small_fields((1, 5))
@@ -2280,100 +2447,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertTrue(np.all(capped.probabilities["wind"] == 0.30))
         self.assertNotIn("southTexasGulfCoast", capped.report.get("offshoreProbabilitySuppressedCells", {}))
 
-    def test_philippines_offshore_suppression_keeps_land_and_coastal_buffer(self) -> None:
-        probabilities = {
-            "tornado": np.full((3, 3), 0.04),
-            "hail": np.full((3, 3), 0.12),
-            "wind": np.full((3, 3), 0.12),
-        }
-
-        luzon_lats = np.linspace(14.45, 14.75, 3)
-        luzon_lons = np.linspace(120.85, 121.15, 3)
-        land = apply_offshore_probability_suppression(probabilities, luzon_lats, luzon_lons)
-        self.assertGreater(float(np.max(land.probabilities["wind"])), 0.0)
-        self.assertIn("philippinesOffshore", land.report["offshoreProbabilitySuppressedCells"])
-
-        open_water_lats = np.linspace(13.0, 13.5, 3)
-        open_water_lons = np.linspace(127.5, 128.0, 3)
-        water = apply_offshore_probability_suppression(probabilities, open_water_lats, open_water_lons)
-        self.assertTrue(np.all(water.probabilities["tornado"] == 0.0))
-        self.assertTrue(np.all(water.probabilities["hail"] == 0.0))
-        self.assertTrue(np.all(water.probabilities["wind"] == 0.0))
-        self.assertGreater(water.report["offshoreProbabilitySuppressedCells"]["philippinesOffshore"], 0)
-
-    def test_philippines_maritime_environment_caps_high_end_severe_probabilities(self) -> None:
-        fields = small_fields((3, 3))
-        fields["cape"] = np.full((3, 3), 1800.0)
-        fields["cape_ml"] = np.full((3, 3), 1400.0)
-        fields["cape_mu"] = np.full((3, 3), 2000.0)
-        fields["cin"] = np.full((3, 3), -25.0)
-        fields["cin_ml"] = np.full((3, 3), -25.0)
-        fields["td2m"] = np.full((3, 3), 297.0)
-        fields["t2m"] = np.full((3, 3), 302.0)
-        fields["pwat"] = np.full((3, 3), 55.0)
-        fields["u10"] = np.zeros((3, 3))
-        fields["v10"] = np.zeros((3, 3))
-        fields["u500"] = np.full((3, 3), 6.0)
-        fields["v500"] = np.zeros((3, 3))
-        fields["srh01"] = np.full((3, 3), 35.0)
-        fields["srh03"] = np.full((3, 3), 70.0)
-        features = gridded_features_from_fields(fields, 12)
-        probabilities = {
-            "tornado": np.full((3, 3), 0.30),
-            "hail": np.full((3, 3), 0.45),
-            "wind": np.full((3, 3), 0.45),
-        }
-
-        capped = apply_environmental_probability_caps(
-            probabilities,
-            features,
-            {"productionCapable": True, "datasetQuality": {"trainingRows": 9000, "minimumRecommendedRows": 5000}},
-            lats=np.linspace(14.45, 14.75, 3),
-            lons=np.linspace(120.85, 121.15, 3),
-        )
-        category = category_grid_from_probabilities(capped.probabilities, features, {"productionCapable": True})
-
-        self.assertTrue(capped.report["philippinesRegionalCalibrationApplied"])
-        self.assertLessEqual(float(np.max(capped.probabilities["tornado"])), 0.019)
-        self.assertLessEqual(float(np.max(capped.probabilities["hail"])), 0.14)
-        self.assertLessEqual(float(np.max(capped.probabilities["wind"])), 0.14)
-        self.assertLessEqual(int(np.max(category)), SPC_RISK_LABELS.index("MRGL"))
-
-    def test_philippines_organized_environment_can_buffer_wind_but_stays_capped(self) -> None:
-        fields = small_fields((3, 3))
-        fields["cape"] = np.full((3, 3), 1700.0)
-        fields["cape_ml"] = np.full((3, 3), 1300.0)
-        fields["cape_mu"] = np.full((3, 3), 2100.0)
-        fields["cin"] = np.full((3, 3), -45.0)
-        fields["cin_ml"] = np.full((3, 3), -45.0)
-        fields["td2m"] = np.full((3, 3), 297.0)
-        fields["t2m"] = np.full((3, 3), 302.0)
-        fields["pwat"] = np.full((3, 3), 58.0)
-        fields["u10"] = np.zeros((3, 3))
-        fields["v10"] = np.zeros((3, 3))
-        fields["u500"] = np.full((3, 3), 19.0)
-        fields["v500"] = np.zeros((3, 3))
-        fields["srh01"] = np.full((3, 3), 90.0)
-        fields["srh03"] = np.full((3, 3), 125.0)
-        features = gridded_features_from_fields(fields, 12)
-        probabilities = {
-            "tornado": np.full((3, 3), 0.08),
-            "hail": np.full((3, 3), 0.20),
-            "wind": np.full((3, 3), 0.20),
-        }
-
-        capped = apply_environmental_probability_caps(
-            probabilities,
-            features,
-            {"productionCapable": True, "datasetQuality": {"trainingRows": 9000, "minimumRecommendedRows": 5000}},
-            lats=np.linspace(14.45, 14.75, 3),
-            lons=np.linspace(120.85, 121.15, 3),
-        )
-
-        self.assertEqual(capped.report["philippinesGustBufferCells"], 0)
-        self.assertLessEqual(float(np.max(capped.probabilities["wind"])), 0.164)
-        self.assertLessEqual(float(np.max(capped.probabilities["hail"])), 0.29)
-
     def test_probability_tile_suppresses_strict_marine_zone_by_tile_center(self) -> None:
         category = np.full((3, 3), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
         probabilities = {
@@ -3003,7 +3076,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
         artifact_probability_source = (root / "src" / "utils" / "artifactProbabilities.ts").read_text(encoding="utf-8")
-        probability_fill = hazard_source[hazard_source.index("key={`artifact-prob-${"):hazard_source.index("key={`artifact-sig-")]
+        probability_fill = hazard_source[hazard_source.index("key={`artifact-prob-${"):hazard_source.index("{showAutoLayer && visibleCigCollection")]
 
         self.assertIn("stroke: 'none'", probability_fill)
         self.assertIn("strokeWidth: 0", probability_fill)
@@ -3026,6 +3099,31 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertNotIn("artifact-prob-boundary-", hazard_source)
         self.assertNotIn("artifact-prob-separator-", hazard_source)
 
+    def test_frontend_cig_hatches_render_between_fills_and_labels(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        generated_source = (root / "src" / "components" / "GeneratedOutlookMap.tsx").read_text(encoding="utf-8")
+        hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
+        utility_source = (root / "src" / "utils" / "artifactProbabilities.ts").read_text(encoding="utf-8")
+
+        self.assertIn("artifactCigShapesToFeatureCollection", utility_source)
+        self.assertLess(generated_source.index("key={`generated-risk-${"), generated_source.index("key={`generated-cig-${"))
+        self.assertLess(generated_source.index("key={`generated-cig-${"), generated_source.index("key={`generated-state-outline-"))
+        self.assertLess(hazard_source.index("key={`artifact-prob-${"), hazard_source.index("key={`generated-hazard-cig-${"))
+        self.assertLess(hazard_source.index("key={`generated-hazard-cig-${"), hazard_source.index("key={`generated-hazard-outline-"))
+        self.assertIn("generated-cig-dashedDiagonal", generated_source)
+        self.assertIn("generated-cig-solidDiagonal", generated_source)
+        self.assertIn("generated-cig-cross", generated_source)
+        self.assertIn("generated-hazard-cig-dashedDiagonal", hazard_source)
+        self.assertIn("generated-hazard-cig-solidDiagonal", hazard_source)
+        self.assertIn("generated-hazard-cig-cross", hazard_source)
+        self.assertIn("showCigOverlay", generated_source)
+        self.assertIn("showCigOverlay", hazard_source)
+        self.assertIn("CIG Overlay", generated_source)
+        self.assertIn("CIG Overlay", hazard_source)
+        self.assertIn("CIG1 dashed", generated_source)
+        self.assertIn("CIG2 solid", generated_source)
+        self.assertIn("CIG3 cross", generated_source)
+
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)
         lons = np.linspace(-100.0, -96.0, 5)
@@ -3039,6 +3137,17 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertGreater(summary["overforecastCells"], 0)
         self.assertGreater(summary["underforecastCells"], 0)
         self.assertIn("leakageGuard", summary)
+
+    def test_cig_archive_verifier_extracts_max_spc_category_label(self) -> None:
+        geojson = {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": {"LABEL": "SLGT"}, "geometry": None},
+                {"type": "Feature", "properties": {"LABEL": "MOD"}, "geometry": None},
+            ],
+        }
+
+        self.assertEqual(_max_spc_category_label(geojson), "MDT")
 
     def test_pipeline_writes_prediction_artifacts_before_spc_fetch(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -3189,6 +3298,8 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             hour_metadata = json.loads((hour_dir / "metadata.json").read_text(encoding="utf-8"))
             self.assertIn("riskShapes", tile)
             self.assertIn("hazardProbabilityShapes", tile)
+            self.assertIn("cigShapes", tile)
+            self.assertEqual(tile["cigShapes"]["type"], "FeatureCollection")
             self.assertEqual(hour_metadata["artifacts"]["riskPolygons"], "risk_polygons.geojson")
             self.assertEqual(hour_metadata["artifacts"]["probabilityTile"], "probability_tile.json")
             self.assertEqual(hour_metadata["artifacts"]["upperAirOverlay"], "upper_air_overlay.json")

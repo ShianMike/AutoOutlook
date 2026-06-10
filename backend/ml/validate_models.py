@@ -13,25 +13,25 @@ from .inference import METADATA_FILE, MODEL_DIR
 CATEGORY_THRESHOLDS = {
     "tornado": (
         (0.45, "HIGH"),
-        (0.30, "MOD"),
+        (0.30, "MDT"),
         (0.10, "ENH"),
         (0.05, "SLGT"),
         (0.02, "MRGL"),
     ),
     "hail": (
-        (0.60, "MOD"),
+        (0.60, "MDT"),
         (0.30, "ENH"),
         (0.15, "SLGT"),
         (0.05, "MRGL"),
     ),
     "wind": (
-        (0.60, "MOD"),
+        (0.60, "MDT"),
         (0.30, "ENH"),
         (0.15, "SLGT"),
         (0.05, "MRGL"),
     ),
 }
-CATEGORY_ORDER = ("TSTM", "MRGL", "SLGT", "ENH", "MOD", "HIGH")
+CATEGORY_ORDER = ("TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
 RELIABILITY_BINS = (0.0, 0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60, 1.0)
 
 

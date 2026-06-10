@@ -42,6 +42,8 @@ from backend.ml.gridded_outlook import (
     apply_regional_strict_category_caps,
     category_counts,
     category_grid_from_probabilities,
+    cig_grids_for_runtime,
+    cig_shapes_from_grids,
     constrain_hazard_probability_shapes_to_risk_support,
     feature_stats,
     gridded_features_from_fields,
@@ -826,24 +828,15 @@ def _fetch_one_hour(
     model_name: str = "hrrr",
 ) -> FetchedHour:
     if fetch_hour is None:
-        if model_name == "ecmwf":
-            from backend.ecmwf_selected import fetch_selected_ecmwf_hour
-            result = fetch_selected_ecmwf_hour(
-                run_date=ref.run_date,
-                run_cycle=ref.run_cycle,
-                forecast_hour=ref.forecast_hour,
-                cache_dir=cache_dir,
-            )
-        else:
-            result = fetch_selected_hrrr_hour_with_metadata(
-                ref,
-                session=session,
-                max_workers=max_workers,
-                cache_dir=cache_dir,
-                cache_ttl_hours=cache_ttl_hours,
-                no_cache=no_cache,
-                grid_stride=grid_stride,
-            )
+        result = fetch_selected_hrrr_hour_with_metadata(
+            ref,
+            session=session,
+            max_workers=max_workers,
+            cache_dir=cache_dir,
+            cache_ttl_hours=cache_ttl_hours,
+            no_cache=no_cache,
+            grid_stride=grid_stride,
+        )
     else:
         result = fetch_hour(ref, session)
     return _normalize_fetched_hour(ref, result)
@@ -1011,7 +1004,7 @@ def _normalize_fetched_hour(
     ref: HrrrHourRef,
     result: tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour,
 ) -> FetchedHour:
-    if isinstance(result, SelectedHrrrHour) or type(result).__name__ == "SelectedEcmwfHour":
+    if isinstance(result, SelectedHrrrHour):
         return FetchedHour(result.lats, result.lons, result.fields, result.metadata)
     lats, lons, fields = result
     return FetchedHour(
@@ -1102,6 +1095,15 @@ def _build_hour_artifact(
         hazard_shapes,
         polygons,
     )
+    cig_grids, cig_source = cig_grids_for_runtime(features, risk_map_probability_result.probabilities)
+    cig_shapes = cig_shapes_from_grids(
+        fetched.lats,
+        fetched.lons,
+        cig_grids,
+        forecast_hour,
+        valid_time_iso,
+        cig_source=cig_source,
+    )
     tile = probability_tile(
         fetched.lats,
         fetched.lons,
@@ -1113,6 +1115,7 @@ def _build_hour_artifact(
     )
     tile["riskShapes"] = polygons
     tile["hazardProbabilityShapes"] = hazard_shapes
+    tile["cigShapes"] = cig_shapes
     upper_air_overlay = _upper_air_overlay_from_fetched(cycle, forecast_hour, fetched, valid_time_iso)
     region = _region_from_max_risk_grid(
         fetched.lats,
@@ -1138,6 +1141,7 @@ def _build_hour_artifact(
         "ingredients": ingredients,
         "ingredientSample": ingredient_sample,
         "hazardProbabilityShapes": hazard_shapes,
+        "cigShapes": cig_shapes,
         "tile": tile,
         "upperAirOverlay": upper_air_overlay,
     }
@@ -2169,12 +2173,6 @@ def _is_hrrr_00z_incremental_index(index: Mapping[str, Any]) -> bool:
 
 
 def _incremental_index_model_name(index: Mapping[str, Any]) -> str:
-    cycle_policy = index.get("cyclePolicy") or {}
-    policy_model = str(cycle_policy.get("model") or "")
-    cycle_label = str(index.get("cycle") or "")
-    token = f"{policy_model} {cycle_label}".upper()
-    if "ECMWF" in token:
-        return "ecmwf"
     return "hrrr"
 
 
@@ -2407,19 +2405,11 @@ def resolve_forecast_hours(
 ) -> list[int]:
     if all_hours and forecast_hours is not None:
         raise ValueError("--all-hours cannot be combined with --forecast-hours")
-    if model_name == "ecmwf":
-        default_hours = list(range(0, 91, 3))
-        selected = default_hours if (forecast_hours is None) else forecast_hours
-        hours = sorted({int(hour) for hour in selected})
-        invalid = [hour for hour in hours if hour < 0 or hour > 90]
-        if invalid:
-            raise ValueError(f"Forecast hours must be in 0..90: {invalid}")
-    else:
-        selected = ALL_FORECAST_HOURS if all_hours else (FORECAST_HOURS if forecast_hours is None else forecast_hours)
-        hours = sorted({int(hour) for hour in selected})
-        invalid = [hour for hour in hours if hour < 0 or hour > 48]
-        if invalid:
-            raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
+    selected = ALL_FORECAST_HOURS if all_hours else (FORECAST_HOURS if forecast_hours is None else forecast_hours)
+    hours = sorted({int(hour) for hour in selected})
+    invalid = [hour for hour in hours if hour < 0 or hour > 48]
+    if invalid:
+        raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
     if not hours:
         raise ValueError("At least one forecast hour is required")
     return hours
@@ -2434,7 +2424,7 @@ def resolve_required_forecast_hour(
     if require_complete_hour is not None:
         required = int(require_complete_hour)
     elif cycle_policy == "complete-48":
-        required = 90 if model_name == "ecmwf" else 48
+        required = 48
     elif cycle_policy == "latest-startable":
         required = 0
     else:
@@ -2442,10 +2432,8 @@ def resolve_required_forecast_hour(
         if not hours:
             raise ValueError("At least one forecast hour is required")
         required = max(hours)
-    max_hour = 90 if model_name == "ecmwf" else 48
-    if required < 0 or required > max_hour:
-        model_upper = model_name.upper()
-        raise ValueError(f"Required complete {model_upper} forecast hour must be in 0..{max_hour}: {required}")
+    if required < 0 or required > 48:
+        raise ValueError(f"Required complete HRRR forecast hour must be in 0..48: {required}")
     return required
 
 
@@ -2487,10 +2475,6 @@ def _detect_hrrr_cycle(
 ) -> HrrrCycle | HrrrCycleDetection:
     if detect_cycle_fn is not None:
         return detect_cycle_fn(session, now)
-    if model_name == "ecmwf":
-        from backend.ecmwf_selected import latest_available_ecmwf_cycle
-        cycle = latest_available_ecmwf_cycle()
-        return HrrrCycle(cycle.run_date, cycle.run_cycle)
     return latest_available_hrrr_cycle_with_metadata(
         session=session,
         now=now,
@@ -2633,7 +2617,7 @@ def _cache_metadata(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="Artifact output directory.")
-    parser.add_argument("--model", default="hrrr", choices=["hrrr", "ecmwf"], help="Convective forecast model to ingest.")
+    parser.add_argument("--model", default="hrrr", choices=["hrrr"], help="Convective forecast model to ingest.")
     parser.add_argument("--forecast-hours", type=int, nargs="+")
     parser.add_argument("--all-hours", action="store_true", help="Process every forecast hour f00 through f48.")
     parser.add_argument(

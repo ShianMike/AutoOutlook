@@ -1,0 +1,304 @@
+{
+  "version": "xgb-cig-intensity-20260610T094213Z",
+  "artifactType": "xgboost_joblib",
+  "trainedAtISO": "2026-06-10T09:42:13Z",
+  "featureSchemaVersion": "ml-features-v4-parcel-cape-cin",
+  "featureSchemaHash": "7f4a517976a78cf0",
+  "featureNames": [
+    "forecastHour",
+    "mlcape",
+    "mucape",
+    "sbcape",
+    "cape3km",
+    "cape180",
+    "cin",
+    "cinSb",
+    "cinMl",
+    "cinMu",
+    "cin180",
+    "sfcDewpointF",
+    "pwatIn",
+    "lclM",
+    "moistureDepthM",
+    "srh01",
+    "srh03",
+    "shear06Kt",
+    "stormRelWindKt",
+    "stp",
+    "scp",
+    "ehi",
+    "ship",
+    "lapseRate700500CPerKm",
+    "freezingLevelM",
+    "surfacePressurePa"
+  ],
+  "targets": {
+    "tornado_ef2_plus": {
+      "hazard": "tornado",
+      "cig": 1,
+      "threshold": "EF2+"
+    },
+    "tornado_ef3_plus": {
+      "hazard": "tornado",
+      "cig": 2,
+      "threshold": "EF3+"
+    },
+    "hail_2in_plus": {
+      "hazard": "hail",
+      "cig": 1,
+      "threshold": "2.00in+"
+    },
+    "hail_3_5in_plus": {
+      "hazard": "hail",
+      "cig": 2,
+      "threshold": "3.50in+"
+    },
+    "wind_56kt_plus": {
+      "hazard": "wind",
+      "cig": 1,
+      "threshold": "56kt+"
+    },
+    "wind_65kt_plus": {
+      "hazard": "wind",
+      "cig": 1,
+      "threshold": "65kt+"
+    },
+    "wind_74kt_plus": {
+      "hazard": "wind",
+      "cig": 2,
+      "threshold": "74kt+"
+    },
+    "wind_83kt_plus": {
+      "hazard": "wind",
+      "cig": 3,
+      "threshold": "83kt+"
+    }
+  },
+  "trainingRows": 849720,
+  "trainingInput": "C:\\Users\\shian\\OneDrive\\Desktop\\AutoOutlook-git\\backend\\ml_data\\archive_training\\autooutlook_hrrr_2020_202602_00z_f00_f48_intensity.parquet",
+  "splitStrategy": "stratified",
+  "datasetQuality": {
+    "trainingRows": 849720,
+    "uniqueRunDates": 2251,
+    "positiveCounts": {
+      "tornado_ef2_plus": 1266,
+      "tornado_ef3_plus": 245,
+      "hail_2in_plus": 6592,
+      "hail_3_5in_plus": 708,
+      "wind_56kt_plus": 11247,
+      "wind_65kt_plus": 2989,
+      "wind_74kt_plus": 843,
+      "wind_83kt_plus": 243
+    }
+  },
+  "metrics": {
+    "tornado_ef2_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 1266,
+      "negatives": 848454,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 949,
+      "testPositives": 317,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "tornado",
+        "cig": 1,
+        "threshold": "EF2+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.03509359801968326,
+      "brier_score_loss": 0.001461393757278593,
+      "log_loss": 0.008275780420919287,
+      "roc_auc_score": 0.9436387033213548
+    },
+    "tornado_ef3_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 245,
+      "negatives": 849475,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 184,
+      "testPositives": 61,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "tornado",
+        "cig": 2,
+        "threshold": "EF3+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.03136643804985313,
+      "brier_score_loss": 0.00028416739761555115,
+      "log_loss": 0.001878598248599385,
+      "roc_auc_score": 0.9706908227861049
+    },
+    "hail_2in_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 6592,
+      "negatives": 843128,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 4944,
+      "testPositives": 1648,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "hail",
+        "cig": 1,
+        "threshold": "2.00in+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.12375405171364065,
+      "brier_score_loss": 0.00714117625391329,
+      "log_loss": 0.031192160264819933,
+      "roc_auc_score": 0.9396272236773779
+    },
+    "hail_3_5in_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 708,
+      "negatives": 849012,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 531,
+      "testPositives": 177,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "hail",
+        "cig": 2,
+        "threshold": "3.50in+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.029678507045879203,
+      "brier_score_loss": 0.0008172677890308798,
+      "log_loss": 0.004672101040186917,
+      "roc_auc_score": 0.9655570405651437
+    },
+    "wind_56kt_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 11247,
+      "negatives": 838473,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 8435,
+      "testPositives": 2812,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "wind",
+        "cig": 1,
+        "threshold": "56kt+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.09490392094241665,
+      "brier_score_loss": 0.012363442249423703,
+      "log_loss": 0.053557168855857,
+      "roc_auc_score": 0.8987691296124154
+    },
+    "wind_65kt_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 2989,
+      "negatives": 846731,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 2242,
+      "testPositives": 747,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "wind",
+        "cig": 1,
+        "threshold": "65kt+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.03463656606083136,
+      "brier_score_loss": 0.003436842050488213,
+      "log_loss": 0.018300913045102753,
+      "roc_auc_score": 0.9157775549318677
+    },
+    "wind_74kt_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 843,
+      "negatives": 848877,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 632,
+      "testPositives": 211,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "wind",
+        "cig": 2,
+        "threshold": "74kt+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.01588956857311759,
+      "brier_score_loss": 0.000983477472135554,
+      "log_loss": 0.006249480399026794,
+      "roc_auc_score": 0.9316733056473964
+    },
+    "wind_83kt_plus": {
+      "skipped": false,
+      "samples": 849720,
+      "positives": 243,
+      "negatives": 849477,
+      "trainSamples": 637290,
+      "testSamples": 212430,
+      "trainPositives": 182,
+      "testPositives": 61,
+      "calibrationCv": 3,
+      "target": {
+        "hazard": "wind",
+        "cig": 3,
+        "threshold": "83kt+"
+      },
+      "split": {
+        "strategy": "stratified",
+        "testSize": 0.25,
+        "trainRows": 637290,
+        "testRows": 212430
+      },
+      "average_precision_score": 0.008243729356109591,
+      "brier_score_loss": 0.0002860706175598879,
+      "log_loss": 0.0020792980802852522,
+      "roc_auc_score": 0.9351291121878875
+    }
+  }
+}

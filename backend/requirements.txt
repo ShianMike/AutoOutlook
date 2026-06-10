@@ -17,7 +17,7 @@ requests>=2.31
 google-cloud-storage>=2.16
 matplotlib>=3.8
 shapely>=2.0
-ecmwf-opendata>=0.3.0
+pyshp>=3.0
 imagecodecs>=2024.1.1
 
 
