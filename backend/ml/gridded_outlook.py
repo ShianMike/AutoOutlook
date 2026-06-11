@@ -2297,7 +2297,71 @@ def constrain_hazard_probability_shapes_to_risk_support(
             "geometry": geometry,
             "properties": props,
         })
+    _append_trained_tstm_hazard_support(constrained, risk_shapes)
     return {"type": "FeatureCollection", "features": constrained}
+
+
+def _append_trained_tstm_hazard_support(
+    constrained: list[dict[str, Any]],
+    risk_shapes: Mapping[str, Any],
+) -> None:
+    thunder_threshold = _THUNDER_PROBABILITY_THRESHOLDS[0]
+    has_low_end_thunder = any(
+        _is_low_end_thunder_hazard_shape(feature, thunder_threshold)
+        for feature in constrained
+    )
+    if has_low_end_thunder:
+        return
+
+    for feature in risk_shapes.get("features", []):
+        props = dict(feature.get("properties") or {})
+        vectorization = dict(props.get("vectorization") or {})
+        if props.get("category") != "TSTM":
+            continue
+        if vectorization.get("supportSource") != "trained_thunder_probability":
+            continue
+        constrained.append({
+            "type": "Feature",
+            "geometry": feature.get("geometry"),
+            "properties": {
+                "hazard": "thunder",
+                "hazardLabel": "thunderstorm",
+                "probability": float(thunder_threshold),
+                "threshold": float(thunder_threshold),
+                "thresholdPercent": int(round(thunder_threshold * 100)),
+                "bucket": 0,
+                "label": _probability_shape_label("thunder", thunder_threshold),
+                "color": _PROBABILITY_COLORS["thunder"][0],
+                "forecastHour": props.get("forecastHour"),
+                "validTimeISO": props.get("validTimeISO"),
+                "cellCount": props.get("cellCount"),
+                "sourceCellCount": props.get("sourceCellCount"),
+                "componentCount": props.get("componentCount"),
+                "displayAreaKm2": props.get("displayAreaKm2"),
+                "vectorization": {
+                    "method": _PROBABILITY_VECTORIZATION_METHOD,
+                    "cumulativeMask": True,
+                    "cartographicGeneralization": True,
+                    "hierarchyBuffersApplied": False,
+                    "supportSource": "trained_thunder_probability",
+                    "categoricalSupportClipped": True,
+                    "minimumSupportCategory": "TSTM",
+                    "supportGeometry": "trained_tstm_risk_polygon",
+                },
+            },
+        })
+        return
+
+
+def _is_low_end_thunder_hazard_shape(feature: Mapping[str, Any], thunder_threshold: float) -> bool:
+    props = feature.get("properties") or {}
+    if str(props.get("hazard", "")).lower() not in {"thunder", "thunderstorm"}:
+        return False
+    try:
+        probability = float(props.get("probability", -1.0))
+    except (TypeError, ValueError):
+        return False
+    return math.isclose(probability, thunder_threshold, rel_tol=0.0, abs_tol=1e-9)
 
 
 def probability_tile(

@@ -3044,6 +3044,52 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "MRGL",
         )
 
+    def test_constrain_restores_tiny_trained_tstm_hazard_shape_from_risk_polygon(self) -> None:
+        trained_risk_shapes = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-100.0, 35.0],
+                            [-96.0, 35.0],
+                            [-96.0, 38.0],
+                            [-100.0, 38.0],
+                            [-100.0, 35.0],
+                        ]],
+                    },
+                    "properties": {
+                        "category": "TSTM",
+                        "ordinal": 1,
+                        "forecastHour": 0,
+                        "validTimeISO": "2024-05-04T12:00:00Z",
+                        "cellCount": 6,
+                        "sourceCellCount": 13,
+                        "componentCount": 1,
+                        "displayAreaKm2": 50000.0,
+                        "vectorization": {
+                            "supportSource": "trained_thunder_probability",
+                        },
+                    },
+                }
+            ],
+        }
+
+        constrained = constrain_hazard_probability_shapes_to_risk_support(
+            {"type": "FeatureCollection", "features": []},
+            trained_risk_shapes,
+        )
+
+        thunder = constrained["features"][0]["properties"]
+        self.assertEqual(thunder["hazard"], "thunder")
+        self.assertEqual(thunder["label"], "TSTM")
+        self.assertEqual(thunder["probability"], 0.01)
+        self.assertEqual(thunder["sourceCellCount"], 13)
+        self.assertEqual(thunder["vectorization"]["supportSource"], "trained_thunder_probability")
+        self.assertEqual(thunder["vectorization"]["supportGeometry"], "trained_tstm_risk_polygon")
+
     def test_hazard_probability_shapes_add_lower_probability_support(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)
         lons = np.linspace(-104.0, -96.0, 9)

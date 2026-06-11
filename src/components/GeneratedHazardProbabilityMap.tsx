@@ -184,7 +184,7 @@ export default function GeneratedHazardProbabilityMap({
     };
   }, [artifacts, tile, displayForecastHour, hazard, cfg.sigThreshold, snapshot?.ingredients, snapshot?.region]);
   const peakProb = hazard === 'thunder'
-    ? getArtifactThunderPeak(tile) ?? vectorPeakProbability ?? 0
+    ? Math.max(getArtifactThunderPeak(tile) ?? 0, vectorPeakProbability ?? 0)
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? vectorPeakProbability ?? 0;
   const spcPeakProb = useMemo(
     () => spcFeatureCollection.features.reduce((peak, feature) => {
