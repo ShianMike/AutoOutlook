@@ -1806,11 +1806,22 @@ def risk_polygons_from_grid(
     except Exception:
         ndimage = None
 
+    tstm_ordinal = SPC_RISK_LABELS.index("TSTM")
     masks_by_ordinal: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]] = {}
     source_counts_by_ordinal: dict[int, int] = {}
+    support_sources_by_ordinal: dict[int, str] = {}
     for ordinal in range(1, len(SPC_RISK_LABELS)):
-        if ordinal == SPC_RISK_LABELS.index("TSTM") and trained_tstm_mask is not None:
-            mask = _clip_mask_to_regional_strictness(trained_tstm_mask, ordinal, regional_max_grid)
+        if ordinal == tstm_ordinal and trained_tstm_mask is not None:
+            trained_mask = _clip_mask_to_regional_strictness(trained_tstm_mask, ordinal, regional_max_grid)
+            category_tstm_mask = _clip_mask_to_regional_strictness(grid == ordinal, ordinal, regional_max_grid)
+            if np.any(trained_mask):
+                mask = trained_mask | category_tstm_mask
+                source_counts_by_ordinal[ordinal] = int(np.sum(trained_mask))
+                support_sources_by_ordinal[ordinal] = "trained_thunder_probability"
+            else:
+                mask = category_tstm_mask
+                source_counts_by_ordinal[ordinal] = int(np.sum(category_tstm_mask))
+                support_sources_by_ordinal[ordinal] = "category_grid_tstm"
             limit_base = mask
         else:
             # SPC-style severe categorical outlooks are drawn cumulatively:
@@ -1820,7 +1831,7 @@ def risk_polygons_from_grid(
             limit_base = _clip_mask_to_regional_strictness(grid >= max(1, ordinal - 1), ordinal, regional_max_grid)
         if not np.any(mask):
             continue
-        source_counts_by_ordinal[ordinal] = int(np.sum(mask))
+        source_counts_by_ordinal.setdefault(ordinal, int(np.sum(mask)))
         settings = _category_generalization_settings(mask, ordinal, min_cells)
         limit_mask = _cartographic_limit_mask(limit_base, ndimage, int(settings["closeIterations"]) + 1)
         if limit_mask is not None:
@@ -1867,7 +1878,11 @@ def risk_polygons_from_grid(
         if not rings:
             continue
         exact_cell_count = source_counts_by_ordinal.get(ordinal, int(np.sum(grid == ordinal)))
-        uses_trained_tstm = ordinal == SPC_RISK_LABELS.index("TSTM") and trained_tstm_mask is not None
+        uses_trained_tstm = ordinal == tstm_ordinal and trained_tstm_mask is not None
+        support_source = support_sources_by_ordinal.get(
+            ordinal,
+            "trained_thunder_probability" if uses_trained_tstm else "category_grid",
+        )
         features.append({
             "type": "Feature",
             "geometry": _rings_geometry(rings),
@@ -1883,7 +1898,7 @@ def risk_polygons_from_grid(
                 "vectorization": {
                     "method": _CATEGORY_VECTORIZATION_METHOD,
                     "cumulativeMask": not uses_trained_tstm,
-                    "supportSource": "trained_thunder_probability" if uses_trained_tstm else "category_grid",
+                    "supportSource": support_source,
                     "cartographicGeneralization": True,
                     "smoothingIterations": int(settings["smoothingIterations"]),
                     "simplifyTolerance": float(settings["simplifyTolerance"]),

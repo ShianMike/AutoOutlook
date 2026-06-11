@@ -15,6 +15,11 @@ back to rule-derived geometry.
 | **Artifact-driven** (dominant) | `src/components/GeneratedHazardProbabilityMap.tsx` | Whenever `OutlookArtifacts.probabilityTiles` is present for the active forecast hour | Per-cell probability grid baked by `backend.ml.outlook_pipeline`, plus optional pre-vectorized polygon shapes |
 | **Rule-based fallback** | `src/components/HazardOutlookMap.tsx` | When artifacts are unavailable (mock provider, Open-Meteo path, or `outlook_not_ready`) | `buildHazardBands()` in `src/utils/hazardProbabilityBands.ts`, driven entirely by ingredients + forecast hour |
 
+Risk-level TSTM polygons use trained thunder probability support first, then
+exact model TSTM category cells when probability capping lowers the serialized
+thunder grid below the display threshold. Merged 00Z archives do not fabricate
+zero-thunder grids when older source tiles omit thunder.
+
 Both paths render onto the same `react-simple-maps` US states topojson and
 share the same legend, 500 mb upper-air overlay, and SIG visual style so
 the dashboard does not "switch personalities" between providers.

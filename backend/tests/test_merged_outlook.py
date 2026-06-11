@@ -460,6 +460,33 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             self.assertEqual(merged_tile["stride"], 2)
             self.assertEqual(merged_index["tileStride"], 2)
 
+    def test_missing_source_thunder_does_not_suppress_merged_tstm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.zeros((9, 9), dtype=int)
+            grid[2:7, 2:7] = 1
+            grid[3:6, 3:6] = 2
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                list(range(12, 19)),
+                grid,
+            )
+            output = root / "output"
+            merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(),
+                output_dir=output,
+            )
+
+            merged_tile = json.loads((output / "merged_probability_tile.json").read_text(encoding="utf-8"))
+            risk_features = merged_tile["riskShapes"]["features"]
+            risk_labels = [feature["properties"]["category"] for feature in risk_features]
+
+            self.assertNotIn("thunder", merged_tile["probabilities"])
+            self.assertIn("TSTM", risk_labels)
+
     def test_preserves_cig_shapes_in_merged_tile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

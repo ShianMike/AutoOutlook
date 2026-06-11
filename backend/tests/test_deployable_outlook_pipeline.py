@@ -2640,6 +2640,33 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertNotIn("TSTM", [feature["properties"]["category"] for feature in no_thunder["features"]])
         self.assertIn("MRGL", [feature["properties"]["category"] for feature in no_thunder["features"]])
 
+    def test_risk_tstm_polygon_uses_category_tstm_cells_when_thunder_is_capped(self) -> None:
+        lats = np.linspace(30.0, 38.0, 9)
+        lons = np.linspace(-104.0, -96.0, 9)
+        category = np.zeros((9, 9), dtype=np.int16)
+        category[2:7, 2:7] = SPC_RISK_LABELS.index("TSTM")
+        category[3:6, 3:6] = SPC_RISK_LABELS.index("MRGL")
+        thunder = np.full((9, 9), 0.01, dtype=float)
+
+        geojson = risk_polygons_from_grid(
+            lats,
+            lons,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            probabilities={"thunder": thunder},
+            min_cells=1,
+        )
+        by_category = {feature["properties"]["category"]: feature for feature in geojson["features"]}
+
+        self.assertIn("TSTM", by_category)
+        self.assertIn("MRGL", by_category)
+        self.assertEqual(by_category["TSTM"]["properties"]["sourceCellCount"], 16)
+        self.assertEqual(
+            by_category["TSTM"]["properties"]["vectorization"]["supportSource"],
+            "category_grid_tstm",
+        )
+
     def test_risk_polygon_features_follow_category_layer_order(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)
         lons = np.linspace(-104.0, -96.0, 9)
