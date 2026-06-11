@@ -4140,6 +4140,37 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(copied, artifact_dir / "verification_summary.json")
         self.assertEqual(payload["source"], "incremental")
 
+    def test_static_export_compacts_hourly_json_artifacts(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "probability_tile.json"
+            target = root / "dist" / "probability-tile.json"
+            payload = {
+                "forecastHour": 9,
+                "categoryLabel": [["NONE", "MRGL"], ["SLGT", "ENH"]],
+                "probabilities": {
+                    "tornado": [[0.0, 0.02], [0.05, 0.1]],
+                    "hail": [[0.05, 0.15], [0.3, 0.45]],
+                    "wind": [[0.05, 0.15], [0.3, 0.45]],
+                },
+            }
+            source.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            source_size = source.stat().st_size
+
+            copied = export_module.copy_json_if_exists(source, target)
+            compact_text = target.read_text(encoding="utf-8")
+
+        self.assertTrue(copied)
+        self.assertEqual(json.loads(compact_text), payload)
+        self.assertLess(len(compact_text), source_size)
+        self.assertNotIn("\n  ", compact_text)
+
     def test_complete_snapshot_publish_avoids_directory_moves(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

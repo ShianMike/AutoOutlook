@@ -60,6 +60,14 @@ def copy_if_exists(source: Path, target: Path) -> bool:
     return True
 
 
+def copy_json_if_exists(source: Path, target: Path) -> bool:
+    payload = read_json(source)
+    if payload is None:
+        return False
+    write_json(target, payload)
+    return True
+
+
 def copy_first_existing(sources: list[Path], target: Path) -> Path | None:
     for source in sources:
         if copy_if_exists(source, target):
@@ -309,9 +317,9 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
     for forecast_hour in coerce_hours(index.get("readyForecastHours")):
         source_hour_dir = artifact_dir / "hours" / f"f{forecast_hour:02d}"
         target_hour_dir = output_dir / "outlook" / "incremental" / "hour" / f"f{forecast_hour:02d}"
-        copy_if_exists(source_hour_dir / "risk_polygons.geojson", target_hour_dir / "risk-polygons.geojson")
-        copy_if_exists(source_hour_dir / "probability_tile.json", target_hour_dir / "probability-tile.json")
-        copy_if_exists(source_hour_dir / "metadata.json", target_hour_dir / "metadata.json")
+        copy_json_if_exists(source_hour_dir / "risk_polygons.geojson", target_hour_dir / "risk-polygons.geojson")
+        copy_json_if_exists(source_hour_dir / "probability_tile.json", target_hour_dir / "probability-tile.json")
+        copy_json_if_exists(source_hour_dir / "metadata.json", target_hour_dir / "metadata.json")
 
     # Export merged D1 outlook archives
     export_merged_d1_archives(output_dir, artifact_dir.parent, helpers)
