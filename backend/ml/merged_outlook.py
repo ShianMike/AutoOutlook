@@ -470,7 +470,7 @@ def merge_cycles_for_spc_window(
         for hazard, grids in hazard_grids_by_name.items():
             if grids:
                 merged_probs[hazard] = np.maximum.reduce(grids)
-            elif hazard != "thunder":
+            else:
                 merged_probs[hazard] = np.zeros(grid_shape)
 
         # Generate merged GeoJSON risk polygons and hazard shapes

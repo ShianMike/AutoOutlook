@@ -96,7 +96,7 @@ const RELEASES: VersionRelease[] = [
       'Larger calibrated models: Training now uses 600 trees, depth 5, time-based holdout validation, and isotonic probability calibration.',
       'Held-out ROC-AUC: Tornado 0.940, hail 0.956, wind 0.980, and thunder 0.983. These are model validation scores, not guaranteed forecast accuracy.',
       'Trained TSTM risk: The Risk Levels TSTM outline now follows the trained general-thunder probability field instead of a separate rule-based thunder shape.',
-      'TSTM shape recovery: Exact TSTM cells remain drawable when probability capping lowers the serialized thunder grid, and merged 00Z archives no longer treat missing thunder grids as zero-thunder forecasts.',
+      'TSTM shape recovery: Thunder-specific probability caps preserve the trained 10% / 40% / 70% bands, and generated Thunder maps no longer fall back to category-derived geometry.',
       'Retrained CIG intensity: Hail and wind intensity models use the expanded feature schema, while small CIG fragments are pruned and displayed as one labeled two-line corridor.',
       'Merged Outlook upgrade: Merged mode is the default view, hourly CIG areas are joined into cleaner corridors, and CIG is kept on hazard maps instead of cluttering the categorical risk map.',
       'Retrained 2026 archive: Every hardcoded historical case is rebuilt with the v1.2 hazard models across the full 12Z-to-12Z Day 1 window.',
@@ -123,7 +123,7 @@ const RELEASES: VersionRelease[] = [
       {
         kind: 'FIX',
         title: 'TSTM risk uses trained thunder support',
-        body: 'The categorical TSTM polygon uses trained thunder support first, then exact model TSTM cells when probability capping lowers the serialized thunder grid. Merged 00Z archives also stop fabricating a zero-thunder field when source tiles omit thunder, so TSTM does not disappear from merged outlooks.',
+        body: 'The categorical TSTM polygon and Thunder hazard map now use the trained thunder probability grid directly. Thunder-specific category caps keep TSTM cells above the 10% display threshold, and missing thunder source grids no longer create category-derived TSTM shapes.',
       },
       {
         kind: 'IMPROVE',

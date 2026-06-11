@@ -1813,15 +1813,9 @@ def risk_polygons_from_grid(
     for ordinal in range(1, len(SPC_RISK_LABELS)):
         if ordinal == tstm_ordinal and trained_tstm_mask is not None:
             trained_mask = _clip_mask_to_regional_strictness(trained_tstm_mask, ordinal, regional_max_grid)
-            category_tstm_mask = _clip_mask_to_regional_strictness(grid == ordinal, ordinal, regional_max_grid)
-            if np.any(trained_mask):
-                mask = trained_mask | category_tstm_mask
-                source_counts_by_ordinal[ordinal] = int(np.sum(trained_mask))
-                support_sources_by_ordinal[ordinal] = "trained_thunder_probability"
-            else:
-                mask = category_tstm_mask
-                source_counts_by_ordinal[ordinal] = int(np.sum(category_tstm_mask))
-                support_sources_by_ordinal[ordinal] = "category_grid_tstm"
+            mask = trained_mask
+            source_counts_by_ordinal[ordinal] = int(np.sum(trained_mask))
+            support_sources_by_ordinal[ordinal] = "trained_thunder_probability"
             limit_base = mask
         else:
             # SPC-style severe categorical outlooks are drawn cumulatively:
@@ -3510,15 +3504,27 @@ def _model_probability_caps(category_cap: int) -> dict[str, float]:
 
 def _category_probability_cap_grid(hazard: str, category_grid: np.ndarray) -> np.ndarray:
     """Return per-cell ceilings just below the next higher category threshold."""
-    caps_by_ordinal = {
-        0: 0.019 if hazard == "tornado" else 0.049,
-        1: 0.019 if hazard == "tornado" else 0.049,
-        2: 0.049 if hazard == "tornado" else 0.149,
-        3: 0.099 if hazard == "tornado" else 0.299,
-        4: 0.299 if hazard == "tornado" else 0.599,
-        5: 0.449 if hazard == "tornado" else 1.0,
-        6: 1.0,
-    }
+    normalized_hazard = str(hazard).lower()
+    if normalized_hazard in {"thunder", "thunderstorm"}:
+        caps_by_ordinal = {
+            0: 0.099,
+            1: 0.399,
+            2: 0.699,
+            3: 0.699,
+            4: 1.0,
+            5: 1.0,
+            6: 1.0,
+        }
+    else:
+        caps_by_ordinal = {
+            0: 0.019 if normalized_hazard == "tornado" else 0.049,
+            1: 0.019 if normalized_hazard == "tornado" else 0.049,
+            2: 0.049 if normalized_hazard == "tornado" else 0.149,
+            3: 0.099 if normalized_hazard == "tornado" else 0.299,
+            4: 0.299 if normalized_hazard == "tornado" else 0.599,
+            5: 0.449 if normalized_hazard == "tornado" else 1.0,
+            6: 1.0,
+        }
     out = np.ones(np.asarray(category_grid).shape, dtype=float)
     for ordinal, cap in caps_by_ordinal.items():
         out = np.where(category_grid == ordinal, cap, out)
@@ -3763,7 +3769,7 @@ def _regional_strict_max_category_grid(lat_grid: np.ndarray, lon_grid: np.ndarra
         max_category[np.asarray(mask, dtype=bool)] = SPC_RISK_LABELS.index("NONE")
     for mask in _strict_category_cap_masks(lat_grid, lon_grid).values():
         target = np.asarray(mask, dtype=bool)
-        max_category[target] = np.minimum(max_category[target], SPC_RISK_LABELS.index("MRGL"))
+        max_category[target] = np.minimum(max_category[target], SPC_RISK_LABELS.index("NONE"))
     return max_category
 
 

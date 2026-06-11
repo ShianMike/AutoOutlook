@@ -562,9 +562,8 @@ function DocsOverview() {
         XGBoost heads for tornado, hail, wind, and thunder. It produces a categorical risk
         surface, per-hazard probability bands, a parameter dashboard, an auto-generated
         forecast discussion, an SPC QC console, and a system-status readout. Trained
-        general-thunder probabilities drive the TSTM risk outline, with exact model TSTM
-        cells kept as a fallback when probability capping lowers the serialized thunder
-        grid, so the Risk Levels map and Thunder hazard outlook stay aligned.
+        general-thunder probabilities drive the TSTM risk outline and the Thunder hazard
+        outlook, with thunder-specific caps preserving the 10% / 40% / 70% display bands.
       </Body>
 
       <StatGrid
@@ -645,8 +644,7 @@ function DocsLevels() {
         visible category becomes the highest SPC-style threshold supported by the active
         hazards. Thresholds below match the SPC convention used by the verification harness in{' '}
         <Mono>backend.ml.validate_models</Mono>. "MOD" and "MDT" are equivalent. TSTM uses
-        trained general-thunder probability support first, then exact model TSTM cells when
-        the exported thunder grid has been capped below the display threshold.
+        trained general-thunder probability support, not category-derived fallback geometry.
       </Body>
 
       <div className="overflow-hidden border-[2px] border-ink">

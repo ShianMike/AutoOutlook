@@ -237,6 +237,7 @@ export interface OutlookProbabilityTile {
     tornado: number[][];
     hail: number[][];
     wind: number[][];
+    thunder?: number[][];
   };
   riskShapes?: OutlookArtifactFeatureCollection;
   hazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection;

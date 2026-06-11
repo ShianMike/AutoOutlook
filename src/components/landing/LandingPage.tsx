@@ -23,7 +23,7 @@ const CAPABILITIES: { tag: string; title: string; body: string; accent: string }
   {
     tag: 'C-01',
     title: 'Categorical Outlook Map',
-    body: 'Stepped risk polygons rendered in the SPC convention. TSTM now follows trained general-thunder probability support when available, while MRGL → HIGH stay ordered as concentric annuli.',
+    body: 'Stepped risk polygons rendered in the SPC convention. TSTM now follows trained general-thunder probability support, while MRGL → HIGH stay ordered as concentric annuli.',
     accent: 'bg-risk-slgt',
   },
   {
@@ -657,8 +657,8 @@ function HowItWorks() {
           <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-paper/70 sm:text-lg">
             AutoOutlook converts each fixed HRRR cycle into a finished f00–f48 artifact. Model schema v5
             combines 37 environmental, spatial, and time-season inputs across four trained hazard heads;
-            thunder feeds TSTM, severe hazards feed MRGL and higher categories, and CIG is published as one
-            clean labeled overlay on the hazard maps. The same artifact path now backs the 21 curated
+            trained thunder probability feeds TSTM, severe hazards feed MRGL and higher categories, and
+            CIG is published as one clean labeled overlay on the hazard maps. The same artifact path now backs the 21 curated
             12Z-to-12Z historical archive cases.
           </p>
         </div>

@@ -7,11 +7,10 @@ import {
   artifactCigShapesToFeatureCollection,
   artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
-  artifactThunderToFeatureCollection,
   getArtifactHazardPeak,
   getArtifactHazardPeakLocation,
   getArtifactHourTile,
-  getArtifactThunderCoverage,
+  getArtifactThunderPeak,
   measureArtifactBandRadius,
   type ArtifactProbabilityFeature,
   type ArtifactProbabilityFeatureCollection,
@@ -85,7 +84,7 @@ export default function GeneratedHazardProbabilityMap({
   const tileFeatureCollection = useMemo(
     () => (
       hazard === 'thunder'
-        ? artifactThunderToFeatureCollection(tile)
+        ? { type: 'FeatureCollection' as const, features: [] }
         : artifactProbabilityToFeatureCollection(tile, hazard)
     ),
     [tile, hazard],
@@ -130,20 +129,6 @@ export default function GeneratedHazardProbabilityMap({
     }, 0),
     [vectorFeatureCollection],
   );
-  const categoryCountCoverage = useMemo(() => {
-    const hour = artifacts?.probabilityTiles?.hours.find(
-      (candidate) => candidate.forecastHour === displayForecastHour,
-    );
-    const counts = hour?.categoryCounts;
-    if (!counts) return undefined;
-    const total = Object.values(counts).reduce((sum, value) => {
-      const count = Number(value);
-      return Number.isFinite(count) && count > 0 ? sum + count : sum;
-    }, 0);
-    const none = Number(counts.NONE ?? 0);
-    if (total <= 0 || !Number.isFinite(none)) return undefined;
-    return Math.max(0, Math.min(1, (total - none) / total));
-  }, [artifacts, displayForecastHour]);
   // SIG (significant severe) overlay: a SINGLE smooth blob anchored at the
   // peak hazard cell and OFFSET along a per-hazard axis, so the SIG core has
   // its own location instead of perfectly overlaying every ENH+ cell.
@@ -199,7 +184,7 @@ export default function GeneratedHazardProbabilityMap({
     };
   }, [artifacts, tile, displayForecastHour, hazard, cfg.sigThreshold, snapshot?.ingredients, snapshot?.region]);
   const peakProb = hazard === 'thunder'
-    ? getArtifactThunderCoverage(tile) ?? categoryCountCoverage ?? vectorPeakProbability ?? 0
+    ? getArtifactThunderPeak(tile) ?? vectorPeakProbability ?? 0
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? vectorPeakProbability ?? 0;
   const spcPeakProb = useMemo(
     () => spcFeatureCollection.features.reduce((peak, feature) => {
@@ -210,7 +195,7 @@ export default function GeneratedHazardProbabilityMap({
   );
   const peakPct = formatProbabilityMetric(
     showSpcFillLayer ? spcPeakProb : peakProb,
-    hazard === 'thunder' ? undefined : cfg.thresholds[0],
+    cfg.thresholds[0],
   );
   const metricLabel = hazard === 'thunder'
     ? `COVER ${peakPct}`

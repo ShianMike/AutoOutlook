@@ -460,7 +460,7 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             self.assertEqual(merged_tile["stride"], 2)
             self.assertEqual(merged_index["tileStride"], 2)
 
-    def test_missing_source_thunder_does_not_suppress_merged_tstm(self) -> None:
+    def test_missing_source_thunder_does_not_draw_merged_tstm_from_category_grid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grid = np.zeros((9, 9), dtype=int)
@@ -484,8 +484,9 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             risk_features = merged_tile["riskShapes"]["features"]
             risk_labels = [feature["properties"]["category"] for feature in risk_features]
 
-            self.assertNotIn("thunder", merged_tile["probabilities"])
-            self.assertIn("TSTM", risk_labels)
+            self.assertIn("thunder", merged_tile["probabilities"])
+            self.assertNotIn("TSTM", risk_labels)
+            self.assertIn("MRGL", risk_labels)
 
     def test_preserves_cig_shapes_in_merged_tile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

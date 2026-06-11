@@ -198,6 +198,20 @@ export function getArtifactHazardPeak(
   return getArtifactHazardPeakLocation(artifacts, forecastHour, hazard)?.probability;
 }
 
+export function getArtifactThunderPeak(tile: OutlookProbabilityTile | undefined): number | undefined {
+  const grid = tile?.probabilities?.thunder;
+  if (!tile || !isGrid(grid)) return undefined;
+  let peak: number | undefined;
+  grid.forEach((row, rowIndex) => row.forEach((value, colIndex) => {
+    const probability = Number(value);
+    const lat = Number(tile.lats[rowIndex]?.[colIndex]);
+    const lon = Number(tile.lons[rowIndex]?.[colIndex]);
+    if (!Number.isFinite(probability) || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    peak = peak === undefined ? probability : Math.max(peak, probability);
+  }));
+  return peak;
+}
+
 export function getArtifactHazardPeakLocation(
   artifacts: OutlookArtifacts | null,
   forecastHour: number | undefined,

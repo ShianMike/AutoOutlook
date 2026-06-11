@@ -2204,11 +2204,13 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
     def test_category_probability_ceiling_keeps_tiles_consistent_with_final_categories(self) -> None:
         probabilities = {
-            "tornado": np.array([[0.45, 0.45, 0.45, 0.45, 0.45]]),
-            "hail": np.array([[0.80, 0.80, 0.80, 0.80, 0.80]]),
-            "wind": np.array([[0.80, 0.80, 0.80, 0.80, 0.80]]),
+            "tornado": np.array([[0.45, 0.45, 0.45, 0.45, 0.45, 0.45]]),
+            "hail": np.array([[0.80, 0.80, 0.80, 0.80, 0.80, 0.80]]),
+            "wind": np.array([[0.80, 0.80, 0.80, 0.80, 0.80, 0.80]]),
+            "thunder": np.array([[0.80, 0.80, 0.80, 0.80, 0.80, 0.80]]),
         }
         final_categories = np.array([[
+            SPC_RISK_LABELS.index("NONE"),
             SPC_RISK_LABELS.index("TSTM"),
             SPC_RISK_LABELS.index("MRGL"),
             SPC_RISK_LABELS.index("SLGT"),
@@ -2218,13 +2220,22 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         capped = apply_category_probability_ceiling(probabilities, final_categories)
 
-        self.assertLess(float(capped.probabilities["tornado"][0, 0]), 0.02)
-        self.assertLess(float(capped.probabilities["hail"][0, 1]), 0.15)
-        self.assertLess(float(capped.probabilities["wind"][0, 2]), 0.30)
-        self.assertLess(float(capped.probabilities["tornado"][0, 3]), 0.30)
-        self.assertLess(float(capped.probabilities["tornado"][0, 4]), 0.45)
-        self.assertLess(float(capped.probabilities["hail"][0, 3]), 0.60)
-        self.assertEqual(float(capped.probabilities["wind"][0, 4]), 0.80)
+        self.assertLess(float(capped.probabilities["tornado"][0, 1]), 0.02)
+        self.assertLess(float(capped.probabilities["hail"][0, 2]), 0.15)
+        self.assertLess(float(capped.probabilities["wind"][0, 3]), 0.30)
+        self.assertLess(float(capped.probabilities["tornado"][0, 4]), 0.30)
+        self.assertLess(float(capped.probabilities["tornado"][0, 5]), 0.45)
+        self.assertLess(float(capped.probabilities["hail"][0, 4]), 0.60)
+        self.assertEqual(float(capped.probabilities["wind"][0, 5]), 0.80)
+        self.assertLess(float(capped.probabilities["thunder"][0, 0]), 0.10)
+        self.assertGreaterEqual(float(capped.probabilities["thunder"][0, 1]), 0.10)
+        self.assertLess(float(capped.probabilities["thunder"][0, 1]), 0.40)
+        self.assertGreaterEqual(float(capped.probabilities["thunder"][0, 2]), 0.40)
+        self.assertLess(float(capped.probabilities["thunder"][0, 2]), 0.70)
+        self.assertGreaterEqual(float(capped.probabilities["thunder"][0, 3]), 0.40)
+        self.assertLess(float(capped.probabilities["thunder"][0, 3]), 0.70)
+        self.assertEqual(float(capped.probabilities["thunder"][0, 4]), 0.80)
+        self.assertEqual(float(capped.probabilities["thunder"][0, 5]), 0.80)
         self.assertTrue(capped.report["categoryConsistencyCapsApplied"])
 
     def test_postprocess_downgrades_isolated_high_cells(self) -> None:
@@ -2640,7 +2651,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertNotIn("TSTM", [feature["properties"]["category"] for feature in no_thunder["features"]])
         self.assertIn("MRGL", [feature["properties"]["category"] for feature in no_thunder["features"]])
 
-    def test_risk_tstm_polygon_uses_category_tstm_cells_when_thunder_is_capped(self) -> None:
+    def test_risk_tstm_polygon_does_not_use_category_cells_when_trained_thunder_is_below_threshold(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)
         lons = np.linspace(-104.0, -96.0, 9)
         category = np.zeros((9, 9), dtype=np.int16)
@@ -2659,13 +2670,41 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         )
         by_category = {feature["properties"]["category"]: feature for feature in geojson["features"]}
 
-        self.assertIn("TSTM", by_category)
+        self.assertNotIn("TSTM", by_category)
         self.assertIn("MRGL", by_category)
-        self.assertEqual(by_category["TSTM"]["properties"]["sourceCellCount"], 16)
-        self.assertEqual(
-            by_category["TSTM"]["properties"]["vectorization"]["supportSource"],
-            "category_grid_tstm",
+
+    def test_risk_and_thunder_polygons_clip_mexico_border_to_none(self) -> None:
+        lats = np.linspace(24.0, 25.5, 5)
+        lons = np.linspace(-102.0, -100.0, 5)
+        category = np.full((5, 5), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        probabilities = {
+            "thunder": np.full((5, 5), 0.40, dtype=float),
+            "tornado": np.zeros((5, 5), dtype=float),
+            "hail": np.zeros((5, 5), dtype=float),
+            "wind": np.zeros((5, 5), dtype=float),
+        }
+
+        risk = risk_polygons_from_grid(
+            lats,
+            lons,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            probabilities=probabilities,
+            min_cells=1,
         )
+        hazards = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=1,
+        )
+
+        self.assertEqual(risk["features"], [])
+        self.assertEqual(hazards["features"], [])
 
     def test_risk_polygon_features_follow_category_layer_order(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)
