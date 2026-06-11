@@ -2227,7 +2227,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertLess(float(capped.probabilities["tornado"][0, 5]), 0.45)
         self.assertLess(float(capped.probabilities["hail"][0, 4]), 0.60)
         self.assertEqual(float(capped.probabilities["wind"][0, 5]), 0.80)
-        self.assertLess(float(capped.probabilities["thunder"][0, 0]), 0.10)
+        self.assertLess(float(capped.probabilities["thunder"][0, 0]), 0.01)
         self.assertGreaterEqual(float(capped.probabilities["thunder"][0, 1]), 0.10)
         self.assertLess(float(capped.probabilities["thunder"][0, 1]), 0.40)
         self.assertGreaterEqual(float(capped.probabilities["thunder"][0, 2]), 0.40)
@@ -2618,7 +2618,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         lons = np.linspace(-100.0, -96.0, 5)
         category = np.full((5, 5), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
         thunder = np.zeros((5, 5), dtype=float)
-        thunder[1:4, 1:4] = 0.10
+        thunder[1:4, 1:4] = 0.01
 
         geojson = risk_polygons_from_grid(
             lats,
@@ -2657,7 +2657,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         category = np.zeros((9, 9), dtype=np.int16)
         category[2:7, 2:7] = SPC_RISK_LABELS.index("TSTM")
         category[3:6, 3:6] = SPC_RISK_LABELS.index("MRGL")
-        thunder = np.full((9, 9), 0.01, dtype=float)
+        thunder = np.full((9, 9), 0.005, dtype=float)
 
         geojson = risk_polygons_from_grid(
             lats,
@@ -3111,6 +3111,37 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(hail["5%"]["vectorization"]["supportSource"], "hazard_probability")
         self.assertTrue(thunder)
         self.assertTrue(all(item["vectorization"]["supportSource"] == "hazard_probability" for item in thunder))
+
+    def test_hazard_probability_shapes_draw_low_end_trained_tstm_support(self) -> None:
+        lats = np.linspace(30.0, 38.0, 9)
+        lons = np.linspace(-104.0, -96.0, 9)
+        category = np.full((9, 9), SPC_RISK_LABELS.index("TSTM"), dtype=np.int16)
+        probabilities = {
+            "tornado": np.zeros((9, 9)),
+            "hail": np.zeros((9, 9)),
+            "wind": np.zeros((9, 9)),
+            "thunder": np.zeros((9, 9)),
+        }
+        probabilities["thunder"][2:7, 2:7] = 0.01
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            probabilities,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            min_cells=1,
+        )
+
+        thunder = [
+            feature["properties"]
+            for feature in shapes["features"]
+            if feature["properties"]["hazard"] == "thunder"
+        ]
+        self.assertEqual([feature["label"] for feature in thunder], ["TSTM"])
+        self.assertEqual(thunder[0]["probability"], 0.01)
+        self.assertEqual(thunder[0]["vectorization"]["supportSource"], "hazard_probability")
 
     def test_hazard_probability_shapes_generalize_nearby_contours(self) -> None:
         lats = np.linspace(25.0, 45.0, 40)

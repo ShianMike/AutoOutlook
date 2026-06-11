@@ -37,7 +37,7 @@ _CIG_MIN_SOURCE_CELLS = {1: 12, 2: 18, 3: 24}
 _CIG_MIN_COMPONENT_CELLS = {1: 6, 2: 8, 3: 10}
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
-_THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
+_THUNDER_PROBABILITY_THRESHOLDS = (0.01, 0.10, 0.40, 0.70)
 _DISPLAY_BAND_GAP_METERS = 10_000.0
 _LOWER_OWNED_BOUNDARY_METERS = 5_000.0
 _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
@@ -47,7 +47,7 @@ _PROBABILITY_COLORS = {
     "tornado": ("#3b9b3b", "#a87d4f", "#d4ad7c", "#cf2727", "#c43eb1", "#6e0099", "#4b006b"),
     "hail": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
     "wind": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
-    "thunder": ("#c9a279", "#5cdde6", "#ef6055"),
+    "thunder": ("#5baa58", "#c9a279", "#5cdde6", "#ef6055"),
 }
 
 # --- Tunable category-calibration constants ---
@@ -2014,7 +2014,7 @@ def hazard_probability_shapes_from_grids(
                     "threshold": float(threshold),
                     "thresholdPercent": int(round(threshold * 100)),
                     "bucket": bucket,
-                    "label": f"{int(round(threshold * 100))}%",
+                    "label": _probability_shape_label(hazard, threshold),
                     "color": colors[min(bucket, len(colors) - 1)],
                     "forecastHour": forecast_hour,
                     "validTimeISO": valid_time_iso,
@@ -2694,6 +2694,12 @@ def _probability_generalization_settings(
         "smoothingIterations": smooth_by_bucket[idx],
         "simplifyTolerance": tolerance_by_bucket[idx],
     }
+
+
+def _probability_shape_label(hazard: str, threshold: float) -> str:
+    if hazard == "thunder" and math.isclose(float(threshold), _THUNDER_PROBABILITY_THRESHOLDS[0], rel_tol=0.0, abs_tol=1e-9):
+        return "TSTM"
+    return f"{int(round(float(threshold) * 100))}%"
 
 
 def _bounded_close_iterations(mask: np.ndarray, desired_iterations: int) -> int:
@@ -3507,7 +3513,7 @@ def _category_probability_cap_grid(hazard: str, category_grid: np.ndarray) -> np
     normalized_hazard = str(hazard).lower()
     if normalized_hazard in {"thunder", "thunderstorm"}:
         caps_by_ordinal = {
-            0: 0.099,
+            0: 0.009,
             1: 0.399,
             2: 0.699,
             3: 0.699,

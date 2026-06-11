@@ -17,8 +17,8 @@ back to rule-derived geometry.
 
 Risk-level TSTM polygons and generated Thunder hazard maps use the trained
 thunder probability grid directly. Thunder-specific category caps preserve the
-10% / 40% / 70% bands, and missing thunder source grids do not create
-category-derived TSTM shapes.
+trained low-end TSTM support band plus the stronger 10% / 40% / 70% bands,
+and missing thunder source grids do not create category-derived TSTM shapes.
 
 Both paths render onto the same `react-simple-maps` US states topojson and
 share the same legend, 500 mb upper-air overlay, and SIG visual style so
@@ -34,7 +34,7 @@ Each hazard has its own threshold ladder, color ramp, and outline
 
 | Hazard | Thresholds | Base radius (°lat) | SIG threshold |
 | ------ | ---------- | ------------------ | ------------- |
-| thunder | 10 / 40 / 70% | 3.10 | — (no SIG) |
+| thunder | TSTM / 10 / 40 / 70% | 3.10 | — (no SIG) |
 | tornado | 2 / 5 / 10 / 15 / 30 / 45 / 60% | 1.45 | 10% |
 | hail | 5 / 15 / 30 / 45 / 60% | 2.15 | 30% |
 | wind | 5 / 15 / 30 / 45 / 60% | 2.05 | 30% |

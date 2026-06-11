@@ -563,7 +563,8 @@ function DocsOverview() {
         surface, per-hazard probability bands, a parameter dashboard, an auto-generated
         forecast discussion, an SPC QC console, and a system-status readout. Trained
         general-thunder probabilities drive the TSTM risk outline and the Thunder hazard
-        outlook, with thunder-specific caps preserving the 10% / 40% / 70% display bands.
+        outlook, with thunder-specific caps preserving the trained TSTM support band plus the
+        10% / 40% / 70% display bands.
       </Body>
 
       <StatGrid

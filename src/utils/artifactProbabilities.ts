@@ -61,11 +61,11 @@ const TORNADO_THRESHOLDS = [0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60];
 const SEVERE_THRESHOLDS = [0.05, 0.15, 0.30, 0.45, 0.60];
 const TORNADO_LABELS = ['2%', '5%', '10%', '15%', '30%', '45%', '60%'];
 const SEVERE_LABELS = ['5%', '15%', '30%', '45%', '60%'];
-const THUNDER_THRESHOLDS = [0.10, 0.40, 0.70];
-const THUNDER_LABELS = ['10%', '40%', '70%'];
+const THUNDER_THRESHOLDS = [0.01, 0.10, 0.40, 0.70];
+const THUNDER_LABELS = ['TSTM', '10%', '40%', '70%'];
 const TORNADO_COLORS = ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1', '#6e0099', '#4b006b'];
 const SEVERE_COLORS = ['#a87d4f', '#f6c842', '#cf2727', '#c43eb1', '#6e0099'];
-const THUNDER_COLORS = ['#c9a279', '#5cdde6', '#ef6055'];
+const THUNDER_COLORS = ['#5baa58', '#c9a279', '#5cdde6', '#ef6055'];
 
 export function getArtifactHourTile(
   artifacts: OutlookArtifacts | null,

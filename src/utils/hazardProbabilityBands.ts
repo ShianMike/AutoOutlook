@@ -68,9 +68,9 @@ export interface HazardConfig {
 // Color schemes mirror the rawinsonde / SPC family of outlook palettes.
 export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   thunder: {
-    thresholds: [0.10, 0.40, 0.70],
-    colors:     ['#c9a279', '#5cdde6', '#ef6055'],
-    labels:     ['10%', '40%', '70%'],
+    thresholds: [0.01, 0.10, 0.40, 0.70],
+    colors:     ['#5baa58', '#c9a279', '#5cdde6', '#ef6055'],
+    labels:     ['TSTM', '10%', '40%', '70%'],
     baseLatRadius: 3.1,
     aspect: 1.7,
     tilt: -8,
