@@ -448,7 +448,7 @@ function DocsHero() {
         </div>
         <div className="flex items-center gap-2">
           <RetroBadge tone="cyan">Static</RetroBadge>
-          <RetroBadge tone="ink">v1.1</RetroBadge>
+          <RetroBadge tone="ink">v1.2</RetroBadge>
         </div>
       </div>
       <div className="border-t-[2px] border-paper/20 bg-ink px-4 py-1.5 xl:px-5">
@@ -552,15 +552,18 @@ function DocsOverview() {
       title="System Overview"
     >
       <Lead>
-        AutoOutlook is an Automated Convective Risk Intelligence platform: a fully
-        automated severe-weather outlook that runs end-to-end without a human in the loop.
+        AutoOutlook is an Automated Convective Risk Intelligence platform: a trained,
+        artifact-first severe-weather outlook that converts HRRR model data into SPC-style
+        risk and hazard maps.
       </Lead>
       <Body>
         ACRI mirrors the categorical and probabilistic structure of an SPC convective outlook
-        using HRRR model fields, MetPy-style derived ingredients, and XGBoost hazard
-        probabilities. It produces a categorical risk surface, per-hazard probability bands,
-        a parameter dashboard, an auto-generated forecast discussion, an SPC QC console,
-        and a system-status readout, all refreshed every 15 minutes.
+        using HRRR model fields, MetPy-style derived ingredients, and four calibrated v1.2
+        XGBoost heads for tornado, hail, wind, and thunder. It produces a categorical risk
+        surface, per-hazard probability bands, a parameter dashboard, an auto-generated
+        forecast discussion, an SPC QC console, and a system-status readout. Trained
+        general-thunder probabilities now drive the TSTM risk outline so the Risk Levels
+        map and Thunder hazard outlook stay aligned.
       </Body>
 
       <StatGrid
@@ -568,7 +571,7 @@ function DocsOverview() {
           { label: 'Forecast Horizon', value: '0 – 48 h' },
           { label: 'SPC Compare',      value: '3 modes' },
           { label: 'Auto Refresh',     value: '15 min' },
-          { label: 'Hazards Modeled',  value: '3 + 1' },
+          { label: 'Hazards Modeled',  value: '4 trained' },
         ]}
       />
 
@@ -576,7 +579,7 @@ function DocsOverview() {
         <PipelineStep
           step="01"
           name="HRRR Fields"
-          detail="GRIB2 byte-range subset of CAPE, CIN, dewpoint, winds, heights."
+          detail="CAPE, CIN, temperature, moisture, winds, reflectivity, pressure, and 500-mb height."
         />
         <PipelineStep
           step="02"
@@ -586,16 +589,16 @@ function DocsOverview() {
         <PipelineStep
           step="03"
           name="XGBoost Hazards"
-          detail="Tornado / hail / wind probabilities → SPC-style category + bands."
+          detail="Four calibrated v1.2 heads: tornado / hail / wind / thunder → SPC-style category + bands."
         />
       </div>
 
       <Body>
         ACRI runs as a deployable artifact pipeline: the latest extended HRRR cycle is
-        detected automatically, forecast hours <Mono>f00 … f48</Mono> are processed, and the
-        outputs are written to disk as GeoJSON polygons, probability tiles, metadata, and
-        preview PNGs. The frontend reads those artifacts; it does not invoke the model on
-        request.
+        detected, forecast hours <Mono>f00 … f48</Mono> are processed, and the outputs are
+        written to disk as GeoJSON polygons, probability tiles, metadata, and preview PNGs.
+        The historical archive uses the same trained artifact shape path for its 12Z-to-12Z
+        verification windows.
       </Body>
     </DocSection>
   );
@@ -633,12 +636,16 @@ function DocsLevels() {
       title="Risk Level Codex"
     >
       <Lead>
-        Six categorical risk levels, each anchored to a per-hazard probability threshold.
+        Six categorical risk levels, driven by the highest trained hazard probability
+        threshold present in each grid cell.
       </Lead>
       <Body>
-        The category in any cell is the highest level supported by its hazard probabilities.
-        Thresholds below match the SPC convention used by the verification harness in{' '}
-        <Mono>backend.ml.validate_models</Mono>. "MOD" and "MDT" are equivalent.
+        Tornado, hail, wind, and thunder probabilities are evaluated independently, then the
+        visible category becomes the highest SPC-style threshold supported by the active
+        hazards. Thresholds below match the SPC convention used by the verification harness in{' '}
+        <Mono>backend.ml.validate_models</Mono>. "MOD" and "MDT" are equivalent. TSTM uses
+        trained general-thunder probability support, keeping the categorical map consistent
+        with the Thunder hazard map.
       </Body>
 
       <div className="overflow-hidden border-[2px] border-ink">
@@ -682,10 +689,10 @@ function DocsLevels() {
       </div>
 
       <Body>
-        Thresholds are <em>cumulative</em>: a SLGT polygon includes every cell that meets at
-        least the SLGT threshold for any hazard, so larger bands always contain smaller
-        ones. The map renders each band as an annulus showing where that level is the highest
-        applicable risk.
+        Thresholds are <em>cumulative</em>: SLGT includes every cell that meets at least the
+        SLGT threshold for tornado, hail, or wind, while TSTM follows the trained thunder
+        support. The renderer preserves the hierarchy and filters malformed sliver rings so
+        tiny contours cannot become map-wide fills.
       </Body>
     </DocSection>
   );
@@ -700,9 +707,26 @@ function DocsPerformance() {
       badge={<RetroBadge tone="amber">Experimental</RetroBadge>}
     >
       <Lead>
-        ACRI uses three XGBoost gradient-boosted classifiers (one per severe hazard)
-        trained on a historical HRRR archive matched to SPC severe reports.
+        v1.2 uses four calibrated XGBoost classifiers trained on 849,720 HRRR archive rows:
+        tornado, hail, wind, and general thunder.
       </Lead>
+
+      <StatGrid
+        items={[
+          { label: 'Training Rows', value: '849,720' },
+          { label: 'Model Inputs', value: '37' },
+          { label: 'Hazard Heads', value: '4' },
+          { label: 'Trees / Head', value: '600' },
+        ]}
+      />
+
+      <Body>
+        Feature schema <Mono>ml-features-v5-location-refc-temporal</Mono> adds latitude,
+        longitude, surface temperature, composite reflectivity, 500-mb height, valid-hour
+        cycles, month cycles, and day-of-year cycles to the existing instability, inhibition,
+        moisture, shear, helicity, lapse-rate, and composite parameters. Training uses a
+        time-based 2025–2026 holdout and isotonic probability calibration.
+      </Body>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">
@@ -710,10 +734,10 @@ function DocsPerformance() {
             Training Set
           </div>
           <DocList>
-            <DocListItem>HRRR archive, byte-range subset of severe-relevant fields.</DocListItem>
+            <DocListItem><Mono>849,720</Mono> rows spanning 2,251 unique HRRR run dates.</DocListItem>
             <DocListItem>SPC severe reports matched to the precise HRRR grid valid time.</DocListItem>
-            <DocListItem>Configurable positive/negative point density per hour.</DocListItem>
-            <DocListItem>De-duplicated by feature+label hash to suppress leakage.</DocListItem>
+            <DocListItem>Four labels: tornado, hail, wind, and lightning-based thunder.</DocListItem>
+            <DocListItem>Zero duplicate feature-label rows in the published training metadata.</DocListItem>
           </DocList>
         </div>
         <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">
@@ -728,6 +752,14 @@ function DocsPerformance() {
           </DocList>
         </div>
       </div>
+
+      <Body>
+        Held-out ROC-AUC is <Mono>0.940</Mono> tornado, <Mono>0.956</Mono> hail,
+        <Mono>0.980</Mono> wind, and <Mono>0.983</Mono> thunder. Average precision is
+        <Mono>0.200</Mono>, <Mono>0.440</Mono>, <Mono>0.826</Mono>, and
+        <Mono>0.801</Mono> respectively. These measure discrimination on the held-out
+        archive and should not be read as guaranteed real-world forecast accuracy.
+      </Body>
 
       <div className="border-[3px] border-ink bg-paper">
         <div className="flex items-center justify-between border-b-[2px] border-ink bg-paper px-3 py-1.5">
@@ -786,18 +818,19 @@ function DocsSpcQc() {
       id="docs-spc-qc"
       eyebrow="DOC / 04 · SPC DAY 1 COMPARISON"
       title="SPC QC Console"
-      badge={<RetroBadge tone="lime">v0.6</RetroBadge>}
+      badge={<RetroBadge tone="lime">v1.2</RetroBadge>}
     >
       <Lead>
-        v0.6 turns the SPC Day 1 verification artifact into an operator-facing QC panel
-        and a direct map comparison mode.
+        The SPC QC Console compares completed AutoOutlook artifacts against the official SPC
+        Day 1 outlook after generation.
       </Lead>
 
       <Body>
-        The backend emits <Mono>verification_summary.json</Mono> after AutoOutlook artifacts
-        are generated. The frontend reads that summary and renders the agreement percentage,
-        underforecast and overforecast cell counts, category ledgers, SPC forecaster metadata,
-        valid/expiration timestamps, and leakage-guard status.
+        The backend emits <Mono>verification_summary.json</Mono> once the prediction polygons,
+        probability tiles, and metadata are already written. The frontend reads that summary
+        and renders agreement percentage, underforecast and overforecast cell counts, category
+        ledgers, SPC forecaster metadata, valid/expiration timestamps, and post-artifact
+        verification status.
       </Body>
 
       <StatGrid
@@ -813,7 +846,7 @@ function DocsSpcQc() {
         <SpcQcCard
           title="SPC Agreement"
           badge="QC"
-          body="A compact calibration card shows the agreement percentage, aligned cells, evaluated cells, and whether the official SPC outlook was fetched only after prediction artifacts were ready."
+          body="A compact calibration card shows agreement percentage, aligned cells, evaluated cells, and whether SPC comparison happened after artifact generation."
         />
         <SpcQcCard
           title="Displacement Ratio"
@@ -823,7 +856,7 @@ function DocsSpcQc() {
         <SpcQcCard
           title="Category Ledger"
           badge="All Risks"
-          body="Every category from NONE through HIGH stays visible, even when the count is zero, so users can quickly compare AutoOutlook and SPC distribution by tier."
+          body="Every category from NONE through HIGH stays visible, even when the count is zero, so users can compare AutoOutlook and SPC distribution by tier."
         />
       </div>
 
@@ -858,10 +891,14 @@ function DocsEnhVerification() {
           2026 Risk Verification Map
         </h2>
         <p className="mt-2 max-w-5xl font-mono text-[10px] uppercase leading-relaxed tracking-[0.16em] text-paper/70">
-          Static local archive. Event-day 00Z HRRR, merged from f17 through f28
-          (17Z to 04Z), with SPC Day 1 category, hazard outlooks, and storm reports fetched after prediction.
+          Static local archive. Event-day 00Z HRRR, merged from f12 through f36
+          for the full 12Z-to-12Z Day 1 window. Each event is regenerated with the
+          v1.2 trained tornado, hail, wind, and thunder models; stale model metadata
+          fails the archive export. SPC Day 1 category, hazard outlooks, and storm
+          reports are fetched after prediction.
         </p>
       </div>
+
       <HistoricalEnhPlusVerification />
     </section>
   );
@@ -899,8 +936,8 @@ function DocsPredictability() {
       title="Predictability Window"
     >
       <Lead>
-        The forecast envelope spans <Mono>0–48 h</Mono> from the most recent extended HRRR
-        cycle. Confidence is not uniform across that window.
+        The live forecast spans <Mono>0–48 h</Mono> from the most recent extended HRRR cycle;
+        the historical archive verifies the 12Z-to-12Z Day 1 slice.
       </Lead>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -924,8 +961,8 @@ function DocsPredictability() {
           </div>
           <DocList>
             <DocListItem>HRRR assimilates radar and surface obs hourly; the first 6 h carry the most situational truth.</DocListItem>
-            <DocListItem>Beyond ~18 h, deterministic placement errors grow faster than mesoscale skill.</DocListItem>
-            <DocListItem>XGBoost calibration was trained at hour-of-forecast granularity, so the model "knows" later hours are noisier.</DocListItem>
+            <DocListItem>Beyond ~18 h, deterministic placement errors grow faster than mesoscale skill, so probability bands should be read as corridors.</DocListItem>
+            <DocListItem>XGBoost calibration includes forecast-hour and valid-time features, so the model carries timing context into later hours.</DocListItem>
           </DocList>
         </div>
         <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">
@@ -933,9 +970,9 @@ function DocsPredictability() {
             How To Read The Slider
           </div>
           <DocList>
-            <DocListItem>The 7 stops sample the full window: <Mono>0 · +3h · +6h · +9h · +12h · +18h · +24h</Mono>.</DocListItem>
-            <DocListItem>Hazard bands can shift one level between adjacent stops. That is expected behavior, not a bug.</DocListItem>
-            <DocListItem>If <Mono>mlHazardHours</Mono> is zero, the ML model is inactive for the current cycle and the rule-based engine is driving the outlook.</DocListItem>
+            <DocListItem>The live controls sample the current HRRR forecast window; the archive view locks to <Mono>f12 … f36</Mono> for 12Z-to-12Z verification.</DocListItem>
+            <DocListItem>Hazard bands can shift between adjacent hours as instability, shear, and storm coverage move.</DocListItem>
+            <DocListItem>If <Mono>mlHazardHours</Mono> is zero, the ML model is inactive for that cycle and the fallback engine is driving the outlook.</DocListItem>
           </DocList>
         </div>
       </div>
@@ -951,14 +988,14 @@ function DocsHazards() {
       title="Hazard Probability Bands"
     >
       <Lead>
-        Each hazard is contoured at a fixed ladder of probabilities. Larger bands always
-        contain smaller ones.
+        Tornado, hail, wind, and thunder are contoured from trained probability grids at
+        fixed SPC-style thresholds.
       </Lead>
       <Body>
         Polygons are generated by <Mono>marching_squares_cumulative_contours</Mono> with
         cartographic generalization: small components are pruned, holes below a threshold
-        are filled, and ladders are buffered so the visual hierarchy is preserved even when
-        the underlying probability field is noisy.
+        are filled, ladders are buffered, and invalid spherical sliver rings are rejected so
+        contour fragments cannot paint outside the real forecast area.
       </Body>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -1001,6 +1038,13 @@ function DocsHazards() {
         <Mono>≥ 10%</Mono> probability of EF2+ tornadoes, hail at least 2 in,
         or convective wind at least 65 kt. General thunder and flood do not
         carry a SIG layer.
+      </Body>
+
+      <Body>
+        CIG is a display overlay on the non-thunder hazard maps. It is drawn as one
+        labeled corridor with the two-line style, so users see a single <Mono>CIG</Mono>
+        signal instead of numbered CIG 1/2/3 shapes. Tiny fragments and unsupported
+        components are pruned before rendering to avoid clipped or stacked overlays.
       </Body>
 
       <div className="border-[2px] border-ink bg-paper p-3 shadow-retro-sm">
@@ -1124,8 +1168,8 @@ function DocsSources() {
         Production deployments can pin the public service to artifact-only mode
         (<Mono>AUTOOUTLOOK_FORECAST_SOURCE=artifact</Mono> +{' '}
         <Mono>AUTOOUTLOOK_ENABLE_LIVE_BUILD=false</Mono>). The public endpoint then serves
-        only pre-generated artifacts; expensive HRRR/XGBoost generation runs in a separate
-        scheduled job.
+        only pre-generated artifacts; HRRR/XGBoost generation runs in a separate scheduled
+        job.
       </Body>
     </DocSection>
   );
@@ -1168,9 +1212,8 @@ function DocsGlossary() {
       badge={<RetroBadge tone="cyan">{totalTerms} terms</RetroBadge>}
     >
       <Lead>
-        Every parameter on the Environmental Ingredients board, grouped by meteorological
-        role and annotated with the value the dashboard considers strongly favorable for
-        organized severe convection.
+        Every ingredient shown on the dashboard, grouped by meteorological role and tied to
+        the trained hazard model inputs where applicable.
       </Lead>
 
       <GlossaryLegend />

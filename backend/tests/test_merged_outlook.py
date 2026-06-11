@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from backend.ml.merged_outlook import (
+    _merge_cig_shape_collections,
     _spc_geojson_max_category_ordinal,
     available_merged_d1_dates,
     merge_cycles_for_spc_window,
@@ -221,6 +222,167 @@ class TestMergedD1DateSelection(unittest.TestCase):
 
 
 class TestMergeCyclesForSpcWindow(unittest.TestCase):
+    def test_merged_cig_corridors_join_nearby_hourly_areas_and_drop_tiny_islands(self) -> None:
+        collection = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-99.0, 34.0],
+                            [-97.8, 34.0],
+                            [-97.8, 37.0],
+                            [-99.0, 37.0],
+                            [-99.0, 34.0],
+                        ]],
+                    },
+                    "properties": {
+                        "hazard": "tornado",
+                        "cig": 1,
+                        "forecastHour": 12,
+                    },
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-97.1, 34.4],
+                            [-95.9, 34.4],
+                            [-95.9, 37.4],
+                            [-97.1, 37.4],
+                            [-97.1, 34.4],
+                        ]],
+                    },
+                    "properties": {
+                        "hazard": "tornado",
+                        "cig": 1,
+                        "forecastHour": 13,
+                    },
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-88.0, 30.0],
+                            [-87.9, 30.0],
+                            [-87.9, 30.1],
+                            [-88.0, 30.1],
+                            [-88.0, 30.0],
+                        ]],
+                    },
+                    "properties": {
+                        "hazard": "tornado",
+                        "cig": 1,
+                        "forecastHour": 14,
+                    },
+                },
+            ],
+        }
+
+        merged = _merge_cig_shape_collections(
+            [collection],
+            "2026-06-03T12:00:00Z",
+        )
+
+        self.assertEqual(len(merged["features"]), 1)
+        feature = merged["features"][0]
+        self.assertEqual(feature["properties"]["componentCount"], 1)
+        self.assertEqual(feature["properties"]["sourceFeatureCount"], 3)
+        self.assertEqual(feature["properties"]["sourceForecastHours"], [12, 13, 14])
+        self.assertEqual(
+            feature["properties"]["vectorization"]["mergedCorridorGeometry"],
+            "joined_hourly_corridor",
+        )
+
+    def test_merged_cig_levels_use_spc_style_cumulative_contours(self) -> None:
+        collection = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-102.0, 32.0],
+                            [-94.0, 32.0],
+                            [-94.0, 40.0],
+                            [-102.0, 40.0],
+                            [-102.0, 32.0],
+                        ]],
+                    },
+                    "properties": {
+                        "hazard": "wind",
+                        "cig": 1,
+                        "forecastHour": 12,
+                    },
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-100.0, 34.0],
+                            [-96.0, 34.0],
+                            [-96.0, 38.0],
+                            [-100.0, 38.0],
+                            [-100.0, 34.0],
+                        ]],
+                    },
+                    "properties": {
+                        "hazard": "wind",
+                        "cig": 2,
+                        "forecastHour": 12,
+                    },
+                },
+            ],
+        }
+
+        merged = _merge_cig_shape_collections(
+            [collection],
+            "2026-06-03T12:00:00Z",
+        )
+
+        self.assertEqual(len(merged["features"]), 2)
+        by_level = {
+            feature["properties"]["cig"]: feature
+            for feature in merged["features"]
+        }
+        from pyproj import Transformer
+        from shapely.geometry import shape
+        from shapely.ops import transform
+
+        to_projected = Transformer.from_crs(
+            "EPSG:4326",
+            "EPSG:5070",
+            always_xy=True,
+        ).transform
+        lower = transform(to_projected, shape(by_level[1]["geometry"]))
+        higher = transform(to_projected, shape(by_level[2]["geometry"]))
+        lower_hatch = transform(
+            to_projected,
+            shape(by_level[1]["properties"]["hatchGeometry"]),
+        )
+        overlap_ratio = lower.intersection(higher).area / min(lower.area, higher.area)
+        self.assertGreater(overlap_ratio, 0.999)
+        self.assertTrue(lower.covers(higher))
+        self.assertLess(lower_hatch.intersection(higher).area, 1.0)
+        self.assertEqual(
+            by_level[1]["properties"]["vectorization"]["displayGeometry"],
+            "spc_cumulative_contour",
+        )
+        self.assertEqual(
+            by_level[2]["properties"]["vectorization"]["displayGeometry"],
+            "spc_cumulative_contour",
+        )
+        self.assertEqual(
+            by_level[1]["properties"]["vectorization"]["hatchGeometry"],
+            "spc_exclusive_hatch",
+        )
+
     def test_merges_two_cycles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -267,6 +429,86 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             self.assertEqual(result["tileStride"], 2)
             self.assertEqual(merged_tile["stride"], 2)
             self.assertEqual(merged_index["tileStride"], 2)
+
+    def test_preserves_cig_shapes_in_merged_tile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.array([[0, 1, 2], [1, 3, 4], [0, 2, 0], [0, 0, 0], [0, 0, 0]])
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                [12],
+                grid,
+            )
+            tile_path = cycle_dir / "hours" / "f12" / "probability_tile.json"
+            tile = json.loads(tile_path.read_text(encoding="utf-8"))
+            tile["cigShapes"] = {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[
+                                [-100.0, 34.0],
+                                [-99.0, 34.0],
+                                [-99.0, 35.0],
+                                [-100.0, 35.0],
+                                [-100.0, 34.0],
+                            ]],
+                        },
+                        "properties": {
+                            "hazard": "wind",
+                            "cig": 2,
+                            "label": "WIND CIG2",
+                            "forecastHour": 12,
+                            "validTimeISO": "2026-06-03T12:00:00Z",
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[
+                                [-99.5, 34.5],
+                                [-98.5, 34.5],
+                                [-98.5, 35.5],
+                                [-99.5, 35.5],
+                                [-99.5, 34.5],
+                            ]],
+                        },
+                        "properties": {
+                            "hazard": "wind",
+                            "cig": 2,
+                            "label": "WIND CIG2",
+                            "forecastHour": 13,
+                            "validTimeISO": "2026-06-03T13:00:00Z",
+                        },
+                    },
+                ],
+            }
+            tile_path.write_text(json.dumps(tile), encoding="utf-8")
+
+            output = root / "output"
+            merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(),
+                output_dir=output,
+            )
+
+            merged_tile = json.loads((output / "merged_probability_tile.json").read_text(encoding="utf-8"))
+            cig_features = merged_tile["cigShapes"]["features"]
+            self.assertEqual(len(cig_features), 1)
+            self.assertEqual(cig_features[0]["properties"]["hazard"], "wind")
+            self.assertEqual(cig_features[0]["properties"]["cig"], 2)
+            self.assertEqual(cig_features[0]["properties"]["forecastHour"], 0)
+            self.assertEqual(cig_features[0]["properties"]["sourceForecastHours"], [12, 13])
+            self.assertEqual(cig_features[0]["properties"]["sourceFeatureCount"], 2)
+            self.assertEqual(
+                cig_features[0]["properties"]["validTimeISO"],
+                "2026-06-03T12:00:00Z",
+            )
 
     def test_accepts_custom_event_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,11 +625,11 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             dir_a = _write_cycle_artifacts(root, "00z_hrrr", "2026-06-03T00:00:00Z", [12, 18], grid)
             # Cycle 2: 12Z on 2026-06-03, hours 0-24. Valid window 12Z 06-03 to 12Z 06-04 (hours 0-24)
             dir_b = _write_cycle_artifacts(root, "12z_hrrr", "2026-06-03T12:00:00Z", [0, 6], grid)
-            # Cycle 3: ECMWF cycle, should be ignored for HRRR model
-            dir_c = _write_cycle_artifacts(root, "12z_ecmwf", "2026-06-03T12:00:00Z", [0, 6], grid)
+            # Cycle 3: non-HRRR cycle, should be ignored for HRRR model
+            dir_c = _write_cycle_artifacts(root, "12z_other_model", "2026-06-03T12:00:00Z", [0, 6], grid)
             # Update its model name in index
             index = json.loads((dir_c / "index.json").read_text(encoding="utf-8"))
-            index["cyclePolicy"] = {"model": "ECMWF"}
+            index["cyclePolicy"] = {"model": "other"}
             (dir_c / "index.json").write_text(json.dumps(index), encoding="utf-8")
 
             d1_valid = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)

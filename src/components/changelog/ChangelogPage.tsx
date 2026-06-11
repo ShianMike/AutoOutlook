@@ -84,10 +84,88 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.2',
+    codename: 'Retrained Hazard Models & Feature Schema v5',
+    date: '2026-06-11',
+    status: 'CURRENT',
+    summary:
+      'This release retrains the AutoOutlook hazard system on 849,720 HRRR samples, expands the model from three severe-hazard heads to four trained hazards including general thunder, adds location, reflectivity, temperature, height, and time-season inputs, improves CIG intensity and merged-outlook rendering, and removes obsolete non-HRRR paths.',
+    highlights: [
+      'Four trained hazard heads: Tornado, hail, wind, and general thunder now use calibrated XGBoost models trained on 849,720 archive rows.',
+      'Feature schema v5: Expanded to 37 model inputs, adding latitude, longitude, surface temperature, composite reflectivity, 500-mb height, valid-hour cycles, month cycles, and day-of-year cycles.',
+      'Larger calibrated models: Training now uses 600 trees, depth 5, time-based holdout validation, and isotonic probability calibration.',
+      'Held-out ROC-AUC: Tornado 0.940, hail 0.956, wind 0.980, and thunder 0.983. These are model validation scores, not guaranteed forecast accuracy.',
+      'Trained TSTM risk: The Risk Levels TSTM outline now follows the trained general-thunder probability field instead of a separate rule-based thunder shape.',
+      'Retrained CIG intensity: Hail and wind intensity models use the expanded feature schema, while small CIG fragments are pruned and displayed as one labeled two-line corridor.',
+      'Merged Outlook upgrade: Merged mode is the default view, hourly CIG areas are joined into cleaner corridors, and CIG is kept on hazard maps instead of cluttering the categorical risk map.',
+      'Retrained 2026 archive: Every hardcoded historical case is rebuilt with the v1.2 hazard models across the full 12Z-to-12Z Day 1 window.',
+      'Archive date cleanup: April 18, 2026 was removed from the Risk Archive selector, leaving 21 curated 2026 verification events.',
+      'HRRR-only cleanup: Removed obsolete ECMWF and Philippines-specific runtime paths and standardized the artifact timeline to f00-f48.',
+      'The June 10 00Z HRRR dev artifact was force-regenerated across f00-f48 for the local dev server.',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'Fourth trained model for general thunder',
+        body: 'Added a calibrated thunder classifier and a thunder model artifact. TSTM can now come from learned thunder probability instead of only environmental rules.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Feature schema v5 with 37 inputs',
+        body: 'Added location, surface temperature, composite reflectivity, 500-mb height, valid-hour, monthly, and day-of-year signals alongside the existing CAPE, CIN, moisture, shear, and composite parameters.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Tornado, hail, and wind models retrained',
+        body: 'Retrained the severe-hazard classifiers on 849,720 archive rows using 600 trees, depth 5, time-based validation, and isotonic calibration. Held-out ROC-AUC increased to 0.940 tornado, 0.956 hail, and 0.980 wind.',
+      },
+      {
+        kind: 'FIX',
+        title: 'TSTM risk uses trained thunder support',
+        body: 'The categorical TSTM polygon and Thunder hazard outlook now use the same trained thunder probability support, removing the mismatch between the two maps.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'CIG intensity models and merged corridors',
+        body: 'Retrained hail and wind intensity models with the expanded schema, constrained CIG to active hazard support, removed tiny components, and joined hourly areas into smoother merged-outlook corridors.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Cleaner operator map defaults',
+        body: 'The dashboard now opens on Merged Outlook, hides the hourly scrubber in merged mode, removes CIG from the categorical risk map, and uses one labeled CIG overlay on the hazard maps.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Historical archive regenerated with v1.2',
+        body: 'Rebuilt each hardcoded 2026 verification event with the trained tornado, hail, wind, and thunder models from event-day HRRR f12-f36. Archive generation now rejects stale model metadata instead of reusing older rule-based artifacts.',
+      },
+      {
+        kind: 'REMOVE',
+        title: 'April 18 removed from Risk Archive',
+        body: 'Removed Apr 18, 2026 from the hardcoded archive catalog and generated archive dropdown. The Risk Archive now exposes 21 curated 2026 verification events while neighboring 12Z-to-12Z windows remain intact.',
+      },
+      {
+        kind: 'REMOVE',
+        title: 'Legacy ECMWF and Philippines paths removed',
+        body: 'Removed the obsolete ECMWF selector, 90-hour timeline branches, Philippines boundary asset, and PAGASA request document so the runtime and static export follow one HRRR f00-f48 path.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Reference descriptions aligned with v1.2',
+        body: 'Updated System Overview, Risk Level Codex, SPC QC Console, Predictability Window, Hazard Probability Bands, Ingredients Glossary, and landing-page copy so the in-app text matches the trained thunder model, CIG cleanup, SPC QC flow, and 12Z-to-12Z archive behavior.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.2',
+        body: 'Updated package metadata, app footers, transition screens, landing copy, documentation, and the in-app changelog for the full v1.2 model release. The June 10 00Z HRRR dev artifact was also regenerated across f00-f48.',
+      },
+    ],
+  },
+  {
     version: 'v1.1',
     codename: 'Merged D1 00Z Lock & Animated Release Console',
     date: '2026-06-08',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release fixes the Merged Day 1 outlook so it displays the selected day\'s 00Z run, limits the date picker to the latest two available days, preserves the daily 00Z merged cache when later cycles arrive, and adds polished motion to the landing page and in-app changelog.',
     highlights: [
@@ -868,6 +946,7 @@ function ChangelogNav() {
 function ChangelogHero() {
   const current = RELEASES[0];
   const previous = RELEASES[1];
+  const anchorForVersion = (version: string) => `#release-${version.replace(/\./g, '-')}`;
   return (
     <section className="changelog-atmosphere relative overflow-hidden border-b-[3px] border-ink bg-paper">
       <div className="pointer-events-none absolute inset-0 retro-grid-bg opacity-60" aria-hidden />
@@ -902,13 +981,13 @@ function ChangelogHero() {
 
           <div className="changelog-hero-item flex flex-wrap items-center gap-3 pt-2" style={revealDelay(375)}>
             <a
-              href={`#release-${current.version.replace('.', '-')}`}
+              href={anchorForVersion(current.version)}
               className="retro-button retro-button-primary changelog-action-button !px-5 !py-3 text-base"
             >
               ▾ Read {current.version} in full
             </a>
             <a
-              href={`#release-${previous.version.replace('.', '-')}`}
+              href={anchorForVersion(previous.version)}
               className="retro-button changelog-action-button !px-5 !py-3 text-base"
             >
               See {previous.version}
@@ -1265,7 +1344,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.1
+          AutoOutlook · Automated Convective Risk Intelligence · v1.2
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

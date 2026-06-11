@@ -685,6 +685,9 @@ def _ingredients_at(
         srh03,
         shear_kt * 0.5,
         comps_scalar,
+        surface_pressure_pa=_value(fields, "surface_pressure", i_lat, i_lon, np.nan),
+        hgt500_m=_value(fields, "hgt500", i_lat, i_lon, np.nan),
+        refc_dbz=_value(fields, "refc", i_lat, i_lon, np.nan),
     )
 
 
@@ -843,7 +846,15 @@ def gather(args: argparse.Namespace) -> int:
                     "validTimeISO": ref.valid_time.isoformat().replace("+00:00", "Z"),
                     "sampleLat": lat,
                     "sampleLon": lon,
-                    **feature_row(ingredients, ref.forecast_hour),
+                    **feature_row(
+                        ingredients,
+                        ref.forecast_hour,
+                        sample_lat=lat,
+                        sample_lon=lon,
+                        valid_time_iso=ref.valid_time.isoformat().replace("+00:00", "Z"),
+                        run_date=ref.run_date,
+                        run_cycle=ref.run_cycle,
+                    ),
                     **{f"label_{hazard}": labels[hazard] for hazard in HAZARD_KEYS},
                 }
             )

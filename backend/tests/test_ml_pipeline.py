@@ -166,7 +166,7 @@ class MlPipelineTests(unittest.TestCase):
 
         self.assertEqual(
             labels_for_sample(reports, sample_time, 35.22, -97.44),
-            {"tornado": 1, "hail": 0, "wind": 1},
+            {"tornado": 1, "hail": 0, "wind": 1, "thunder": 0},
         )
 
     def test_daily_report_parser_preserves_normalized_magnitude_fields(self) -> None:
@@ -662,7 +662,7 @@ class MlPipelineTests(unittest.TestCase):
                 self.assertEqual(status["featureSchemaHash"], feature_schema_hash())
                 self.assertEqual(
                     predict_ml_hazards({"mlcape": 1000, "shear06Kt": 35}, 12),
-                    {"tornado": 0.2, "hail": 0.2, "wind": 0.2},
+                    {"tornado": 0.2, "hail": 0.2, "wind": 0.2, "thunder": 0.2},
                 )
                 reset_model_cache()
 
@@ -770,12 +770,17 @@ class MlPipelineTests(unittest.TestCase):
                 self.assertEqual(status["runtimeFeatureSchemaHash"], feature_schema_hash())
                 self.assertEqual(
                     predict_ml_hazards({"mlcape": 1000, "mucape": 1200, "shear06Kt": 35}, 12),
-                    {"tornado": 0.2, "hail": 0.2, "wind": 0.2},
+                    {"tornado": 0.2, "hail": 0.2, "wind": 0.2, "thunder": 0.2},
                 )
                 grid = np.zeros((2, len(FEATURE_NAMES)), dtype=float)
                 self.assertEqual(
                     {hazard: values.tolist() for hazard, values in predict_ml_hazard_matrix(grid).items()},
-                    {"tornado": [0.2, 0.2], "hail": [0.2, 0.2], "wind": [0.2, 0.2]},
+                    {
+                        "tornado": [0.2, 0.2],
+                        "hail": [0.2, 0.2],
+                        "wind": [0.2, 0.2],
+                        "thunder": [0.2, 0.2],
+                    },
                 )
                 reset_model_cache()
 

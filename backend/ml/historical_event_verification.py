@@ -30,7 +30,6 @@ DEFAULT_ENH_PLUS_EVENT_DATES = (
     date(2026, 4, 14),
     date(2026, 4, 15),
     date(2026, 4, 17),
-    date(2026, 4, 18),
     date(2026, 4, 23),
     date(2026, 4, 24),
     date(2026, 4, 25),
@@ -41,10 +40,16 @@ DEFAULT_ENH_PLUS_EVENT_DATES = (
     date(2026, 5, 17),
     date(2026, 5, 18),
 )
-EVENT_WINDOW_START_HOUR_UTC = 17
-EVENT_WINDOW_END_HOUR_UTC = 4
+EVENT_WINDOW_START_HOUR_UTC = 12
+EVENT_WINDOW_END_HOUR_UTC = 12
 EVENT_CYCLE_HOUR_UTC = 0
 ENH_PLUS_MIN_ORDINAL = SPC_RISK_LABELS.index("ENH")
+MODEL_IDENTITY_KEYS = (
+    "version",
+    "artifactType",
+    "featureSchemaVersion",
+    "featureSchemaHash",
+)
 
 
 @dataclass(frozen=True)
@@ -154,6 +159,20 @@ def event_slug(event_date: date) -> str:
     first_hour = window.forecast_hours[0]
     last_hour = window.forecast_hours[-1]
     return f"{event_date.isoformat()}-hrrr{EVENT_CYCLE_HOUR_UTC:02d}z-f{first_hour:02d}-f{last_hour:02d}"
+
+
+def artifact_uses_model(
+    artifact_index: Mapping[str, Any],
+    expected_model: Mapping[str, Any],
+) -> bool:
+    artifact_model = artifact_index.get("model")
+    if not isinstance(artifact_model, Mapping):
+        return False
+    return all(
+        bool(expected_model.get(key))
+        and artifact_model.get(key) == expected_model.get(key)
+        for key in MODEL_IDENTITY_KEYS
+    )
 
 
 def risk_ordinal(label: Any) -> int:

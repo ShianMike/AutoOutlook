@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.ml.gridded_outlook import SPC_RISK_LABELS  # noqa: E402
 from backend.ml.historical_event_verification import (  # noqa: E402
     DEFAULT_ENH_PLUS_EVENT_DATES,
+    artifact_uses_model,
     event_slug,
     event_window_for_date,
     fetch_spc_daily_storm_reports,
@@ -41,6 +42,7 @@ from backend.ml.merged_outlook import merge_cycles_for_spc_window  # noqa: E402
 
 ARTIFACT_ROOT = PROJECT_ROOT / "backend" / "artifacts" / "historical_enh_plus"
 OUTPUT_PATH = PROJECT_ROOT / "src" / "data" / "historicalEnhPlusVerification.ts"
+MODEL_METADATA_PATH = PROJECT_ROOT / "backend" / "models" / "metadata.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,19 +66,29 @@ def main() -> None:
         if args.event_date
         else list(DEFAULT_ENH_PLUS_EVENT_DATES)
     )
-    events = [build_event_payload(event_date, artifact_root) for event_date in event_dates]
+    expected_model = read_json(MODEL_METADATA_PATH)
+    events = [
+        build_event_payload(event_date, artifact_root, expected_model)
+        for event_date in event_dates
+    ]
     write_typescript(output_path, events)
     print(f"Wrote {output_path.relative_to(PROJECT_ROOT)} with {len(events)} verification event(s).")
 
 
-def build_event_payload(event_date: date, artifact_root: Path) -> dict[str, Any]:
+def build_event_payload(
+    event_date: date,
+    artifact_root: Path,
+    expected_model: Mapping[str, Any],
+) -> dict[str, Any]:
     window = event_window_for_date(event_date)
     source_dir = resolve_source_dir(event_date, artifact_root)
+    source_index = read_json(source_dir / "index.json", default={})
+    validate_source_artifact(source_dir, source_index, window.forecast_hours, expected_model)
     spc_geojson = read_json(source_dir / "spc_day1_cat.geojson")
     spc_label, spc_ordinal = max_spc_category(spc_geojson)
     spc_source = read_json(source_dir / "spc_source.json", default={})
     spc_hazards = load_or_fetch_spc_hazard_outlooks(source_dir, spc_source)
-    source_index = read_json(source_dir / "index.json", default={})
+    source_model = source_index.get("model") if isinstance(source_index.get("model"), Mapping) else {}
     merged = generate_event_merge(source_dir, event_date, window, spc_geojson, spc_source)
     summary = merged["summary"]
     risk_polygons = merged["riskPolygons"]
@@ -98,7 +110,7 @@ def build_event_payload(event_date: date, artifact_root: Path) -> dict[str, Any]
             "verificationForecastHours": list(window.forecast_hours),
             "mergedCycles": [f"HRRR 00Z {event_date.strftime('%Y%m%d')}"],
             "mergeMethod": "maximum",
-            "verificationGridSource": "shared_merged_outlook_generator_event_00z_f17_f28",
+            "verificationGridSource": "shared_merged_outlook_generator_event_00z_f12_f36",
             "spcDay1Url": spc_source.get("day1Url"),
             "spcGeojsonZipUrl": spc_source.get("geojsonZipUrl"),
             "spcFetchedAtISO": spc_source.get("fetchedAtISO"),
@@ -109,6 +121,10 @@ def build_event_payload(event_date: date, artifact_root: Path) -> dict[str, Any]
             "gridStride": int_value(source_index.get("gridStride")),
             "tileStride": int_value(merged_tile.get("stride") or source_index.get("tileStride")),
             "tileShape": merged_tile.get("shape") or [],
+            "model": dict(source_model),
+            "modelVersion": source_model.get("version"),
+            "featureSchemaVersion": source_model.get("featureSchemaVersion"),
+            "trainingRows": int_value(source_model.get("trainingRows")),
             "leakageGuard": "Official SPC outlook and storm reports were fetched only after AutoOutlook prediction artifacts were generated.",
         }
     )
@@ -171,18 +187,36 @@ def generate_event_merge(
 
 
 def resolve_source_dir(event_date: date, artifact_root: Path) -> Path:
-    legacy_slug = f"{event_date.isoformat()}-hrrr00z-f17-f30"
     candidates = [
         artifact_root / event_slug(event_date),
         artifact_root / f"{event_slug(event_date)}_complete",
-        artifact_root / legacy_slug,
-        artifact_root / f"{legacy_slug}_complete",
     ]
     for candidate in candidates:
         if (candidate / "hours").exists() and (candidate / "spc_day1_cat.geojson").exists():
             return candidate
     tried = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(f"No local historical event artifacts found for {event_date}: {tried}")
+
+
+def validate_source_artifact(
+    source_dir: Path,
+    source_index: Mapping[str, Any],
+    forecast_hours: tuple[int, ...],
+    expected_model: Mapping[str, Any],
+) -> None:
+    ready = {int(value) for value in source_index.get("readyForecastHours", [])}
+    missing = sorted(set(forecast_hours) - ready)
+    if source_index.get("status") != "complete" or missing:
+        raise RuntimeError(
+            f"Historical source {source_dir} is incomplete; missing forecast hours: {missing}"
+        )
+    if not artifact_uses_model(source_index, expected_model):
+        source_model = source_index.get("model")
+        source_version = source_model.get("version") if isinstance(source_model, Mapping) else None
+        raise RuntimeError(
+            f"Historical source {source_dir} uses model {source_version!r}; "
+            f"expected {expected_model.get('version')!r}"
+        )
 
 
 def load_or_fetch_reports(source_dir: Path, event_date: date) -> list[Mapping[str, Any]]:

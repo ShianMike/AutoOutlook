@@ -1,11 +1,13 @@
 {
-  "version": "xgb-hazards-20260610T084455Z",
+  "version": "xgb-hazards-20260611T072822Z",
   "artifactType": "xgboost_joblib",
-  "trainedAtISO": "2026-06-10T08:44:55Z",
-  "featureSchemaVersion": "ml-features-v4-parcel-cape-cin",
-  "featureSchemaHash": "7f4a517976a78cf0",
+  "trainedAtISO": "2026-06-11T07:28:22Z",
+  "featureSchemaVersion": "ml-features-v5-location-refc-temporal",
+  "featureSchemaHash": "0cc2a457a6d14132",
   "featureNames": [
     "forecastHour",
+    "sampleLat",
+    "sampleLon",
     "mlcape",
     "mucape",
     "sbcape",
@@ -17,6 +19,7 @@
     "cinMu",
     "cin180",
     "sfcDewpointF",
+    "sfcTempF",
     "pwatIn",
     "lclM",
     "moistureDepthM",
@@ -30,15 +33,33 @@
     "ship",
     "lapseRate700500CPerKm",
     "freezingLevelM",
-    "surfacePressurePa"
+    "surfacePressurePa",
+    "refc",
+    "hgt500",
+    "validHourSin",
+    "validHourCos",
+    "monthSin",
+    "monthCos",
+    "dayOfYearSin",
+    "dayOfYearCos"
   ],
   "hazards": [
     "tornado",
     "hail",
-    "wind"
+    "wind",
+    "thunder"
   ],
   "trainingRows": 849720,
   "trainingInput": "backend\\ml_data\\archive_training\\autooutlook_hrrr_2020_202602_00z_f00_f48.parquet",
+  "hyperparameters": {
+    "n_estimators": 600,
+    "max_depth": 5,
+    "learning_rate": 0.04,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "tree_method": "hist",
+    "calibration": "isotonic"
+  },
   "split": {
     "strategy": "time",
     "testStartDate": "20250101",
@@ -53,11 +74,12 @@
     "trainingRows": 849720,
     "minimumRecommendedRows": 5000,
     "uniqueRunDates": 2251,
-    "duplicateFeatureLabelRows": 595,
+    "duplicateFeatureLabelRows": 0,
     "positiveCounts": {
       "tornado": 10691,
       "hail": 38089,
-      "wind": 73687
+      "wind": 73687,
+      "thunder": 27826
     },
     "experimentalOnly": false,
     "status": "candidate"
@@ -72,10 +94,10 @@
       "trainPositives": 8711,
       "testPositives": 1980,
       "calibrationCv": 3,
-      "average_precision_score": 0.1486279213725285,
-      "brier_score_loss": 0.010780580323712284,
-      "log_loss": 0.04673741263715933,
-      "roc_auc_score": 0.9161966850070538
+      "average_precision_score": 0.19969865011792345,
+      "brier_score_loss": 0.010449140685750355,
+      "log_loss": 0.045385272139332807,
+      "roc_auc_score": 0.9398317132740154
     },
     "hail": {
       "samples": 849720,
@@ -86,10 +108,10 @@
       "trainPositives": 31840,
       "testPositives": 6249,
       "calibrationCv": 3,
-      "average_precision_score": 0.2421540377200296,
-      "brier_score_loss": 0.031681418869121465,
-      "log_loss": 0.11348268387797462,
-      "roc_auc_score": 0.9091798189898547
+      "average_precision_score": 0.44029228608039134,
+      "brier_score_loss": 0.026072545718060596,
+      "log_loss": 0.08967653022323872,
+      "roc_auc_score": 0.9555211877669951
     },
     "wind": {
       "samples": 849720,
@@ -100,10 +122,24 @@
       "trainPositives": 58206,
       "testPositives": 15481,
       "calibrationCv": 3,
-      "average_precision_score": 0.39319027709661203,
-      "brier_score_loss": 0.06750267733788154,
-      "log_loss": 0.226175730978311,
-      "roc_auc_score": 0.8832946142985327
+      "average_precision_score": 0.8259892276111934,
+      "brier_score_loss": 0.032145900087642836,
+      "log_loss": 0.10856165698022252,
+      "roc_auc_score": 0.9795385792296699
+    },
+    "thunder": {
+      "samples": 849720,
+      "positives": 27826,
+      "negatives": 821894,
+      "testSamples": 165972,
+      "trainSamples": 683748,
+      "trainPositives": 18999,
+      "testPositives": 8827,
+      "calibrationCv": 3,
+      "average_precision_score": 0.8012049413773626,
+      "brier_score_loss": 0.02128818237349089,
+      "log_loss": 0.07126792486030238,
+      "roc_auc_score": 0.9830538580753186
     }
   }
 }

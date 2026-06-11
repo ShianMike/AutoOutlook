@@ -52,7 +52,7 @@ export default function App() {
   const activeRegion: ActiveRegion = 'conus';
 
   const [selectedMergedDate, setSelectedMergedDate] = useState<string>('');
-  const [viewType, setViewType] = useState<'hourly' | 'merged'>('hourly');
+  const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
   const [view, setView] = useState<AppView>(() => viewFromHash());
 
@@ -137,18 +137,20 @@ export default function App() {
         />
 
         <main className="w-full min-w-0 flex-1 px-3 py-2 sm:px-4 xl:px-5 flex flex-col gap-3 xl:gap-4">
-          <section id="time-scrubber" className="scroll-mt-4">
-            <ForecastTimeSlider
-              bundle={auto.bundle}
-              index={hour.index}
-              isPlaying={hour.isPlaying}
-              onIndexChange={hour.setIndex}
-              onNext={hour.next}
-              onPrev={hour.prev}
-              onTogglePlay={hour.togglePlay}
-              artifactIndex={outlookArtifacts.artifacts?.incrementalIndex}
-            />
-          </section>
+          {viewType !== 'merged' && (
+            <section id="time-scrubber" className="scroll-mt-4">
+              <ForecastTimeSlider
+                bundle={auto.bundle}
+                index={hour.index}
+                isPlaying={hour.isPlaying}
+                onIndexChange={hour.setIndex}
+                onNext={hour.next}
+                onPrev={hour.prev}
+                onTogglePlay={hour.togglePlay}
+                artifactIndex={outlookArtifacts.artifacts?.incrementalIndex}
+              />
+            </section>
+          )}
 
           <section id="outlook-map" className="scroll-mt-4">
             <OutlookMapPanel
@@ -238,7 +240,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v1.1
+              AutoOutlook · Automated Convective Risk Intelligence · v1.2
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import threading
 from typing import Any, Mapping
@@ -19,7 +20,7 @@ except ImportError:
 import numpy as np
 
 
-from .features import FEATURE_NAMES
+from .features import FEATURE_NAMES, temporal_feature_values
 from .inference import predict_cig_intensity_matrix, predict_ml_hazard_matrix
 from .spc_categories import category_conversion_from_probability_and_cig, category_ordinal
 from backend import metpy_diagnostics as diag
@@ -32,6 +33,8 @@ _MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
 _CATEGORY_VECTORIZATION_METHOD = "marching_squares_cumulative_contours"
 _PROBABILITY_VECTORIZATION_METHOD = "marching_squares_probability_contours"
 _CIG_VECTORIZATION_METHOD = "marching_squares_cig_contours"
+_CIG_MIN_SOURCE_CELLS = {1: 12, 2: 18, 3: 24}
+_CIG_MIN_COMPONENT_CELLS = {1: 6, 2: 8, 3: 10}
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
 _THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
@@ -57,6 +60,8 @@ _SEVERE_KINEMATIC_MIN_SHEAR = 30.0
 
 NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "forecastHour": (0.0, 48.0),
+    "sampleLat": (20.0, 55.0),
+    "sampleLon": (-130.0, -60.0),
     "mlcape": (0.0, 4500.0),
     "mucape": (0.0, 5000.0),
     "sbcape": (0.0, 4500.0),
@@ -68,6 +73,7 @@ NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "cinMu": (-250.0, 0.0),
     "cin180": (-250.0, 0.0),
     "sfcDewpointF": (35.0, 78.0),
+    "sfcTempF": (20.0, 105.0),
     "pwatIn": (0.25, 2.3),
     "lclM": (250.0, 3000.0),
     "moistureDepthM": (700.0, 3800.0),
@@ -82,7 +88,14 @@ NORMALIZATION_LIMITS: dict[str, tuple[float, float]] = {
     "lapseRate700500CPerKm": (4.0, 10.0),
     "freezingLevelM": (0.0, 6000.0),
     "surfacePressurePa": (80000.0, 104000.0),
+    "refc": (-10.0, 75.0),
     "hgt500": (5200.0, 6000.0),
+    "validHourSin": (-1.0, 1.0),
+    "validHourCos": (-1.0, 1.0),
+    "monthSin": (-1.0, 1.0),
+    "monthCos": (-1.0, 1.0),
+    "dayOfYearSin": (-1.0, 1.0),
+    "dayOfYearCos": (-1.0, 1.0),
 }
 
 
@@ -111,6 +124,9 @@ def gridded_features_from_fields(
     forecast_hour: int,
     lats: np.ndarray | None = None,
     lons: np.ndarray | None = None,
+    valid_time_iso: Any = None,
+    run_date: Any = None,
+    run_cycle: Any = None,
 ) -> GriddedFeatures:
     """Convert selected HRRR fields into raw and normalized gridded model features."""
     cape = _field(fields, "cape")
@@ -133,6 +149,13 @@ def gridded_features_from_fields(
     u500 = _field(fields, "u500", u10)
     v500 = _field(fields, "v500", v10)
     hgt500 = _field(fields, "hgt500", np.full(shape, 5700.0))
+    lat_grid, lon_grid = _latlon_feature_grids(lats, lons, shape)
+    temporal = temporal_feature_values(
+        valid_time_iso=valid_time_iso,
+        run_date=run_date,
+        run_cycle=run_cycle,
+        forecast_hour=forecast_hour,
+    )
 
     shear = np.hypot(u500 - u10, v500 - v10) * 1.9438445
     srh01 = np.clip(_field(fields, "srh01", np.maximum(shear - 15.0, 0.0) * 6.0), 0.0, None)
@@ -164,6 +187,8 @@ def gridded_features_from_fields(
 
     raw = {
         "forecastHour": np.full(shape, float(forecast_hour), dtype=float),
+        "sampleLat": lat_grid,
+        "sampleLon": lon_grid,
         "mlcape": np.clip(mlcape, 0.0, None),
         "mucape": np.clip(mucape, 0.0, None),
         "sbcape": np.clip(cape, 0.0, None),
@@ -192,11 +217,18 @@ def gridded_features_from_fields(
         "lapseRate700500CPerKm": comps["lapse_rate_700_500"],
         "freezingLevelM": comps["freezing_level_m"],
         "surfacePressurePa": _field(fields, "surface_pressure", np.full(shape, 101325.0)),
+        "refc": _field(fields, "refc", np.zeros(shape)),
         "hgt500": hgt500,
+        "validHourSin": np.full(shape, temporal["validHourSin"], dtype=float),
+        "validHourCos": np.full(shape, temporal["validHourCos"], dtype=float),
+        "monthSin": np.full(shape, temporal["monthSin"], dtype=float),
+        "monthCos": np.full(shape, temporal["monthCos"], dtype=float),
+        "dayOfYearSin": np.full(shape, temporal["dayOfYearSin"], dtype=float),
+        "dayOfYearCos": np.full(shape, temporal["dayOfYearCos"], dtype=float),
     }
     raw = {key: _finite(raw_value, _default_for(key)) for key, raw_value in raw.items()}
     if "refc" in fields:
-        raw["refc"] = _finite(np.asarray(fields["refc"], dtype=float), 0.0)
+        raw["refcAvailable"] = np.ones(shape, dtype=float)
     normalized = {key: normalize_feature(key, value) for key, value in raw.items()}
     matrix = np.column_stack([raw[name].reshape(-1) for name in FEATURE_NAMES]).astype(float)
     return GriddedFeatures(raw=raw, normalized=normalized, matrix=matrix, shape=shape)
@@ -1194,7 +1226,7 @@ def apply_environmental_probability_caps(
     }
 
     # Convective Initiation Guard: suppress severe hazard probabilities if HRRR predicts no active storm cells (REFC < 15.0 dBZ)
-    if "refc" in features.raw:
+    if "refcAvailable" in features.raw:
         refc_val = features.raw["refc"]
         try:
             from scipy.ndimage import gaussian_filter
@@ -1384,11 +1416,11 @@ def category_grid_from_probabilities(
     )
     category_cap = _model_category_cap(model_metadata)
     severe_ord = np.minimum(severe_ord, category_cap)
-    tstm_mask = (
-        (np.maximum(features.raw["sbcape"], features.raw["mucape"]) >= 250.0)
-        & (features.raw["sfcDewpointF"] >= 48.0)
-        & (features.raw["cin"] > -225.0)
+    thunder_probability = np.asarray(
+        probabilities.get("thunder", np.zeros(severe_ord.shape)),
+        dtype=float,
     )
+    tstm_mask = thunder_probability >= _THUNDER_PROBABILITY_THRESHOLDS[0]
     return np.where(severe_ord > 0, severe_ord, np.where(tstm_mask, 1, 0)).astype(np.int16)
 
 
@@ -1709,13 +1741,13 @@ def postprocess_category_grid(
             _cap_category_at_most(
                 grid,
                 texas_mexico_border_mask,
-                SPC_RISK_LABELS.index("MRGL"),
+                SPC_RISK_LABELS.index("NONE"),
                 downgraded,
                 "texasMexicoBorder",
             )
             max_category_grid[texas_mexico_border_mask] = np.minimum(
                 max_category_grid[texas_mexico_border_mask],
-                SPC_RISK_LABELS.index("MRGL"),
+                SPC_RISK_LABELS.index("NONE"),
             )
 
         hierarchy_report = _enforce_category_hierarchy(
@@ -1752,11 +1784,22 @@ def risk_polygons_from_grid(
     category_grid: np.ndarray,
     forecast_hour: int,
     valid_time_iso: str,
+    probabilities: Mapping[str, np.ndarray] | None = None,
     min_cells: int = 10,
 ) -> dict[str, Any]:
     lat_grid, lon_grid = _lat_lon_grid(lats, lons, category_grid.shape)
     grid = np.asarray(category_grid, dtype=np.int16)
     regional_max_grid = _regional_strict_max_category_grid(lat_grid, lon_grid)
+    thunder_probability = (
+        np.asarray(probabilities.get("thunder"), dtype=float)
+        if probabilities is not None and probabilities.get("thunder") is not None
+        else None
+    )
+    trained_tstm_mask = (
+        thunder_probability >= _THUNDER_PROBABILITY_THRESHOLDS[0]
+        if thunder_probability is not None and thunder_probability.shape == grid.shape
+        else None
+    )
     features: list[dict[str, Any]] = []
     try:
         from scipy import ndimage
@@ -1764,15 +1807,21 @@ def risk_polygons_from_grid(
         ndimage = None
 
     masks_by_ordinal: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]] = {}
+    source_counts_by_ordinal: dict[int, int] = {}
     for ordinal in range(1, len(SPC_RISK_LABELS)):
-        # SPC-style categorical outlooks are drawn cumulatively: TSTM is the
-        # full thunder area, MRGL is MRGL-or-higher, then higher risks paint on
-        # top. This avoids visible annular grid seams and preserves hierarchy.
-        mask = _clip_mask_to_regional_strictness(grid >= ordinal, ordinal, regional_max_grid)
+        if ordinal == SPC_RISK_LABELS.index("TSTM") and trained_tstm_mask is not None:
+            mask = _clip_mask_to_regional_strictness(trained_tstm_mask, ordinal, regional_max_grid)
+            limit_base = mask
+        else:
+            # SPC-style severe categorical outlooks are drawn cumulatively:
+            # MRGL is MRGL-or-higher, SLGT is SLGT-or-higher, and so on.
+            # The TSTM layer can be overridden by the trained thunder head.
+            mask = _clip_mask_to_regional_strictness(grid >= ordinal, ordinal, regional_max_grid)
+            limit_base = _clip_mask_to_regional_strictness(grid >= max(1, ordinal - 1), ordinal, regional_max_grid)
         if not np.any(mask):
             continue
+        source_counts_by_ordinal[ordinal] = int(np.sum(mask))
         settings = _category_generalization_settings(mask, ordinal, min_cells)
-        limit_base = _clip_mask_to_regional_strictness(grid >= max(1, ordinal - 1), ordinal, regional_max_grid)
         limit_mask = _cartographic_limit_mask(limit_base, ndimage, int(settings["closeIterations"]) + 1)
         if limit_mask is not None:
             limit_mask = _clip_mask_to_regional_strictness(limit_mask, ordinal, regional_max_grid)
@@ -1788,7 +1837,16 @@ def risk_polygons_from_grid(
         mask = _clip_mask_to_regional_strictness(mask, ordinal, regional_max_grid)
         if np.any(mask):
             masks_by_ordinal[ordinal] = (mask, settings)
-    _enforce_cumulative_mask_hierarchy(masks_by_ordinal)
+    if trained_tstm_mask is None:
+        _enforce_cumulative_mask_hierarchy(masks_by_ordinal)
+    else:
+        severe_masks = {
+            ordinal: item
+            for ordinal, item in masks_by_ordinal.items()
+            if ordinal > SPC_RISK_LABELS.index("TSTM")
+        }
+        _enforce_cumulative_mask_hierarchy(severe_masks, minimum_ordinal=SPC_RISK_LABELS.index("MRGL"))
+        masks_by_ordinal.update(severe_masks)
     for ordinal, (mask, _settings) in masks_by_ordinal.items():
         mask &= regional_max_grid >= ordinal
 
@@ -1808,7 +1866,8 @@ def risk_polygons_from_grid(
         )
         if not rings:
             continue
-        exact_cell_count = int(np.sum(grid == ordinal))
+        exact_cell_count = source_counts_by_ordinal.get(ordinal, int(np.sum(grid == ordinal)))
+        uses_trained_tstm = ordinal == SPC_RISK_LABELS.index("TSTM") and trained_tstm_mask is not None
         features.append({
             "type": "Feature",
             "geometry": _rings_geometry(rings),
@@ -1823,7 +1882,8 @@ def risk_polygons_from_grid(
                 "componentCount": component_count,
                 "vectorization": {
                     "method": _CATEGORY_VECTORIZATION_METHOD,
-                    "cumulativeMask": True,
+                    "cumulativeMask": not uses_trained_tstm,
+                    "supportSource": "trained_thunder_probability" if uses_trained_tstm else "category_grid",
                     "cartographicGeneralization": True,
                     "smoothingIterations": int(settings["smoothingIterations"]),
                     "simplifyTolerance": float(settings["simplifyTolerance"]),
@@ -1860,7 +1920,7 @@ def hazard_probability_shapes_from_grids(
     tornado_probability = np.asarray(probabilities.get("tornado", np.zeros(grid.shape)), dtype=float)
     hail_probability = np.asarray(probabilities.get("hail", np.zeros(grid.shape)), dtype=float)
     wind_probability = np.asarray(probabilities.get("wind", np.zeros(grid.shape)), dtype=float)
-    thunder_probability = _thunder_probability_from_category_grid(grid, lat_grid, lon_grid)
+    thunder_probability = np.asarray(probabilities.get("thunder", np.zeros(grid.shape)), dtype=float)
     hazard_inputs: dict[str, tuple[np.ndarray, tuple[float, ...], np.ndarray, str]] = {
         "tornado": (
             tornado_probability,
@@ -1883,8 +1943,8 @@ def hazard_probability_shapes_from_grids(
         "thunder": (
             thunder_probability,
             _THUNDER_PROBABILITY_THRESHOLDS,
-            grid >= SPC_RISK_LABELS.index("TSTM"),
-            "category_thunder",
+            _hazard_probability_support_mask(thunder_probability, _THUNDER_PROBABILITY_THRESHOLDS, ndimage),
+            "hazard_probability",
         ),
     }
     for hazard, (probability_grid, thresholds, support_mask, support_source) in hazard_inputs.items():
@@ -1978,6 +2038,7 @@ def cig_shapes_from_grids(
     forecast_hour: int,
     valid_time_iso: str,
     cig_source: str = CIG_SOURCE_ENVIRONMENTAL,
+    hazard_probabilities: Mapping[str, np.ndarray] | None = None,
     min_cells: int = 8,
 ) -> dict[str, Any]:
     """Build CIG hatch overlay polygons from hazard-specific CIG grids."""
@@ -1996,17 +2057,32 @@ def cig_shapes_from_grids(
     features: list[dict[str, Any]] = []
     for hazard in ("tornado", "hail", "wind"):
         grid = np.asarray(cig_grids.get(hazard, np.zeros(shape)), dtype=np.int16)
+        if hazard_probabilities is not None and hazard in hazard_probabilities:
+            hazard_probability = np.asarray(hazard_probabilities[hazard], dtype=float)
+            severe_support = hazard_probability >= _minimum_severe_probability(hazard)
+        else:
+            severe_support = np.ones(shape, dtype=bool)
+        severe_support &= regional_allowed
         max_cig = 2 if hazard == "hail" else 3
         masks_by_level: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]] = {}
         for cig in range(1, max_cig + 1):
-            mask = (grid >= cig) & regional_allowed
+            mask = (grid >= cig) & severe_support
             if not np.any(mask):
                 continue
-            settings = _category_generalization_settings(mask, min(cig + 1, len(SPC_RISK_LABELS) - 1), min_cells)
-            support_mask = (grid >= 1) & regional_allowed
+            source_cell_count = int(np.sum(mask))
+            minimum_source_cells = _minimum_cig_source_cells(cig)
+            if source_cell_count < minimum_source_cells:
+                continue
+            minimum_component_cells = max(int(min_cells), _minimum_cig_component_cells(cig))
+            settings = _category_generalization_settings(
+                mask,
+                min(cig + 1, len(SPC_RISK_LABELS) - 1),
+                minimum_component_cells,
+            )
+            support_mask = (grid >= 1) & severe_support
             limit_mask = _cartographic_limit_mask(support_mask, ndimage, int(settings["closeIterations"]) + 1)
             if limit_mask is not None:
-                limit_mask &= regional_allowed
+                limit_mask &= severe_support
             generalized = _generalize_mask(
                 mask,
                 ndimage,
@@ -2016,7 +2092,7 @@ def cig_shapes_from_grids(
                 max_hole_cells=int(settings["maximumHoleCells"]),
                 limit_mask=limit_mask,
             )
-            generalized &= regional_allowed
+            generalized &= severe_support
             if np.any(generalized):
                 masks_by_level[cig] = (generalized, settings)
 
@@ -2037,14 +2113,14 @@ def cig_shapes_from_grids(
                 lon_grid,
                 lat_grid,
                 mask,
-                min_cells=1 if ndimage is not None else int(settings["minimumComponentCells"]),
+                min_cells=max(_minimum_cig_component_cells(cig), int(settings["minimumComponentCells"])),
                 ndimage=ndimage,
                 smoothing_iterations=int(settings["smoothingIterations"]),
                 simplify_tolerance=float(settings["simplifyTolerance"]),
             )
             if not rings:
                 continue
-            source_cell_count = int(np.sum((grid >= cig) & regional_allowed))
+            source_cell_count = int(np.sum((grid >= cig) & severe_support))
             features.append({
                 "type": "Feature",
                 "geometry": _rings_geometry(rings),
@@ -2069,6 +2145,7 @@ def cig_shapes_from_grids(
                         "tendrilPruneIterations": int(settings["tendrilPruneIterations"]),
                         "maximumHoleCells": int(settings["maximumHoleCells"]),
                         "minimumComponentCells": int(settings["minimumComponentCells"]),
+                        "minimumSourceCells": int(_minimum_cig_source_cells(cig)),
                     },
                 },
             })
@@ -2238,14 +2315,12 @@ def probability_tile(
     cats = np.where(strict_tile_mask, 0, cats)
     for hazard, grid in tile_probabilities.items():
         tile_probabilities[hazard] = np.where(strict_tile_mask, 0.0, grid)
-    regional_cap = SPC_RISK_LABELS.index("MRGL")
     regional_cap_mask = np.zeros(cats.shape, dtype=bool)
     for mask in _strict_category_cap_masks(tile_lats, tile_lons).values():
         regional_cap_mask |= mask
-    cats = np.where(regional_cap_mask & (cats > regional_cap), regional_cap, cats)
+    cats = np.where(regional_cap_mask, SPC_RISK_LABELS.index("NONE"), cats)
     for hazard, grid in tile_probabilities.items():
-        regional_caps = _category_probability_cap_grid(hazard, np.full(cats.shape, regional_cap, dtype=np.int16))
-        tile_probabilities[hazard] = np.where(regional_cap_mask, np.minimum(grid, regional_caps), grid)
+        tile_probabilities[hazard] = np.where(regional_cap_mask, 0.0, grid)
     return {
         "forecastHour": forecast_hour,
         "validTimeISO": valid_time_iso,
@@ -2423,20 +2498,6 @@ def _enforce_category_hierarchy(
                 added_by_ordinal[target] += int(np.sum(candidate))
                 grid[candidate] = target
 
-    # Add a general thunder ring around severe areas where the environmental
-    # support exists. This keeps MRGL from appearing as a free-floating island.
-    severe_seed = np.asarray(grid >= SPC_RISK_LABELS.index("MRGL"), dtype=bool)
-    if np.any(severe_seed):
-        candidate = (
-            ndimage.binary_dilation(severe_seed, structure=structure, iterations=1)
-            & eligible
-            & (grid < SPC_RISK_LABELS.index("TSTM"))
-            & (max_grid >= SPC_RISK_LABELS.index("TSTM"))
-        )
-        if np.any(candidate):
-            added_by_ordinal[SPC_RISK_LABELS.index("TSTM")] += int(np.sum(candidate))
-            grid[candidate] = SPC_RISK_LABELS.index("TSTM")
-
     # Repair any remaining direct adjacency skips after regional clipping/caps.
     for _ in range(4):
         passes += 1
@@ -2457,17 +2518,6 @@ def _enforce_category_hierarchy(
                 added_by_ordinal[target] += int(np.sum(candidate))
                 grid[candidate] = target
                 changed = True
-        severe_seed = np.asarray(grid >= SPC_RISK_LABELS.index("MRGL"), dtype=bool)
-        candidate = (
-            ndimage.binary_dilation(severe_seed, structure=structure, iterations=1)
-            & eligible
-            & (grid < SPC_RISK_LABELS.index("TSTM"))
-            & (max_grid >= SPC_RISK_LABELS.index("TSTM"))
-        )
-        if np.any(candidate):
-            added_by_ordinal[SPC_RISK_LABELS.index("TSTM")] += int(np.sum(candidate))
-            grid[candidate] = SPC_RISK_LABELS.index("TSTM")
-            changed = True
         if not changed:
             break
 
@@ -2760,8 +2810,9 @@ def _remove_small_mask_components(mask: np.ndarray, ndimage: Any, min_cells: int
 
 def _enforce_cumulative_mask_hierarchy(
     masks_by_ordinal: dict[int, tuple[np.ndarray, dict[str, int | float | bool]]],
+    minimum_ordinal: int = 1,
 ) -> None:
-    for ordinal in range(len(SPC_RISK_LABELS) - 1, 1, -1):
+    for ordinal in range(len(SPC_RISK_LABELS) - 1, max(1, int(minimum_ordinal)), -1):
         current = masks_by_ordinal.get(ordinal)
         lower = masks_by_ordinal.get(ordinal - 1)
         if current is None:
@@ -2811,6 +2862,7 @@ def _mask_polygons(
         rings.extend(component_rings)
         component_count += 1
         cell_count += int(component_cells)
+    rings = [ring for ring in rings if _serialized_ring_area_ok(ring, exterior=True)]
     rings.sort(key=lambda ring: abs(_signed_ring_area(ring[:-1] if ring[0] == ring[-1] else ring)), reverse=True)
     return rings, component_count, cell_count
 
@@ -2818,7 +2870,7 @@ def _mask_polygons(
 def _rings_geometry(rings: list[list[list[float]]]) -> dict[str, Any]:
     rings = [
         ring for ring in rings
-        if _serialized_ring_area_ok(ring)
+        if _serialized_ring_area_ok(ring, exterior=True)
     ]
     if len(rings) == 1:
         return {"type": "Polygon", "coordinates": [rings[0]]}
@@ -3244,12 +3296,12 @@ def _geojson_geometry_from_shapely(
 
 def _geojson_polygon_rings(polygon: Any) -> list[list[list[float]]]:
     exterior = _normalize_exterior_ring(_round_ring_coords(list(polygon.exterior.coords)))
-    if len(exterior) < 4 or not _serialized_ring_area_ok(exterior):
+    if len(exterior) < 4 or not _serialized_ring_area_ok(exterior, exterior=True):
         return []
     rings = [exterior]
     for interior in polygon.interiors:
         hole = _normalize_interior_ring(_round_ring_coords(list(interior.coords)))
-        if len(hole) >= 4 and _serialized_ring_area_ok(hole):
+        if len(hole) >= 4 and _serialized_ring_area_ok(hole, exterior=False):
             rings.append(hole)
     return rings
 
@@ -3270,11 +3322,48 @@ def _normalize_interior_ring(coords: list[list[float]]) -> list[list[float]]:
     return out
 
 
-def _serialized_ring_area_ok(coords: list[list[float]]) -> bool:
+def _serialized_ring_area_ok(
+    coords: list[list[float]],
+    exterior: bool | None = None,
+) -> bool:
     if len(coords) < 4:
         return False
     ring = coords[:-1] if coords[0] == coords[-1] else coords
-    return abs(_signed_ring_area(ring)) >= _MIN_SERIALIZED_RING_AREA_DEG2
+    if abs(_signed_ring_area(ring)) < _MIN_SERIALIZED_RING_AREA_DEG2:
+        return False
+    if exterior is None:
+        return True
+    spherical_sum = _spherical_ring_area_sum(ring)
+    return spherical_sum > 0.0 if exterior else spherical_sum < 0.0
+
+
+def _spherical_ring_area_sum(coords: list[list[float]]) -> float:
+    """Return D3-compatible signed spherical area for one open ring."""
+    if len(coords) < 3:
+        return 0.0
+    radians = math.pi / 180.0
+    lambda0 = float(coords[0][0]) * radians
+    phi0 = float(coords[0][1]) * radians / 2.0 + math.pi / 4.0
+    cos_phi0 = math.cos(phi0)
+    sin_phi0 = math.sin(phi0)
+    area_sum = 0.0
+    for lon, lat in coords[1:] + coords[:1]:
+        lambda1 = float(lon) * radians
+        phi1 = float(lat) * radians / 2.0 + math.pi / 4.0
+        delta_lambda = lambda1 - lambda0
+        sign = 1.0 if delta_lambda >= 0.0 else -1.0
+        abs_delta_lambda = sign * delta_lambda
+        cos_phi1 = math.cos(phi1)
+        sin_phi1 = math.sin(phi1)
+        k = sin_phi0 * sin_phi1
+        area_sum += math.atan2(
+            k * sign * math.sin(abs_delta_lambda),
+            cos_phi0 * cos_phi1 + k * math.cos(abs_delta_lambda),
+        )
+        lambda0 = lambda1
+        cos_phi0 = cos_phi1
+        sin_phi0 = sin_phi1
+    return area_sum
 
 
 def normalize_feature(name: str, values: np.ndarray) -> np.ndarray:
@@ -3294,6 +3383,27 @@ def _field(fields: Mapping[str, np.ndarray], key: str, default: np.ndarray | flo
     return np.full(first.shape, float(default), dtype=float)
 
 
+def _latlon_feature_grids(
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    shape: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    if lats is None or lons is None:
+        return np.zeros(shape, dtype=float), np.zeros(shape, dtype=float)
+
+    lat_arr = np.asarray(lats, dtype=float)
+    lon_arr = np.asarray(lons, dtype=float)
+    if lat_arr.ndim == 1 and lon_arr.ndim == 1:
+        lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
+    else:
+        lat_grid = lat_arr
+        lon_grid = lon_arr
+
+    if lat_grid.shape != shape or lon_grid.shape != shape:
+        return np.zeros(shape, dtype=float), np.zeros(shape, dtype=float)
+    return lat_grid, lon_grid
+
+
 def _finite(values: np.ndarray, default: float) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     return np.where(np.isfinite(arr), arr, default)
@@ -3303,12 +3413,15 @@ def _default_for(name: str) -> float:
     defaults = {
         "sfcDewpointF": 50.0,
         "sfcTempF": 58.0,
+        "sampleLat": 0.0,
+        "sampleLon": 0.0,
         "u10": 0.0,
         "v10": 0.0,
         "pwatIn": 0.8,
         "lclM": 1500.0,
         "moistureDepthM": 1500.0,
         "surfacePressurePa": 101325.0,
+        "refc": 0.0,
         "hgt500": 5700.0,
     }
     return defaults.get(name, 0.0)
@@ -3395,6 +3508,18 @@ def _category_probability_cap_grid(hazard: str, category_grid: np.ndarray) -> np
     for ordinal, cap in caps_by_ordinal.items():
         out = np.where(category_grid == ordinal, cap, out)
     return out
+
+
+def _minimum_severe_probability(hazard: str) -> float:
+    return 0.02 if hazard == "tornado" else 0.05
+
+
+def _minimum_cig_source_cells(cig: int) -> int:
+    return _CIG_MIN_SOURCE_CELLS.get(int(cig), _CIG_MIN_SOURCE_CELLS[3])
+
+
+def _minimum_cig_component_cells(cig: int) -> int:
+    return _CIG_MIN_COMPONENT_CELLS.get(int(cig), _CIG_MIN_COMPONENT_CELLS[3])
 
 
 def _int_value(value: Any, default: int = 0) -> int:
@@ -3596,9 +3721,8 @@ def _southern_us_border_lat(lon_grid: np.ndarray) -> np.ndarray:
     return _interp_anchor(lon_grid, anchors)
 
 
-def _texas_mexico_border_mrgl_cap_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
-    # Cap to MRGL south of the US-Mexico border (in Mexico)
-    # and in a very narrow 0.05 degree border confidence degradation band.
+def _texas_mexico_border_none_mask(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+    # Hide generated outlooks south of the US-Mexico border.
     border_lat = _southern_us_border_lat(lon_grid)
     return lat_grid < (border_lat - 0.05)
 
@@ -3614,7 +3738,7 @@ def _strict_offshore_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[s
 
 def _strict_category_cap_masks(lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict[str, np.ndarray]:
     return {
-        "texasMexicoBorder": _texas_mexico_border_mrgl_cap_mask(lat_grid, lon_grid),
+        "texasMexicoBorder": _texas_mexico_border_none_mask(lat_grid, lon_grid),
     }
 
 

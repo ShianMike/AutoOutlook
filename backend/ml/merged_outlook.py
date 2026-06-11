@@ -12,6 +12,10 @@ import requests
 
 from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
 from backend.ml.gridded_outlook import (
+    _clean_projected_geometry,
+    _drop_small_projected_parts,
+    _projected_component_count,
+    _smooth_display_projected_geometry,
     constrain_hazard_probability_shapes_to_risk_support,
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
@@ -393,6 +397,7 @@ def merge_cycles_for_spc_window(
             "wind": [],
             "thunder": [],
         }
+        cig_feature_collections: list[Mapping[str, Any]] = []
         contributing_hours: list[dict[str, Any]] = []
         merged_cycles: list[str] = []
         merged_cycle_time_isos: list[str] = []
@@ -448,6 +453,9 @@ def merge_cycles_for_spc_window(
                         h_grid = np.asarray(grid_data, dtype=float)
                         if h_grid.shape == grid_shape:
                             hazard_grids_by_name[hazard].append(h_grid)
+                cig_shapes = tile.get("cigShapes")
+                if isinstance(cig_shapes, Mapping):
+                    cig_feature_collections.append(cig_shapes)
 
                 contributing_hours.append({
                     "cycle": cycle_label,
@@ -485,6 +493,7 @@ def merge_cycles_for_spc_window(
             merged_grid,
             forecast_hour=0,
             valid_time_iso=valid_time_str,
+            probabilities=merged_probs,
         )
 
         merged_hazard_shapes = hazard_probability_shapes_from_grids(
@@ -498,6 +507,10 @@ def merge_cycles_for_spc_window(
         merged_hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(
             merged_hazard_shapes,
             merged_risk_polygons,
+        )
+        merged_cig_shapes = _merge_cig_shape_collections(
+            cig_feature_collections,
+            valid_time_str,
         )
 
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
@@ -521,6 +534,7 @@ def merge_cycles_for_spc_window(
             _write_json(output_dir / "spc_day1_cat.geojson", spc_geojson)
             _write_json(output_dir / "merged_risk_polygons.geojson", merged_risk_polygons)
             _write_json(output_dir / "merged_hazard_probability_shapes.geojson", merged_hazard_shapes)
+            _write_json(output_dir / "merged_cig_shapes.geojson", merged_cig_shapes)
 
             # Generate the merged probability tile that contains everything
             # (matches structure of OutlookProbabilityTile)
@@ -540,6 +554,7 @@ def merge_cycles_for_spc_window(
                 },
                 "riskShapes": merged_risk_polygons,
                 "hazardProbabilityShapes": merged_hazard_shapes,
+                "cigShapes": merged_cig_shapes,
             }
             _write_json(output_dir / "merged_probability_tile.json", merged_probability_tile)
 
@@ -584,6 +599,246 @@ def _tile_grid_payload(tile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray,
     if category_grid.ndim != 2 or lats.shape != category_grid.shape or lons.shape != category_grid.shape:
         raise ValueError("probability tile is missing matching category/lats/lons grids")
     return lats, lons, category_grid
+
+
+def _merge_cig_shape_collections(
+    collections: list[Mapping[str, Any]],
+    valid_time_iso: str,
+) -> dict[str, Any]:
+    """Dissolve hourly CIG overlays into one geometry per hazard and level."""
+    from shapely.geometry import mapping, shape
+    from shapely.ops import unary_union
+
+    grouped: dict[tuple[str, int], dict[str, Any]] = {}
+    for collection in collections:
+        for feature in collection.get("features", []):
+            if not isinstance(feature, Mapping):
+                continue
+            properties = feature.get("properties")
+            geometry = feature.get("geometry")
+            if not isinstance(properties, Mapping) or not isinstance(geometry, Mapping):
+                continue
+            hazard = str(properties.get("hazard") or "").lower()
+            try:
+                cig = int(properties.get("cig"))
+                source_hour = int(properties.get("forecastHour"))
+                source_geometry = shape(geometry)
+            except (TypeError, ValueError):
+                continue
+            if hazard not in {"tornado", "hail", "wind"} or cig < 1 or source_geometry.is_empty:
+                continue
+            group = grouped.setdefault(
+                (hazard, cig),
+                {
+                    "geometries": [],
+                    "properties": dict(properties),
+                    "sourceForecastHours": set(),
+                },
+            )
+            group["geometries"].append(source_geometry)
+            group["sourceForecastHours"].add(source_hour)
+
+    hazard_order = {"tornado": 0, "hail": 1, "wind": 2}
+    features: list[dict[str, Any]] = []
+    for (hazard, cig), group in sorted(
+        grouped.items(),
+        key=lambda item: (hazard_order.get(item[0][0], 99), item[0][1]),
+    ):
+        merged_geometry = unary_union(group["geometries"])
+        if not merged_geometry.is_valid:
+            merged_geometry = merged_geometry.buffer(0)
+        if merged_geometry.is_empty:
+            continue
+        merged_geometry, corridor_metadata = _generalize_merged_cig_corridor(
+            merged_geometry,
+            cig,
+        )
+        if merged_geometry.is_empty:
+            continue
+        source_hours = sorted(group["sourceForecastHours"])
+        properties = group["properties"]
+        vectorization = dict(properties.get("vectorization") or {})
+        vectorization.update(corridor_metadata)
+        features.append({
+            "type": "Feature",
+            "geometry": mapping(merged_geometry),
+            "properties": {
+                **properties,
+                "hazard": hazard,
+                "cig": cig,
+                "label": f"{hazard.upper()} CIG{cig}",
+                "forecastHour": 0,
+                "validTimeISO": valid_time_iso,
+                "sourceForecastHours": source_hours,
+                "sourceFeatureCount": len(group["geometries"]),
+                "vectorization": vectorization,
+            },
+        })
+
+    features = _spc_cumulative_cig_features(features)
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _spc_cumulative_cig_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build nested SPC-style CIG contours with non-overlapping hatch areas."""
+    if not features:
+        return features
+
+    from pyproj import Transformer
+    from shapely.geometry import mapping, shape
+    from shapely.ops import transform as shapely_transform
+    from shapely.ops import unary_union
+
+    to_projected = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform
+    to_lonlat = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True).transform
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for feature in features:
+        hazard = str(feature.get("properties", {}).get("hazard") or "")
+        grouped.setdefault(hazard, []).append(feature)
+
+    output: list[dict[str, Any]] = []
+    for group_features in grouped.values():
+        projected_by_cig: dict[int, Any] = {}
+        feature_by_cig: dict[int, dict[str, Any]] = {}
+        for feature in group_features:
+            try:
+                cig = int(feature.get("properties", {}).get("cig"))
+                projected = _clean_projected_geometry(
+                    shapely_transform(to_projected, shape(feature.get("geometry"))),
+                )
+            except (TypeError, ValueError):
+                continue
+            if projected.is_empty:
+                continue
+            projected_by_cig[cig] = projected
+            feature_by_cig[cig] = feature
+
+        cumulative_by_cig: dict[int, Any] = {}
+        higher_cumulative = None
+        for cig in sorted(projected_by_cig, reverse=True):
+            projected = projected_by_cig[cig]
+            if higher_cumulative is not None and not higher_cumulative.is_empty:
+                projected = _clean_projected_geometry(
+                    unary_union([projected, higher_cumulative]),
+                )
+            if projected.is_empty:
+                continue
+            cumulative_by_cig[cig] = projected
+            higher_cumulative = projected
+
+        ordered_cigs = sorted(cumulative_by_cig)
+        for position, cig in enumerate(ordered_cigs):
+            cumulative = cumulative_by_cig[cig]
+            immediate_higher = (
+                cumulative_by_cig[ordered_cigs[position + 1]]
+                if position + 1 < len(ordered_cigs)
+                else None
+            )
+            hatch = (
+                _clean_projected_geometry(cumulative.difference(immediate_higher))
+                if immediate_higher is not None and not immediate_higher.is_empty
+                else cumulative
+            )
+            hatch = _drop_small_projected_parts(hatch, 1.0)
+            if hatch.is_empty:
+                hatch = cumulative
+
+            feature = feature_by_cig[cig]
+            props = dict(feature.get("properties", {}))
+            vectorization = dict(props.get("vectorization") or {})
+            vectorization.update({
+                "displayGeometry": "spc_cumulative_contour",
+                "hatchGeometry": "spc_exclusive_hatch",
+                "displayProjection": "EPSG:5070",
+            })
+            props["vectorization"] = vectorization
+            props["componentCount"] = _projected_component_count(cumulative)
+            props["displayAreaKm2"] = round(float(cumulative.area) / 1_000_000.0, 1)
+            props["hatchGeometry"] = mapping(shapely_transform(to_lonlat, hatch))
+            output.append({
+                **feature,
+                "geometry": mapping(shapely_transform(to_lonlat, cumulative)),
+                "properties": props,
+            })
+
+    hazard_order = {"tornado": 0, "hail": 1, "wind": 2}
+    return sorted(
+        output,
+        key=lambda feature: (
+            hazard_order.get(str(feature.get("properties", {}).get("hazard")), 99),
+            int(feature.get("properties", {}).get("cig", 0)),
+        ),
+    )
+
+
+def _generalize_merged_cig_corridor(geometry: Any, cig: int) -> tuple[Any, dict[str, Any]]:
+    """Join nearby hourly CIG areas into a clean merged-outlook corridor."""
+    from pyproj import Transformer
+    from shapely.ops import transform as shapely_transform
+
+    settings = {
+        1: {
+            "joinMeters": 55_000.0,
+            "smoothMeters": 12_000.0,
+            "simplifyMeters": 3_500.0,
+            "minimumAreaKm2": 1_500.0,
+        },
+        2: {
+            "joinMeters": 55_000.0,
+            "smoothMeters": 10_000.0,
+            "simplifyMeters": 3_000.0,
+            "minimumAreaKm2": 900.0,
+        },
+        3: {
+            "joinMeters": 45_000.0,
+            "smoothMeters": 8_000.0,
+            "simplifyMeters": 2_500.0,
+            "minimumAreaKm2": 500.0,
+        },
+    }.get(
+        int(cig),
+        {
+            "joinMeters": 45_000.0,
+            "smoothMeters": 8_000.0,
+            "simplifyMeters": 2_500.0,
+            "minimumAreaKm2": 500.0,
+        },
+    )
+    to_projected = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform
+    to_lonlat = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True).transform
+    projected = _clean_projected_geometry(shapely_transform(to_projected, geometry))
+    if projected.is_empty:
+        return geometry, {}
+
+    join_m = settings["joinMeters"]
+    joined = _clean_projected_geometry(
+        projected.buffer(join_m, quad_segs=10, join_style=1).buffer(
+            -join_m,
+            quad_segs=10,
+            join_style=1,
+        ),
+    )
+    if not joined.is_empty:
+        projected = joined
+    projected = _smooth_display_projected_geometry(
+        projected,
+        smooth_m=settings["smoothMeters"],
+        simplify_m=settings["simplifyMeters"],
+    )
+    projected = _drop_small_projected_parts(
+        projected,
+        settings["minimumAreaKm2"] * 1_000_000.0,
+    )
+    if projected.is_empty:
+        return geometry, {}
+
+    return shapely_transform(to_lonlat, projected), {
+        "mergedCorridorGeometry": "joined_hourly_corridor",
+        "mergedCorridorJoinKm": round(join_m / 1_000.0, 1),
+        "mergedCorridorSmoothKm": round(settings["smoothMeters"] / 1_000.0, 1),
+        "mergedCorridorMinimumAreaKm2": round(settings["minimumAreaKm2"], 1),
+        "mergedCorridorProjection": "EPSG:5070",
+    }
 
 
 def _read_index(path: Path) -> dict[str, Any] | None:

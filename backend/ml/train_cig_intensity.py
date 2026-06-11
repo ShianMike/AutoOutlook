@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.ml.add_intensity_labels import DEFAULT_OUTPUT as DEFAULT_INPUT
-from backend.ml.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, feature_schema_hash
+from backend.ml.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, ensure_feature_frame_columns, feature_schema_hash
 from backend.ml.reports import INTENSITY_LABEL_KEYS
 from backend.ml.train_xgboost import _group_shuffle_split, _metric_block, _require_training_deps, _time_based_split
 
@@ -48,7 +48,7 @@ def train(
     n_estimators: int,
 ) -> dict[str, Any]:
     joblib, pd, CalibratedClassifierCV, train_test_split, _, StratifiedKFold, XGBClassifier, metric_fns = _require_training_deps()
-    frame = pd.read_parquet(input_path)
+    frame = ensure_feature_frame_columns(pd.read_parquet(input_path))
 
     missing_features = [name for name in FEATURE_NAMES if name not in frame.columns]
     if missing_features:

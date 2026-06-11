@@ -79,7 +79,6 @@ INCREMENTAL_COMPLETE_ARTIFACT_DIR = (
     else None
 )
 CONUS_MAX_INCREMENTAL_FORECAST_HOUR = 48
-ECMWF_MAX_INCREMENTAL_FORECAST_HOUR = 90
 FULL_INCREMENTAL_FORECAST_HOURS = set(range(CONUS_MAX_INCREMENTAL_FORECAST_HOUR + 1))
 JSON_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_JSON_CACHE_SECONDS", "300"))
 PNG_ARTIFACT_CACHE_SECONDS = int(os.environ.get("AUTOOUTLOOK_PNG_CACHE_SECONDS", "900"))
@@ -159,35 +158,13 @@ def _live_build_enabled() -> bool:
 
 
 def _request_model() -> str:
-    try:
-        model = (request.args.get("model") or "").strip().lower()
-        if model:
-            return model
-        region = request.args.get("region")
-        if region == "conus":
-            return "hrrr"
-    except RuntimeError:
-        pass
     return "hrrr"
-
-
-def _artifact_model_from_index(index: dict | None) -> str:
-    if not isinstance(index, dict):
-        return _request_model()
-    policy_model = str(((index.get("cycleDetection") or {}).get("cyclePolicy") or {}).get("model") or "")
-    cycle_label = str(index.get("cycle") or "")
-    token = f"{policy_model} {cycle_label}".upper()
-    if "ECMWF" in token:
-        return "ecmwf"
-    return _request_model()
 
 
 def _incremental_artifact_dir_for_model(model: str | None) -> Path:
     base_dir = INCREMENTAL_ARTIFACT_DIR
     candidates: list[Path] = []
-    if model == "ecmwf":
-        candidates.append(INCREMENTAL_ARTIFACT_DIR.parent / "latest_incremental_ecmwf")
-    elif model == "hrrr":
+    if model == "hrrr":
         candidates.append(INCREMENTAL_ARTIFACT_DIR.parent / "latest_incremental_hrrr")
     for target in candidates:
         if target.exists():
@@ -653,7 +630,7 @@ def _parse_trend_forecast_hour(value: str | None) -> int:
         hour = int(value) if value else 12
     except (TypeError, ValueError):
         return 12
-    return max(0, min(ECMWF_MAX_INCREMENTAL_FORECAST_HOUR, hour))
+    return max(0, min(CONUS_MAX_INCREMENTAL_FORECAST_HOUR, hour))
 
 
 def _outlook_trends_payload(
@@ -730,12 +707,11 @@ def _outlook_trends_payload(
 
 
 def _inactive_trends_payload(reason: str, forecast_hour: int, model: str | None) -> dict:
-    model_label = "ECMWF" if model == "ecmwf" else "HRRR"
     return {
         "active": False,
         "trendCategory": "UNAVAILABLE",
         "trendLabel": "Previous Cycle Pending",
-        "comparisonHeadline": f"{model_label} cycle trend pending",
+        "comparisonHeadline": "HRRR cycle trend pending",
         "forecastHour": int(forecast_hour),
         "previousCycleCached": False,
         "reason": reason,
@@ -930,7 +906,7 @@ def _trend_spatial_shift(previous_region: dict, current_region: dict, model: str
     bearing = _bearing_degrees(previous_lat, previous_lon, current_lat, current_lon)
     direction = _compass_direction(bearing)
     distance_km = distance_miles * 1.609344
-    unit_label = f"{distance_km:.0f} km" if model == "ecmwf" else f"{distance_miles:.0f} mi"
+    unit_label = f"{distance_miles:.0f} mi"
     if distance_miles < 5:
         summary = "Risk center held nearly stationary"
     else:
@@ -1155,19 +1131,13 @@ def _artifact_forecast_bundle():
     cycle_time_iso = index.get("cycleTimeISO") or hours[0]["validTimeISO"]
     fetched_at_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    model = _artifact_model_from_index(index)
     cities_list = CONUS_CITIES
-    index_model = str(((index.get("cycleDetection") or {}).get("cyclePolicy") or {}).get("model") or "").upper()
-    if "ECMWF" in index_model or model == "ecmwf":
-        model_label = "ECMWF"
-    else:
-        model_label = "HRRR"
 
     return {
         "cycle": index.get("cycle") or "Generated HRRR",
         "issuedAtISO": cycle_time_iso,
         "providerNotes": (
-            f"Generated {model_label}/XGBoost artifacts served from the published artifact bucket; "
+            "Generated HRRR/XGBoost artifacts served from the published artifact bucket; "
             "on-demand bundle generation is disabled for web stability."
         ),
         "latencyMs": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
@@ -1189,7 +1159,7 @@ def _ready_forecast_hours(index: dict) -> list[int]:
             hours.append(int(value))
         except (TypeError, ValueError):
             continue
-    return sorted({hour for hour in hours if 0 <= hour <= ECMWF_MAX_INCREMENTAL_FORECAST_HOUR})
+    return sorted({hour for hour in hours if 0 <= hour <= CONUS_MAX_INCREMENTAL_FORECAST_HOUR})
 
 
 def _valid_iso_from_cycle(index: dict, forecast_hour: int) -> str | None:
@@ -1661,7 +1631,7 @@ def _coerce_forecast_hours(value: object) -> list[int]:
             hours.append(int(item))
         except (TypeError, ValueError):
             continue
-    return sorted({hour for hour in hours if 0 <= hour <= ECMWF_MAX_INCREMENTAL_FORECAST_HOUR})
+    return sorted({hour for hour in hours if 0 <= hour <= CONUS_MAX_INCREMENTAL_FORECAST_HOUR})
 
 
 def _merged_incremental_risk_polygons() -> dict | None:

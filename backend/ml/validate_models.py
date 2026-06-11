@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .features import FEATURE_NAMES, HAZARD_KEYS, feature_schema_hash
+from .features import FEATURE_NAMES, HAZARD_KEYS, ensure_feature_frame_columns, feature_schema_hash
 from .inference import METADATA_FILE, MODEL_DIR
 
 CATEGORY_THRESHOLDS = {
@@ -30,8 +30,11 @@ CATEGORY_THRESHOLDS = {
         (0.15, "SLGT"),
         (0.05, "MRGL"),
     ),
+    "thunder": (
+        (0.10, "TSTM"),
+    ),
 }
-CATEGORY_ORDER = ("TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
+CATEGORY_ORDER = ("NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
 RELIABILITY_BINS = (0.0, 0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60, 1.0)
 
 
@@ -39,7 +42,7 @@ def category_for_probability(hazard: str, probability: float) -> str:
     for threshold, category in CATEGORY_THRESHOLDS[hazard]:
         if probability >= threshold:
             return category
-    return "TSTM"
+    return "NONE" if hazard == "thunder" else "TSTM"
 
 
 def _clean_pairs(y_true: Sequence[Any], y_prob: Sequence[Any]) -> tuple[list[int], list[float]]:
@@ -246,7 +249,7 @@ def _predict_probabilities(model: Any, x: Any) -> list[float]:
 
 
 def validate(input_path: Path, models_dir: Path) -> dict[str, Any]:
-    frame = _read_frame(input_path)
+    frame = ensure_feature_frame_columns(_read_frame(input_path))
     missing_features = [name for name in FEATURE_NAMES if name not in frame.columns]
     missing_labels = [f"label_{hazard}" for hazard in HAZARD_KEYS if f"label_{hazard}" not in frame.columns]
     if missing_features or missing_labels:

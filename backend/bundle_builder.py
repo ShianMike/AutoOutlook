@@ -327,6 +327,9 @@ def _ingredients_at_point(
     composites: dict[str, float],
     front_override: str | None = None,
     boundary_kind: str | None = None,
+    surface_pressure_pa: float | None = None,
+    hgt500_m: float | None = None,
+    refc_dbz: float | None = None,
 ) -> dict[str, Any]:
     sbcape = max(0.0, surface_cape) if np.isfinite(surface_cape) else 0.0
     mlcape = max(0.0, mlcape) if np.isfinite(mlcape) else sbcape * 0.85
@@ -338,6 +341,7 @@ def _ingredients_at_point(
     cape180 = max(0.0, cape180) if np.isfinite(cape180) else mlcape
     cin180 = min(0.0, cin180) if np.isfinite(cin180) else mlcin
     td_F = (td2m_K - 273.15) * 9 / 5 + 32 if np.isfinite(td2m_K) else 50.0
+    t2m_F = (t2m_K - 273.15) * 9 / 5 + 32 if np.isfinite(t2m_K) else 58.0
     pwat_in = (pwat_kg_m2 / 25.4) if np.isfinite(pwat_kg_m2) else 0.8
     front = front_override or "none"
     cap = _classify_cap(mlcin)
@@ -359,6 +363,7 @@ def _ingredients_at_point(
         "cinMu": float(mucin),
         "cin180": float(cin180),
         "sfcDewpointF": float(td_F),
+        "sfcTempF": float(t2m_F),
         "pwatIn": float(pwat_in),
         "lclM": lcl_m,
         "moistureDepthM": float(max(800, pwat_in * 1500)),
@@ -380,6 +385,15 @@ def _ingredients_at_point(
         ),
         "freezingLevelM": float(
             np.nan_to_num(composites.get("freezing_level_m", 0.0), nan=0.0)
+        ),
+        "surfacePressurePa": float(
+            np.nan_to_num(surface_pressure_pa if surface_pressure_pa is not None else np.nan, nan=101325.0)
+        ),
+        "hgt500": float(
+            np.nan_to_num(hgt500_m if hgt500_m is not None else np.nan, nan=5700.0)
+        ),
+        "refc": float(
+            np.nan_to_num(refc_dbz if refc_dbz is not None else np.nan, nan=0.0)
         ),
         "mixingRatioGKg": float(
             np.nan_to_num(composites.get("mixing_ratio_gkg", 0.0), nan=0.0)
@@ -697,7 +711,14 @@ def _hour_payload_from_fields(
         comps_scalar,
         _surface_boundary_signal(surface_boundary),
         surface_boundary.get("kind") if surface_boundary else None,
+        surface_pressure_pa=_array_point(surface_pressure_field, i_lat, i_lon, np.nan),
+        hgt500_m=_array_point(hgt500_field, i_lat, i_lon, np.nan),
     )
+    ing.update({
+        "sampleLat": float(model_region["centerLat"]),
+        "sampleLon": float(model_region["centerLon"]),
+        "validTimeISO": valid_iso,
+    })
     payload = {
         "forecastHour": h,
         "validTimeISO": valid_iso,

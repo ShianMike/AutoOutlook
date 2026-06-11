@@ -23,13 +23,13 @@ const CAPABILITIES: { tag: string; title: string; body: string; accent: string }
   {
     tag: 'C-01',
     title: 'Categorical Outlook Map',
-    body: 'Stepped risk polygons rendered in the SPC convention. TSTM → HIGH bands as concentric annuli, never solid disks. Auto-zoomed to the region of greatest convective interest.',
+    body: 'Stepped risk polygons rendered in the SPC convention. TSTM now follows trained general-thunder probability support when available, while MRGL → HIGH stay ordered as concentric annuli.',
     accent: 'bg-risk-slgt',
   },
   {
     tag: 'C-02',
     title: 'Hazard Probability Board',
-    body: 'Tornado, hail, damaging wind, and flooding probabilities resolved per forecast hour. SIG-severe overlays activate when probabilities clear the 10% EF2+ / 2"+ / 74 mph thresholds.',
+    body: 'Trained tornado, hail, damaging-wind, and general-thunder probabilities resolved per forecast hour. Non-thunder maps show one labeled CIG corridor with a two-line overlay style.',
     accent: 'bg-signal-red',
   },
   {
@@ -47,7 +47,7 @@ const CAPABILITIES: { tag: string; title: string; body: string; accent: string }
   {
     tag: 'C-05',
     title: '2026 Risk Archive',
-    body: 'Static historical ENH+ verification maps for March through May 2026. Each case reuses the dashboard outlook map, SPC hazard outlook layers, and tornado / hail / wind reports.',
+    body: 'Static 21-event ENH+ verification archive for March through May 2026, regenerated with trained v1.2 models across each 12Z-to-12Z Day 1 window. April 18 was removed from the selector.',
     accent: 'bg-signal-lime',
   },
   {
@@ -69,7 +69,7 @@ const PIPELINE_STEPS = [
     code: '01',
     label: 'INGEST',
     title: 'Latest model cycle',
-    body: 'Each cycle pulls only what the severe-weather ingredient deck actually needs — CAPE, CIN, moisture, shear vectors. No bloated downloads.',
+    body: 'Each cycle pulls the severe-weather fields used by model schema v5: CAPE, CIN, temperature, moisture, shear, reflectivity, pressure, and 500-mb height.',
   },
   {
     code: '02',
@@ -81,13 +81,13 @@ const PIPELINE_STEPS = [
     code: '03',
     label: 'INFER',
     title: 'Hazard probability',
-    body: 'Tornado, hail, and damaging-wind probability heads run only when the activation gate clears. Inactive heads surface a reason string — never a silent fallback.',
+    body: 'Four calibrated XGBoost heads produce tornado, hail, damaging-wind, and general-thunder probabilities from 37 spatial, environmental, and time-season inputs.',
   },
   {
     code: '04',
     label: 'PUBLISH',
     title: 'Outlook bundle',
-    body: 'SPC-style risk polygons, probability tiles, preview images, and run metadata are assembled into a complete bundle for forecast hours f00–f48. The site only shows bundles that are already finished.',
+    body: 'SPC-style risk polygons, probability tiles, one-label CIG overlays, preview images, and run metadata are assembled into a complete bundle for forecast hours f00–f48.',
   },
   {
     code: '05',
@@ -300,7 +300,7 @@ function Hero() {
           <div className="landing-hero-item flex flex-wrap items-center gap-2" style={revealDelay(60)}>
             <RetroBadge tone="ink">[ SYSTEM 01 / OUTLOOK ]</RetroBadge>
             <RetroBadge tone="lime" pulse>OPERATIONAL</RetroBadge>
-            <RetroBadge tone="paper">v1.1 · 00Z LOCK</RetroBadge>
+            <RetroBadge tone="paper">v1.2 · MODEL V5</RetroBadge>
           </div>
 
           <h1 className="landing-hero-item landing-title font-display font-extrabold uppercase leading-[0.85] tracking-[-0.04em] text-ink"
@@ -318,10 +318,12 @@ function Hero() {
           <p className="landing-hero-item max-w-[640px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg"
              style={revealDelay(290)}>
             AutoOutlook ingests the latest extended-range model cycle, derives the severe-weather ingredient deck,
-            runs gated tornado / hail / wind probability heads, and publishes
+            runs trained tornado / hail / wind / thunder probability heads, and publishes
             SPC-style risk polygons + probability tiles for forecast hours <span className="font-mono font-bold text-ink">f00–f48</span>.
-            v1.1 locks Merged D1 to the selected day's 00Z run, preserves that cache through later cycles,
-            and keeps the 2026 ENH+ risk archive with official SPC hazard outlook layers and storm-report verification maps.
+            v1.2 retrains four calibrated XGBoost models on 849,720 archive rows and expands the feature
+            schema to 37 inputs, including location, temperature, reflectivity, 500-mb height, and time-season cycles.
+            Trained thunder now drives TSTM, while cleaner CIG corridors and Merged Outlook improve the map workflow.
+            The 2026 Risk Archive is regenerated with the same trained models across each full 12Z-to-12Z Day 1 window.
           </p>
 
           <div className="landing-hero-item flex flex-wrap items-center gap-3 pt-2" style={revealDelay(370)}>
@@ -357,7 +359,7 @@ function Hero() {
           <dl className="landing-hero-item mt-6 grid grid-cols-2 gap-px border-[3px] border-ink bg-ink sm:grid-cols-4" style={revealDelay(450)}>
             <Stat label="FORECAST HOURS" value="f00–f48" sub="hourly resolution" />
             <Stat label="PROVIDER CHAIN" value="3-tier" sub="live · fallback · mock" />
-            <Stat label="HAZARD HEADS" value="3 + 1" sub="tor · hail · wind · flood" />
+            <Stat label="HAZARD HEADS" value="4 trained" sub="tor · hail · wind · tstm" />
             <Stat label="SPC QC" value="3 modes" sub="auto · SPC · overlay" />
           </dl>
         </div>
@@ -653,8 +655,11 @@ function HowItWorks() {
         <div className="landing-reveal" data-landing-reveal="true">
           <SectionHead tag="PIPELINE / 04" title="From raw model data to verified outlook." dark />
           <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-paper/70 sm:text-lg">
-            AutoOutlook is a hands-off pipeline. The outlook is generated automatically on a fixed cadence;
-            visitors never trigger expensive forecast work — by design. The site only ever shows fully-published bundles.
+            AutoOutlook converts each fixed HRRR cycle into a finished f00–f48 artifact. Model schema v5
+            combines 37 environmental, spatial, and time-season inputs across four trained hazard heads;
+            thunder feeds TSTM, severe hazards feed MRGL and higher categories, and CIG is published as one
+            clean labeled overlay on the hazard maps. The same artifact path now backs the 21 curated
+            12Z-to-12Z historical archive cases.
           </p>
         </div>
 
@@ -875,7 +880,7 @@ function TechStack() {
           <p className="mt-4 max-w-[760px] font-sans text-base leading-relaxed text-ink/70 sm:text-lg">
             AutoOutlook is built on widely-deployed primitives so the operations posture stays simple.
             Vite + React + TypeScript power the interactive console. Every outlook ships as a pre-built bundle
-            — risk polygons, probability tiles, and metadata land together with no live computation per visitor.
+            — risk polygons, probability tiles, QC metadata, and archive records land together as versioned artifacts.
           </p>
         </div>
 
@@ -931,7 +936,7 @@ function FinalCTA() {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v1.1</RetroBadge>
+            <RetroBadge tone="amber">v1.2</RetroBadge>
           </div>
 
           <h2
@@ -945,7 +950,7 @@ function FinalCTA() {
           <p className="mt-6 max-w-[640px] font-sans text-base leading-relaxed text-paper/75 sm:text-lg">
             No sign-up. No tour. The dashboard auto-loads the latest cycle, renders the outlook, and gives the
             SPC agreement panel enough detail to see where AutoOutlook matched, missed, or overcalled the Day 1.
-            The 2026 archive keeps the historical ENH+ verification maps available from the same map controls.
+            The 2026 archive keeps 21 retrained full-day ENH+ verification maps available from the same map controls.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -1030,7 +1035,7 @@ function LandingFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.1
+          AutoOutlook · Automated Convective Risk Intelligence · v1.2
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>

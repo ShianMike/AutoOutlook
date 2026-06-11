@@ -66,6 +66,16 @@ BOOTSTRAP_MODELS: dict[str, dict[str, Any]] = {
             term("forecastHour", -0.04, 48.0),
         ],
     },
+    "thunder": {
+        "type": TERM_MODEL_TYPE,
+        "intercept": -2.5,
+        "terms": [
+            term("mucape", 0.85, 3000.0),
+            term("sbcape", 0.45, 2000.0),
+            term("cin", 0.25, transform="inverse_range", min=-200.0, max=-25.0),
+            term("sfcDewpointF", 0.35, transform="inverse_range", min=40.0, max=75.0),
+        ],
+    },
 }
 
 

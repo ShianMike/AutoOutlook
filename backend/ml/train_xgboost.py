@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, feature_schema_hash
+from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, HAZARD_KEYS, ensure_feature_frame_columns, feature_schema_hash
 
 DEFAULT_MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 MIN_RECOMMENDED_TRAINING_ROWS = 5000
@@ -125,9 +125,11 @@ def train(
     split_strategy: str,
     test_start_date: str,
     n_estimators: int,
+    max_depth: int,
 ) -> dict[str, Any]:
     joblib, pd, CalibratedClassifierCV, train_test_split, GroupShuffleSplit, StratifiedKFold, XGBClassifier, metric_fns = _require_training_deps()
     frame = pd.read_parquet(input_path)
+    frame = ensure_feature_frame_columns(frame)
 
     missing_features = [name for name in FEATURE_NAMES if name not in frame.columns]
     if missing_features:
@@ -165,7 +167,7 @@ def train(
         scale_pos_weight = max(1.0, float((len(y_train) - int(y_train.sum())) / max(1, int(y_train.sum()))))
         base = XGBClassifier(
             n_estimators=n_estimators,
-            max_depth=4,
+            max_depth=max_depth,
             learning_rate=0.04,
             subsample=0.85,
             colsample_bytree=0.85,
@@ -205,6 +207,15 @@ def train(
         "hazards": list(HAZARD_KEYS),
         "trainingRows": int(len(frame)),
         "trainingInput": str(input_path),
+        "hyperparameters": {
+            "n_estimators": int(n_estimators),
+            "max_depth": int(max_depth),
+            "learning_rate": 0.04,
+            "subsample": 0.85,
+            "colsample_bytree": 0.85,
+            "tree_method": "hist",
+            "calibration": "isotonic",
+        },
         "split": split_metadata,
         "datasetQuality": quality,
         "metrics": metrics,
@@ -221,7 +232,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-start-date", default="20250101")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--n-estimators", type=int, default=300)
+    parser.add_argument("--n-estimators", type=int, default=600)
+    parser.add_argument("--max-depth", type=int, default=5)
     return parser.parse_args()
 
 
@@ -235,6 +247,7 @@ def main() -> None:
         args.split_strategy,
         args.test_start_date,
         args.n_estimators,
+        args.max_depth,
     )
     print(json.dumps({
         "modelsDir": str(args.models_dir),

@@ -799,7 +799,7 @@ export function useMergedD1Artifacts(
         ]);
 
         const probabilityTiles: OutlookProbabilityTiles = {
-          cycle: 'Merged D1',
+          cycle: 'Merged Outlook',
           hours: [
             {
               forecastHour: 0,
@@ -811,7 +811,7 @@ export function useMergedD1Artifacts(
 
         const metadata: OutlookArtifactMetadata = {
           generatedAtISO: new Date().toISOString(),
-          cycle: 'Merged D1 Outlook',
+          cycle: 'Merged Outlook',
           spcVerification: verification,
           mode: 'full',
         };

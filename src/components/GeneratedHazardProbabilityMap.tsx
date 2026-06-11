@@ -39,6 +39,7 @@ interface GeneratedHazardProbabilityMapProps {
   stormReports?: SpcStormReport[];
   comparisonMode?: SpcComparisonMode;
   spcHazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection | null;
+  cigOverlayEnabled?: boolean;
 }
 
 export function hasGeneratedHazardTile(
@@ -61,6 +62,7 @@ export default function GeneratedHazardProbabilityMap({
   stormReports = [],
   comparisonMode = 'auto',
   spcHazardProbabilityShapes = null,
+  cigOverlayEnabled = false,
 }: GeneratedHazardProbabilityMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
@@ -97,8 +99,20 @@ export default function GeneratedHazardProbabilityMap({
     [tile, hazard],
   );
   const [showCigOverlay, setShowCigOverlay] = useState(true);
-  const hasCigOverlay = Boolean(cigCollection?.features.length);
-  const visibleCigCollection = showCigOverlay ? cigCollection : undefined;
+  const hasCigOverlay = cigOverlayEnabled && Boolean(cigCollection?.features.length);
+  const visibleCigCollection = hasCigOverlay && showCigOverlay ? cigCollection : undefined;
+  const visibleCigHatchCollection = useMemo(
+    () => visibleCigCollection
+      ? {
+          ...visibleCigCollection,
+          features: visibleCigCollection.features.map((feature) => ({
+            ...feature,
+            geometry: feature.geometry,
+          })),
+        }
+      : undefined,
+    [visibleCigCollection],
+  );
   const spcFeatureCollection = useMemo(
     () => spcHazardShapesToFeatureCollection(spcHazardProbabilityShapes, hazard),
     [hazard, spcHazardProbabilityShapes],
@@ -269,14 +283,8 @@ export default function GeneratedHazardProbabilityMap({
           style={{ width: '100%', height: '100%' }}
         >
           <defs>
-            <pattern id="generated-hazard-cig-dashedDiagonal" patternUnits="userSpaceOnUse" width="12" height="12">
-              <path d="M-3 12 L12 -3 M3 15 L15 3" stroke="#111111" strokeWidth="1.6" strokeDasharray="5 4" />
-            </pattern>
-            <pattern id="generated-hazard-cig-solidDiagonal" patternUnits="userSpaceOnUse" width="10" height="10">
-              <path d="M-3 10 L10 -3 M2 13 L13 2" stroke="#111111" strokeWidth="1.55" />
-            </pattern>
-            <pattern id="generated-hazard-cig-cross" patternUnits="userSpaceOnUse" width="12" height="12">
-              <path d="M-3 12 L12 -3 M3 15 L15 3 M-3 0 L12 15 M3 -3 L15 9" stroke="#111111" strokeWidth="1.35" />
+            <pattern id="generated-hazard-cig" patternUnits="userSpaceOnUse" width="22" height="22">
+              <path d="M-5 22 L22 -5 M6 27 L27 6" stroke="#111111" strokeWidth="1.05" strokeOpacity={0.74} />
             </pattern>
           </defs>
           <Geographies geography={geoUrl}>
@@ -397,30 +405,61 @@ export default function GeneratedHazardProbabilityMap({
             </Geographies>
           )}
 
-          {showAutoLayer && visibleCigCollection && visibleCigCollection.features.length > 0 && (
-            <Geographies geography={visibleCigCollection}>
+          {showAutoLayer && visibleCigHatchCollection && visibleCigHatchCollection.features.length > 0 && (
+            <Geographies geography={visibleCigHatchCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
-                  const pattern = String(geo.properties.hatchPattern || 'dashedDiagonal');
-                  const fill = `url(#generated-hazard-cig-${pattern})`;
+                  const fill = 'url(#generated-hazard-cig)';
                   const cigStyle = {
                     fill,
-                    fillOpacity: 0.72,
-                    stroke: '#111111',
-                    strokeWidth: 0.55,
-                    strokeOpacity: 0.78,
+                    fillOpacity: 0.86,
+                    stroke: 'none',
+                    strokeWidth: 0,
+                    strokeOpacity: 0,
                     outline: 'none',
                     pointerEvents: 'none' as const,
                   };
                   return (
                     <Geography
-                      key={`generated-hazard-cig-${hazard}-${geo.properties.cig}-${geo.rsmKey ?? index}`}
+                      key={`generated-hazard-cig-${hazard}-${geo.rsmKey ?? index}`}
                       geography={geo}
                       tabIndex={-1}
                       style={{
                         default: cigStyle,
                         hover: cigStyle,
                         pressed: cigStyle,
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {showAutoLayer && visibleCigHatchCollection && visibleCigHatchCollection.features.length > 0 && (
+            <Geographies geography={visibleCigHatchCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  const contourStyle = {
+                    fill: 'none',
+                    fillOpacity: 0,
+                    stroke: '#111111',
+                    strokeWidth: 0.8,
+                    strokeOpacity: 0.62,
+                    strokeLinecap: 'round' as const,
+                    strokeLinejoin: 'round' as const,
+                    outline: 'none',
+                    pointerEvents: 'none' as const,
+                  };
+                  return (
+                    <Geography
+                      key={`generated-hazard-cig-contour-${hazard}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: contourStyle,
+                        hover: contourStyle,
+                        pressed: contourStyle,
                       }}
                     />
                   );
@@ -648,37 +687,12 @@ export default function GeneratedHazardProbabilityMap({
                 <span className="text-ink">{item.label}</span>
               </div>
             ))}
-          {cfg.sigThreshold !== undefined && (
-              <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
-                <span
-                  className="inline-block w-3 h-2 border-[1.5px] shrink-0"
-                  style={{ background: '#1a1a1a', borderColor: '#cc1f1f' }}
-                  aria-hidden
-                />
-                <span className="text-ink">SIG</span>
-              </div>
-            )}
           </div>
           {hasCigOverlay && showCigOverlay && showAutoLayer && (
             <div className="mt-1 border-t-[1px] border-ink/20 pt-1">
-              <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
-                CIG Overlay
-              </div>
-              <div className="grid grid-cols-1 gap-y-0.5">
-                <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
-                  <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px,transparent_6.5px,transparent_11px)]" aria-hidden />
-                  <span>CIG1 dashed</span>
-                </div>
-                <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
-                  <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
-                  <span>CIG2 solid</span>
-                </div>
-                {hazard !== 'hail' && (
-                  <div className="flex items-center gap-1 font-mono text-[8px] font-bold leading-none">
-                    <span className="inline-block h-2.5 w-4 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px),repeating-linear-gradient(45deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
-                    <span>CIG3 cross</span>
-                  </div>
-                )}
+              <div className="flex items-center gap-1.5 font-mono text-[9px] font-bold leading-none">
+                <span className="inline-block h-3.5 w-6 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
+                <span>CIG</span>
               </div>
             </div>
           )}

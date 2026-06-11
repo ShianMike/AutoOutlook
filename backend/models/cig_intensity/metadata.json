@@ -1,9 +1,9 @@
 {
-  "version": "xgb-cig-intensity-20260610T094213Z",
+  "version": "xgb-cig-intensity-20260610T130122Z",
   "artifactType": "xgboost_joblib",
-  "trainedAtISO": "2026-06-10T09:42:13Z",
-  "featureSchemaVersion": "ml-features-v4-parcel-cape-cin",
-  "featureSchemaHash": "7f4a517976a78cf0",
+  "trainedAtISO": "2026-06-10T13:01:22Z",
+  "featureSchemaVersion": "ml-features-v5-spatial-temporal",
+  "featureSchemaHash": "f2bd66ea450bf62e",
   "featureNames": [
     "forecastHour",
     "mlcape",
@@ -30,7 +30,16 @@
     "ship",
     "lapseRate700500CPerKm",
     "freezingLevelM",
-    "surfacePressurePa"
+    "surfacePressurePa",
+    "sampleLat",
+    "sampleLon",
+    "month",
+    "dayOfYearSin",
+    "dayOfYearCos",
+    "sfcTempF",
+    "hgt500",
+    "mixingRatioGKg",
+    "torComp"
   ],
   "targets": {
     "tornado_ef2_plus": {
@@ -76,7 +85,7 @@
   },
   "trainingRows": 849720,
   "trainingInput": "C:\\Users\\shian\\OneDrive\\Desktop\\AutoOutlook-git\\backend\\ml_data\\archive_training\\autooutlook_hrrr_2020_202602_00z_f00_f48_intensity.parquet",
-  "splitStrategy": "stratified",
+  "splitStrategy": "time",
   "datasetQuality": {
     "trainingRows": 849720,
     "uniqueRunDates": 2251,
@@ -93,66 +102,32 @@
   },
   "metrics": {
     "tornado_ef2_plus": {
-      "skipped": false,
+      "skipped": true,
+      "reason": "not enough train/test positives for a held-out binary classifier",
       "samples": 849720,
       "positives": 1266,
       "negatives": 848454,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 949,
-      "testPositives": 317,
-      "calibrationCv": 3,
-      "target": {
-        "hazard": "tornado",
-        "cig": 1,
-        "threshold": "EF2+"
-      },
-      "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
-      },
-      "average_precision_score": 0.03509359801968326,
-      "brier_score_loss": 0.001461393757278593,
-      "log_loss": 0.008275780420919287,
-      "roc_auc_score": 0.9436387033213548
+      "trainPositives": 1266,
+      "testPositives": 0
     },
     "tornado_ef3_plus": {
-      "skipped": false,
+      "skipped": true,
+      "reason": "not enough train/test positives for a held-out binary classifier",
       "samples": 849720,
       "positives": 245,
       "negatives": 849475,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 184,
-      "testPositives": 61,
-      "calibrationCv": 3,
-      "target": {
-        "hazard": "tornado",
-        "cig": 2,
-        "threshold": "EF3+"
-      },
-      "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
-      },
-      "average_precision_score": 0.03136643804985313,
-      "brier_score_loss": 0.00028416739761555115,
-      "log_loss": 0.001878598248599385,
-      "roc_auc_score": 0.9706908227861049
+      "trainPositives": 245,
+      "testPositives": 0
     },
     "hail_2in_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 6592,
       "negatives": 843128,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 4944,
-      "testPositives": 1648,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 5299,
+      "testPositives": 1293,
       "calibrationCv": 3,
       "target": {
         "hazard": "hail",
@@ -160,25 +135,29 @@
         "threshold": "2.00in+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.12375405171364065,
-      "brier_score_loss": 0.00714117625391329,
-      "log_loss": 0.031192160264819933,
-      "roc_auc_score": 0.9396272236773779
+      "average_precision_score": 0.09699317122463286,
+      "brier_score_loss": 0.00734872572529289,
+      "log_loss": 0.03333206291643066,
+      "roc_auc_score": 0.9401891716997423
     },
     "hail_3_5in_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 708,
       "negatives": 849012,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 531,
-      "testPositives": 177,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 584,
+      "testPositives": 124,
       "calibrationCv": 3,
       "target": {
         "hazard": "hail",
@@ -186,25 +165,29 @@
         "threshold": "3.50in+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.029678507045879203,
-      "brier_score_loss": 0.0008172677890308798,
-      "log_loss": 0.004672101040186917,
-      "roc_auc_score": 0.9655570405651437
+      "average_precision_score": 0.01168416973137144,
+      "brier_score_loss": 0.0007570050574619929,
+      "log_loss": 0.005689415134010414,
+      "roc_auc_score": 0.9373889626490484
     },
     "wind_56kt_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 11247,
       "negatives": 838473,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 8435,
-      "testPositives": 2812,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 8100,
+      "testPositives": 3147,
       "calibrationCv": 3,
       "target": {
         "hazard": "wind",
@@ -212,25 +195,29 @@
         "threshold": "56kt+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.09490392094241665,
-      "brier_score_loss": 0.012363442249423703,
-      "log_loss": 0.053557168855857,
-      "roc_auc_score": 0.8987691296124154
+      "average_precision_score": 0.1681272438853659,
+      "brier_score_loss": 0.01699091889306629,
+      "log_loss": 0.06689660458845872,
+      "roc_auc_score": 0.9320149220270807
     },
     "wind_65kt_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 2989,
       "negatives": 846731,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 2242,
-      "testPositives": 747,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 1985,
+      "testPositives": 1004,
       "calibrationCv": 3,
       "target": {
         "hazard": "wind",
@@ -238,25 +225,29 @@
         "threshold": "65kt+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.03463656606083136,
-      "brier_score_loss": 0.003436842050488213,
-      "log_loss": 0.018300913045102753,
-      "roc_auc_score": 0.9157775549318677
+      "average_precision_score": 0.04415354545177731,
+      "brier_score_loss": 0.005928631897870688,
+      "log_loss": 0.032801730882661036,
+      "roc_auc_score": 0.9090232681368992
     },
     "wind_74kt_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 843,
       "negatives": 848877,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 632,
-      "testPositives": 211,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 587,
+      "testPositives": 256,
       "calibrationCv": 3,
       "target": {
         "hazard": "wind",
@@ -264,25 +255,29 @@
         "threshold": "74kt+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.01588956857311759,
-      "brier_score_loss": 0.000983477472135554,
-      "log_loss": 0.006249480399026794,
-      "roc_auc_score": 0.9316733056473964
+      "average_precision_score": 0.008389268502948737,
+      "brier_score_loss": 0.0015527848804588167,
+      "log_loss": 0.01239061440989085,
+      "roc_auc_score": 0.8723669537605
     },
     "wind_83kt_plus": {
       "skipped": false,
       "samples": 849720,
       "positives": 243,
       "negatives": 849477,
-      "trainSamples": 637290,
-      "testSamples": 212430,
-      "trainPositives": 182,
-      "testPositives": 61,
+      "trainSamples": 683748,
+      "testSamples": 165972,
+      "trainPositives": 185,
+      "testPositives": 58,
       "calibrationCv": 3,
       "target": {
         "hazard": "wind",
@@ -290,15 +285,19 @@
         "threshold": "83kt+"
       },
       "split": {
-        "strategy": "stratified",
-        "testSize": 0.25,
-        "trainRows": 637290,
-        "testRows": 212430
+        "strategy": "time",
+        "testStartDate": "20250101",
+        "trainRows": 683748,
+        "testRows": 165972,
+        "trainRunDateMin": "20200101",
+        "trainRunDateMax": "20241231",
+        "testRunDateMin": "20250101",
+        "testRunDateMax": "20260228"
       },
-      "average_precision_score": 0.008243729356109591,
-      "brier_score_loss": 0.0002860706175598879,
-      "log_loss": 0.0020792980802852522,
-      "roc_auc_score": 0.9351291121878875
+      "average_precision_score": 0.002122707770125872,
+      "brier_score_loss": 0.0003573801762372112,
+      "log_loss": 0.004613418872561792,
+      "roc_auc_score": 0.7982629035482861
     }
   }
 }

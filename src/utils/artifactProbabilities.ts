@@ -1,3 +1,4 @@
+import { geoArea, type GeoPermissibleObjects } from 'd3-geo';
 import type { RiskCategory, Ingredients } from '../types/forecast';
 import { lvlFromProb } from './hazardEngine';
 import type {
@@ -36,6 +37,9 @@ export interface ArtifactCigFeature {
     cig: number;
     label: string;
     hatchPattern: string;
+    sourceCellCount?: number;
+    displayAreaKm2?: number;
+    hatchGeometry?: ArtifactProbabilityFeature['geometry'];
   };
   geometry: { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] };
 }
@@ -76,9 +80,40 @@ export function artifactRiskShapesToFeatureCollection(
 ): OutlookArtifactFeatureCollection | undefined {
   const collection = tile?.riskShapes;
   if (!collection || !Array.isArray(collection.features)) return undefined;
+  const trainedThunderTstm = trainedThunderTstmFeature(tile);
+  const hasTrainedThunderShapes = Array.isArray(tile?.hazardProbabilityShapes?.features);
+  const features = collection.features
+    .filter((feature) => feature.properties.category !== 'TSTM' || !hasTrainedThunderShapes || trainedThunderTstm)
+    .flatMap((feature) => {
+      const sourceGeometry = feature.properties.category === 'TSTM' && trainedThunderTstm
+        ? trainedThunderTstm.geometry
+        : feature.geometry;
+      const geometry = normalizeArtifactGeometry(sourceGeometry);
+      if (!geometry) return [];
+      if (feature.properties.category !== 'TSTM' || !trainedThunderTstm) {
+        return [{ ...feature, geometry }];
+      }
+      return [{
+        ...feature,
+        geometry,
+        properties: {
+          ...feature.properties,
+          cellCount: trainedThunderTstm.properties.cellCount,
+          sourceCellCount: trainedThunderTstm.properties.sourceCellCount,
+          componentCount: trainedThunderTstm.properties.componentCount,
+          displayAreaKm2: trainedThunderTstm.properties.displayAreaKm2,
+          vectorization: {
+            ...(feature.properties.vectorization ?? {}),
+            supportSource: 'trained_thunder_probability',
+            trainedThunderBucket: trainedThunderTstm.properties.bucket,
+            trainedThunderLabel: trainedThunderTstm.properties.label,
+          },
+        },
+      }];
+    });
   return {
     ...collection,
-    features: [...collection.features].sort((a, b) => categoryOrdinal(a.properties.category) - categoryOrdinal(b.properties.category)),
+    features: features.sort((a, b) => categoryOrdinal(a.properties.category) - categoryOrdinal(b.properties.category)),
   };
 }
 
@@ -90,17 +125,21 @@ export function artifactProbabilityShapesToFeatureCollection(
   if (!collection || !Array.isArray(collection.features)) return undefined;
   const features = collection.features
     .filter((feature) => normalizeHazardName(feature.properties.hazard) === hazard)
-    .map((feature): ArtifactProbabilityFeature => ({
-      type: 'Feature',
-      geometry: normalizeArtifactGeometry(feature.geometry),
-      properties: {
-        hazard,
-        probability: Number(feature.properties.probability),
-        bucket: Number(feature.properties.bucket),
-        label: feature.properties.label,
-        color: feature.properties.color,
-      },
-    }))
+    .flatMap((feature): ArtifactProbabilityFeature[] => {
+      const geometry = normalizeArtifactGeometry(feature.geometry);
+      if (!geometry) return [];
+      return [{
+        type: 'Feature',
+        geometry,
+        properties: {
+          hazard,
+          probability: Number(feature.properties.probability),
+          bucket: Number(feature.properties.bucket),
+          label: feature.properties.label,
+          color: feature.properties.color,
+        },
+      }];
+    })
     .sort((a, b) => a.properties.bucket - b.properties.bucket);
   return { type: 'FeatureCollection', features };
 }
@@ -111,23 +150,29 @@ export function artifactCigShapesToFeatureCollection(
 ): ArtifactCigFeatureCollection | undefined {
   const collection: OutlookCigShapeFeatureCollection | undefined = tile?.cigShapes;
   if (!collection || !Array.isArray(collection.features)) return undefined;
-  const features = collection.features
+  const candidates = collection.features
     .filter((feature) => {
       const normalized = normalizeHazardName(String(feature.properties.hazard));
       return normalized !== 'thunder' && (!hazard || normalized === hazard);
     })
-    .map((feature): ArtifactCigFeature => {
+    .filter((feature) => shouldRenderCigFeature(feature));
+  const features = selectSingleCigFeatures(candidates)
+    .flatMap((feature): ArtifactCigFeature[] => {
+      const geometry = normalizeArtifactGeometry(feature.geometry);
+      if (!geometry) return [];
       const normalized = normalizeHazardName(String(feature.properties.hazard)) as ArtifactHazardKey;
-      return {
+      return [{
         type: 'Feature',
-        geometry: normalizeArtifactGeometry(feature.geometry),
+        geometry,
         properties: {
           hazard: normalized,
           cig: Number(feature.properties.cig),
-          label: feature.properties.label,
-          hatchPattern: feature.properties.hatchPattern ?? hatchPatternForCig(Number(feature.properties.cig)),
+          label: 'CIG',
+          hatchPattern: 'solidDiagonal',
+          sourceCellCount: numericProperty(feature.properties.sourceCellCount),
+          displayAreaKm2: numericProperty(feature.properties.displayAreaKm2),
         },
-      };
+      }];
     })
     .sort((a, b) => {
       if (a.properties.hazard !== b.properties.hazard) return a.properties.hazard.localeCompare(b.properties.hazard);
@@ -385,10 +430,74 @@ function hazardColors(hazard: ArtifactHazardKey): string[] {
   return hazard === 'tornado' ? TORNADO_COLORS : SEVERE_COLORS;
 }
 
-function hatchPatternForCig(cig: number): string {
-  if (cig >= 3) return 'cross';
-  if (cig === 2) return 'solidDiagonal';
-  return 'dashedDiagonal';
+function shouldRenderCigFeature(feature: OutlookCigShapeFeatureCollection['features'][number]): boolean {
+  const cig = Number(feature.properties.cig);
+  const sourceCellCount = numericProperty(feature.properties.sourceCellCount);
+  if (sourceCellCount !== undefined) {
+    return sourceCellCount >= minimumSourceCellsForCig(cig);
+  }
+
+  const displayAreaKm2 = numericProperty(feature.properties.displayAreaKm2);
+  if (displayAreaKm2 !== undefined) {
+    return displayAreaKm2 >= minimumDisplayAreaForCig(cig);
+  }
+
+  return true;
+}
+
+function selectSingleCigFeatures(
+  features: OutlookCigShapeFeatureCollection['features'],
+): OutlookCigShapeFeatureCollection['features'] {
+  const byHazard = new Map<ArtifactHazardKey, OutlookCigShapeFeatureCollection['features'][number]>();
+  features.forEach((feature) => {
+    const normalized = normalizeHazardName(String(feature.properties.hazard));
+    if (normalized === 'thunder') return;
+    const hazard = normalized as ArtifactHazardKey;
+    const current = byHazard.get(hazard);
+    if (!current || cigSelectionRank(feature) < cigSelectionRank(current)) {
+      byHazard.set(hazard, feature);
+    }
+  });
+  return [...byHazard.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, feature]) => feature);
+}
+
+function cigSelectionRank(feature: OutlookCigShapeFeatureCollection['features'][number]): number {
+  const cig = Number(feature.properties.cig);
+  return Number.isFinite(cig) ? cig : 99;
+}
+
+function minimumSourceCellsForCig(cig: number): number {
+  if (cig >= 3) return 24;
+  if (cig === 2) return 18;
+  return 12;
+}
+
+function minimumDisplayAreaForCig(cig: number): number {
+  if (cig >= 3) return 5_000;
+  if (cig === 2) return 3_500;
+  return 2_000;
+}
+
+function numericProperty(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : undefined;
+}
+
+function trainedThunderTstmFeature(
+  tile: OutlookProbabilityTile | undefined,
+): OutlookProbabilityShapeFeatureCollection['features'][number] | undefined {
+  const features = tile?.hazardProbabilityShapes?.features;
+  if (!Array.isArray(features)) return undefined;
+  return features
+    .filter((feature) => normalizeHazardName(feature.properties.hazard) === 'thunder')
+    .filter((feature) => {
+      const probability = Number(feature.properties.probability);
+      const bucket = Number(feature.properties.bucket);
+      return probability >= THUNDER_THRESHOLDS[0] || bucket === 0;
+    })
+    .sort((a, b) => Number(a.properties.bucket) - Number(b.properties.bucket))[0];
 }
 
 function normalizeHazardName(hazard: string): GeneratedArtifactHazardKey {
@@ -397,17 +506,22 @@ function normalizeHazardName(hazard: string): GeneratedArtifactHazardKey {
 
 function normalizeArtifactGeometry(
   geometry: OutlookProbabilityShapeFeatureCollection['features'][number]['geometry'],
-): ArtifactProbabilityFeature['geometry'] {
-  if (geometry.type === 'Polygon') {
-    return {
-      ...geometry,
-      coordinates: normalizePolygonRings(geometry.coordinates as number[][][]),
-    };
+): ArtifactProbabilityFeature['geometry'] | undefined {
+  const polygons = geometry.type === 'Polygon'
+    ? [normalizePolygonRings(geometry.coordinates as number[][][])]
+    : (geometry.coordinates as number[][][][]).map((polygon) => normalizePolygonRings(polygon));
+  const renderablePolygons = polygons.filter(isRenderablePolygon);
+  if (renderablePolygons.length === 0) return undefined;
+  if (renderablePolygons.length === 1) {
+    return { type: 'Polygon', coordinates: renderablePolygons[0] };
   }
-  return {
-    ...geometry,
-    coordinates: (geometry.coordinates as number[][][][]).map((polygon) => normalizePolygonRings(polygon)),
-  };
+  return { type: 'MultiPolygon', coordinates: renderablePolygons };
+}
+
+function isRenderablePolygon(rings: number[][][]): boolean {
+  if (!Array.isArray(rings) || rings.length === 0 || rings[0].length < 4) return false;
+  const area = geoArea({ type: 'Polygon', coordinates: rings } as GeoPermissibleObjects);
+  return Number.isFinite(area) && area > 1e-12 && area < 2 * Math.PI;
 }
 
 function normalizePolygonRings(rings: number[][][]): number[][][] {

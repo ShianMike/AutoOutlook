@@ -302,6 +302,7 @@ def run_pipeline(
             aggregate_risk_map_grid,
             forecast_hour=-1,
             valid_time_iso=f"{_valid_iso(cycle, min(successful_hours))}/{_valid_iso(cycle, max(successful_hours))}",
+            probabilities=aggregate_probabilities,
         )
         all_hourly_polygons = merge_feature_collections(hourly_collections)
         probability_tiles = {
@@ -1032,7 +1033,15 @@ def _build_hour_artifact(
     model: Mapping[str, Any],
     tile_stride: int,
 ) -> dict[str, Any]:
-    features = gridded_features_from_fields(fetched.fields, forecast_hour, lats=fetched.lats, lons=fetched.lons)
+    features = gridded_features_from_fields(
+        fetched.fields,
+        forecast_hour,
+        lats=fetched.lats,
+        lons=fetched.lons,
+        valid_time_iso=fetched.metadata.get("validTimeISO"),
+        run_date=fetched.metadata.get("runDate"),
+        run_cycle=fetched.metadata.get("runCycle"),
+    )
     raw_probabilities = predictor(features)
     if raw_probabilities is None:
         raise RuntimeError("ML hazard model returned no gridded probabilities")
@@ -1082,7 +1091,14 @@ def _build_hour_artifact(
         **final_probability_result.report,
     }
     valid_time_iso = _valid_iso(cycle, forecast_hour)
-    polygons = risk_polygons_from_grid(fetched.lats, fetched.lons, risk_map_category_grid, forecast_hour, valid_time_iso)
+    polygons = risk_polygons_from_grid(
+        fetched.lats,
+        fetched.lons,
+        risk_map_category_grid,
+        forecast_hour,
+        valid_time_iso,
+        probabilities=risk_map_probability_result.probabilities,
+    )
     hazard_shapes = hazard_probability_shapes_from_grids(
         fetched.lats,
         fetched.lons,
@@ -1103,6 +1119,7 @@ def _build_hour_artifact(
         forecast_hour,
         valid_time_iso,
         cig_source=cig_source,
+        hazard_probabilities=risk_map_probability_result.probabilities,
     )
     tile = probability_tile(
         fetched.lats,

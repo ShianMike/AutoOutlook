@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .features import FEATURE_NAMES, HAZARD_KEYS
+from .features import FEATURE_NAMES, HAZARD_KEYS, ensure_feature_frame_columns
 
 ARCHIVE_DOWNLOAD_DIR = Path(__file__).resolve().parents[1] / "ml_data" / "archive_2020_2024_downloaded"
 ARCHIVE_TRAINING_DIR = Path(__file__).resolve().parents[1] / "ml_data" / "archive_training"
@@ -164,6 +164,7 @@ def merge_archive(inputs: list[Path], output: Path, summary_path: Path) -> dict[
     merged = pd.concat(frames, ignore_index=True, sort=False)
     duplicate_keys_before = int(merged.duplicated(subset=list(KEY_COLUMNS), keep=False).sum())
     merged, duplicates_dropped = _dedupe_training_rows(merged)
+    merged = ensure_feature_frame_columns(merged)
 
     for name in FEATURE_NAMES:
         if name not in merged.columns:
@@ -173,7 +174,10 @@ def merge_archive(inputs: list[Path], output: Path, summary_path: Path) -> dict[
     for hazard in HAZARD_KEYS:
         label = f"label_{hazard}"
         if label not in merged.columns:
-            raise SystemExit(f"Merged training archive missing label column: {label}")
+            if hazard == "thunder" and "hrrrLtng" in merged.columns:
+                merged[label] = (merged["hrrrLtng"].fillna(0) > 0).astype(int)
+            else:
+                raise SystemExit(f"Merged training archive missing label column: {label}")
         merged[label] = merged[label].fillna(0).astype(int)
 
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -76,7 +76,7 @@ def coerce_hours(value: object) -> list[int]:
             hour = int(item)
         except (TypeError, ValueError):
             continue
-        if 0 <= hour <= 90:
+        if 0 <= hour <= 48:
             hours.append(hour)
     return sorted(set(hours))
 
@@ -182,10 +182,7 @@ def lightweight_probability_tiles(index: dict[str, Any]) -> dict[str, Any]:
 def validate_full_index(index: dict[str, Any]) -> None:
     ready = set(coerce_hours(index.get("readyForecastHours")))
     model = index.get("cycleDetection", {}).get("cyclePolicy", {}).get("model", "HRRR").upper()
-    if model == "ECMWF":
-        expected = set(range(0, 91, 3))
-    else:
-        expected = set(range(49))
+    expected = set(range(49))
 
     if index.get("status") != "complete" or not expected.issubset(ready):
         missing = sorted(expected - ready)
@@ -295,7 +292,7 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
     write_json(output_dir / "outlook" / "trends.json", helpers._outlook_trends_payload(
         current_dir=artifact_dir,
         forecast_hour=12,
-        model="ecmwf" if "ECMWF" in str(index.get("cycle", "")).upper() else "hrrr",
+        model="hrrr",
         legacy_dir=legacy_artifact_dir,
     ))
 
@@ -330,7 +327,7 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
 def main() -> None:
     args = parse_args()
 
-    # If the user passed default artifact directory, we attempt to export both models if they exist.
+    # If the user passed the default artifact directory, export the primary HRRR artifact tree.
     is_default_run = (args.artifact_dir == DEFAULT_ARTIFACT_DIR)
 
     if is_default_run:

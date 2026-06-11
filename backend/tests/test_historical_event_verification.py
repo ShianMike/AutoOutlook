@@ -5,6 +5,7 @@ from datetime import date
 
 from backend.ml.historical_event_verification import (
     DEFAULT_ENH_PLUS_EVENT_DATES,
+    artifact_uses_model,
     ensure_enh_plus_spc_event,
     event_slug,
     event_window_for_date,
@@ -17,14 +18,34 @@ from backend.ml.historical_event_verification import (
 
 
 class HistoricalEventVerificationTests(unittest.TestCase):
-    def test_event_window_uses_00z_cycle_and_f17_through_f28(self) -> None:
+    def test_archive_artifact_model_identity_must_match_active_model(self) -> None:
+        expected = {
+            "version": "xgb-hazards-20260611T072822Z",
+            "artifactType": "xgboost_joblib",
+            "featureSchemaVersion": "ml-features-v5-location-refc-temporal",
+            "featureSchemaHash": "0cc2a457a6d14132",
+        }
+        current = {"model": dict(expected)}
+        stale = {
+            "model": {
+                "version": "bootstrap-terms-20260602T032529Z",
+                "artifactType": "calibrated_linear_terms_v1",
+                "featureSchemaVersion": "ml-features-v4-parcel-cape-cin",
+                "featureSchemaHash": "7f4a517976a78cf0",
+            }
+        }
+
+        self.assertTrue(artifact_uses_model(current, expected))
+        self.assertFalse(artifact_uses_model(stale, expected))
+
+    def test_event_window_uses_00z_cycle_and_full_12z_to_12z_day1(self) -> None:
         window = event_window_for_date(date(2026, 4, 27))
 
         self.assertEqual(window.cycle_iso, "2026-04-27T00:00:00Z")
-        self.assertEqual(window.start_iso, "2026-04-27T17:00:00Z")
-        self.assertEqual(window.end_iso, "2026-04-28T04:00:00Z")
-        self.assertEqual(window.forecast_hours, tuple(range(17, 29)))
-        self.assertEqual(event_slug(date(2026, 4, 27)), "2026-04-27-hrrr00z-f17-f28")
+        self.assertEqual(window.start_iso, "2026-04-27T12:00:00Z")
+        self.assertEqual(window.end_iso, "2026-04-28T12:00:00Z")
+        self.assertEqual(window.forecast_hours, tuple(range(12, 37)))
+        self.assertEqual(event_slug(date(2026, 4, 27)), "2026-04-27-hrrr00z-f12-f36")
 
     def test_event_dates_are_limited_to_march_2026_through_present(self) -> None:
         self.assertEqual(
@@ -54,7 +75,6 @@ class HistoricalEventVerificationTests(unittest.TestCase):
                 date(2026, 4, 14),
                 date(2026, 4, 15),
                 date(2026, 4, 17),
-                date(2026, 4, 18),
                 date(2026, 4, 23),
                 date(2026, 4, 24),
                 date(2026, 4, 25),
@@ -115,13 +135,15 @@ class HistoricalEventVerificationTests(unittest.TestCase):
 
         filtered = filter_spc_reports_for_event_window(reports, window)
 
-        self.assertEqual([item["time"] for item in filtered], ["1700", "2359", "0400"])
+        self.assertEqual([item["time"] for item in filtered], ["1659", "1700", "2359", "0400", "0401"])
         self.assertEqual(
             [item["timeISO"] for item in filtered],
             [
+                "2026-04-27T16:59:00Z",
                 "2026-04-27T17:00:00Z",
                 "2026-04-27T23:59:00Z",
                 "2026-04-28T04:00:00Z",
+                "2026-04-28T04:01:00Z",
             ],
         )
 

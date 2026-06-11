@@ -53,6 +53,7 @@ from backend.ml.gridded_outlook import (
     postprocess_category_grid,
     probability_tile,
     risk_polygons_from_grid,
+    _rings_geometry,
 )
 from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
@@ -736,6 +737,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "tornado": np.array([[0.00, 0.02, 0.05, 0.10], [0.15, 0.30, 0.45, 0.60]]),
             "hail": np.zeros((2, 4)),
             "wind": np.zeros((2, 4)),
+            "thunder": np.full((2, 4), 0.10),
         }
 
         categories = category_grid_from_probabilities(probabilities, features)
@@ -841,6 +843,59 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(by_hazard_cig[("hail", 2)]["hatchPattern"], "solidDiagonal")
         self.assertEqual(by_hazard_cig[("wind", 3)]["hatchPattern"], "cross")
         self.assertEqual(by_hazard_cig[("wind", 3)]["cigSource"], "trained_intensity_with_environment_fallback_v1")
+
+    def test_cig_shapes_require_severe_probability_support(self) -> None:
+        lats = np.linspace(34.0, 38.0, 8)
+        lons = np.linspace(-101.0, -97.0, 8)
+        cig_grids = {
+            "tornado": np.full((8, 8), 3, dtype=np.int16),
+            "hail": np.full((8, 8), 2, dtype=np.int16),
+            "wind": np.full((8, 8), 3, dtype=np.int16),
+        }
+        weak_probabilities = {
+            "tornado": np.full((8, 8), 0.019),
+            "hail": np.full((8, 8), 0.049),
+            "wind": np.full((8, 8), 0.049),
+        }
+
+        shapes = cig_shapes_from_grids(
+            lats,
+            lons,
+            cig_grids,
+            24,
+            "2024-05-05T00:00:00Z",
+            hazard_probabilities=weak_probabilities,
+            min_cells=1,
+        )
+
+        self.assertEqual(shapes["features"], [])
+
+    def test_cig_shapes_drop_tiny_source_islands(self) -> None:
+        lats = np.linspace(34.0, 38.0, 8)
+        lons = np.linspace(-101.0, -97.0, 8)
+        cig_grids = {
+            "tornado": np.zeros((8, 8), dtype=np.int16),
+            "hail": np.zeros((8, 8), dtype=np.int16),
+            "wind": np.zeros((8, 8), dtype=np.int16),
+        }
+        cig_grids["tornado"][3, 3] = 3
+        strong_probabilities = {
+            "tornado": np.full((8, 8), 0.20),
+            "hail": np.full((8, 8), 0.20),
+            "wind": np.full((8, 8), 0.20),
+        }
+
+        shapes = cig_shapes_from_grids(
+            lats,
+            lons,
+            cig_grids,
+            24,
+            "2024-05-05T00:00:00Z",
+            hazard_probabilities=strong_probabilities,
+            min_cells=1,
+        )
+
+        self.assertEqual(shapes["features"], [])
 
     def test_probability_categories_use_spc_day1_non_sig_wind_hail_table(self) -> None:
         fields = small_fields((1, 5))
@@ -2323,7 +2378,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         lats_mex = np.linspace(24.0, 25.5, 5)
         lons_mex = np.linspace(-102.0, -100.0, 5)
         processed_mex = postprocess_category_grid(category_grid, probabilities, features, lats_mex, lons_mex)
-        self.assertTrue(np.all(processed_mex.category_grid == SPC_RISK_LABELS.index("MRGL")))
+        self.assertTrue(np.all(processed_mex.category_grid == SPC_RISK_LABELS.index("NONE")))
         self.assertGreater(processed_mex.report["downgradedCells"]["texasMexicoBorder"], 0)
 
         # Test case B: US cities (e.g. San Antonio lon -98.5, lat 29.4 or Midland lon -102.1, lat 32.0)
@@ -2481,14 +2536,14 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "wind": np.full((3, 3), 0.15),
         }
 
-        # Case A: Mexico border corridor capped to MRGL
+        # Case A: Mexico border corridor suppressed to NONE
         lats_mex = np.linspace(24.0, 25.5, 3)
         lons_mex = np.linspace(-102.0, -100.0, 3)
         tile_mex = probability_tile(lats_mex, lons_mex, probabilities, category, 0, "2024-05-04T12:00:00Z", stride=3)
-        self.assertEqual(tile_mex["categoryLabel"], [["MRGL"]])
-        self.assertEqual(tile_mex["probabilities"]["tornado"], [[0.049]])
-        self.assertEqual(tile_mex["probabilities"]["hail"], [[0.149]])
-        self.assertEqual(tile_mex["probabilities"]["wind"], [[0.149]])
+        self.assertEqual(tile_mex["categoryLabel"], [["NONE"]])
+        self.assertEqual(tile_mex["probabilities"]["tornado"], [[0.0]])
+        self.assertEqual(tile_mex["probabilities"]["hail"], [[0.0]])
+        self.assertEqual(tile_mex["probabilities"]["wind"], [[0.0]])
 
         # Case B: US region uncapped
         lats_us = np.linspace(30.8, 32.1, 3)
@@ -2526,6 +2581,64 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                     x1, y1 = ring[idx + 1]
                     area += x0 * y1 - x1 * y0
                 self.assertLessEqual(area / 2.0, 0.0)
+
+    def test_rings_geometry_rejects_spherical_complement_sliver(self) -> None:
+        valid_ring = [
+            [-100.0, 30.0],
+            [-100.0, 34.0],
+            [-96.0, 34.0],
+            [-96.0, 30.0],
+            [-100.0, 30.0],
+        ]
+        nearly_collinear_ring = [
+            [-96.6391, 37.6201],
+            [-97.0596, 37.0289],
+            [-96.8083, 37.3827],
+            [-96.6391, 37.6201],
+        ]
+
+        geometry = _rings_geometry([valid_ring, nearly_collinear_ring])
+
+        self.assertEqual(geometry["type"], "Polygon")
+        self.assertEqual(geometry["coordinates"], [valid_ring])
+
+    def test_risk_tstm_polygon_uses_trained_thunder_probability(self) -> None:
+        lats = np.linspace(30.0, 34.0, 5)
+        lons = np.linspace(-100.0, -96.0, 5)
+        category = np.full((5, 5), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
+        thunder = np.zeros((5, 5), dtype=float)
+        thunder[1:4, 1:4] = 0.10
+
+        geojson = risk_polygons_from_grid(
+            lats,
+            lons,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            probabilities={"thunder": thunder},
+            min_cells=1,
+        )
+        by_category = {feature["properties"]["category"]: feature for feature in geojson["features"]}
+
+        self.assertEqual(by_category["TSTM"]["properties"]["sourceCellCount"], 9)
+        self.assertFalse(by_category["TSTM"]["properties"]["vectorization"]["cumulativeMask"])
+        self.assertEqual(
+            by_category["TSTM"]["properties"]["vectorization"]["supportSource"],
+            "trained_thunder_probability",
+        )
+        self.assertIn("MRGL", by_category)
+
+        no_thunder = risk_polygons_from_grid(
+            lats,
+            lons,
+            category,
+            0,
+            "2024-05-04T12:00:00Z",
+            probabilities={"thunder": np.zeros((5, 5), dtype=float)},
+            min_cells=1,
+        )
+        self.assertNotIn("TSTM", [feature["properties"]["category"] for feature in no_thunder["features"]])
+        self.assertIn("MRGL", [feature["properties"]["category"] for feature in no_thunder["features"]])
 
     def test_risk_polygon_features_follow_category_layer_order(self) -> None:
         lats = np.linspace(30.0, 38.0, 9)
@@ -2901,8 +3014,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "tornado": np.zeros((40, 40)),
             "hail": np.zeros((40, 40)),
             "wind": np.zeros((40, 40)),
+            "thunder": np.zeros((40, 40)),
         }
         probabilities["hail"][18:22, 18:22] = 0.30
+        probabilities["thunder"][10:30, 10:30] = 0.40
 
         shapes = hazard_probability_shapes_from_grids(
             lats,
@@ -2928,7 +3043,8 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertLess(hail["5%"]["cellCount"], int(category.size * 0.10))
         self.assertLess(hail["15%"]["cellCount"], int(category.size * 0.10))
         self.assertEqual(hail["5%"]["vectorization"]["supportSource"], "hazard_probability")
-        self.assertTrue(all(item["vectorization"]["supportSource"] == "category_thunder" for item in thunder))
+        self.assertTrue(thunder)
+        self.assertTrue(all(item["vectorization"]["supportSource"] == "hazard_probability" for item in thunder))
 
     def test_hazard_probability_shapes_generalize_nearby_contours(self) -> None:
         lats = np.linspace(25.0, 45.0, 40)
@@ -3076,7 +3192,10 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
         artifact_probability_source = (root / "src" / "utils" / "artifactProbabilities.ts").read_text(encoding="utf-8")
-        probability_fill = hazard_source[hazard_source.index("key={`artifact-prob-${"):hazard_source.index("{showAutoLayer && visibleCigCollection")]
+        probability_fill = hazard_source[
+            hazard_source.index("key={`artifact-prob-${"):
+            hazard_source.index("{showAutoLayer && visibleCigHatchCollection")
+        ]
 
         self.assertIn("stroke: 'none'", probability_fill)
         self.assertIn("strokeWidth: 0", probability_fill)
@@ -3099,30 +3218,37 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertNotIn("artifact-prob-boundary-", hazard_source)
         self.assertNotIn("artifact-prob-separator-", hazard_source)
 
-    def test_frontend_cig_hatches_render_between_fills_and_labels(self) -> None:
+    def test_frontend_cig_hatches_render_as_single_overlay(self) -> None:
         root = Path(__file__).resolve().parents[2]
         generated_source = (root / "src" / "components" / "GeneratedOutlookMap.tsx").read_text(encoding="utf-8")
         hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
         utility_source = (root / "src" / "utils" / "artifactProbabilities.ts").read_text(encoding="utf-8")
 
         self.assertIn("artifactCigShapesToFeatureCollection", utility_source)
-        self.assertLess(generated_source.index("key={`generated-risk-${"), generated_source.index("key={`generated-cig-${"))
-        self.assertLess(generated_source.index("key={`generated-cig-${"), generated_source.index("key={`generated-state-outline-"))
+        self.assertNotIn("key={`generated-cig-${", generated_source)
+        self.assertNotIn("generated-cig-dashedDiagonal", generated_source)
+        self.assertNotIn("showCigOverlay", generated_source)
+        self.assertNotIn("CIG Overlay", generated_source)
         self.assertLess(hazard_source.index("key={`artifact-prob-${"), hazard_source.index("key={`generated-hazard-cig-${"))
         self.assertLess(hazard_source.index("key={`generated-hazard-cig-${"), hazard_source.index("key={`generated-hazard-outline-"))
-        self.assertIn("generated-cig-dashedDiagonal", generated_source)
-        self.assertIn("generated-cig-solidDiagonal", generated_source)
-        self.assertIn("generated-cig-cross", generated_source)
-        self.assertIn("generated-hazard-cig-dashedDiagonal", hazard_source)
-        self.assertIn("generated-hazard-cig-solidDiagonal", hazard_source)
-        self.assertIn("generated-hazard-cig-cross", hazard_source)
-        self.assertIn("showCigOverlay", generated_source)
+        self.assertIn("id=\"generated-hazard-cig\"", hazard_source)
+        self.assertNotIn("generated-hazard-cig-dashedDiagonal", hazard_source)
+        self.assertNotIn("generated-hazard-cig-solidDiagonal", hazard_source)
+        self.assertNotIn("generated-hazard-cig-cross", hazard_source)
         self.assertIn("showCigOverlay", hazard_source)
-        self.assertIn("CIG Overlay", generated_source)
-        self.assertIn("CIG Overlay", hazard_source)
-        self.assertIn("CIG1 dashed", generated_source)
-        self.assertIn("CIG2 solid", generated_source)
-        self.assertIn("CIG3 cross", generated_source)
+        self.assertIn("visibleCigHatchCollection", hazard_source)
+        self.assertIn("generated-hazard-cig-contour-", hazard_source)
+        self.assertNotIn("Geographies geography={visibleCigCollection}", hazard_source)
+        self.assertIn("selectSingleCigFeatures", utility_source)
+        self.assertIn("label: 'CIG'", utility_source)
+        self.assertIn("hatchPattern: 'solidDiagonal'", utility_source)
+        self.assertIn("minimumSourceCellsForCig", utility_source)
+        self.assertIn("<span>CIG</span>", hazard_source)
+        self.assertNotIn(">Intensity<", hazard_source)
+        self.assertNotIn("geo.properties.cig", hazard_source)
+        self.assertNotIn("CIG1 dashed", hazard_source)
+        self.assertNotIn("CIG2 solid", hazard_source)
+        self.assertNotIn("CIG3 cross", hazard_source)
 
     def test_spc_verification_reports_over_and_underforecast_cells(self) -> None:
         lats = np.linspace(30.0, 34.0, 5)

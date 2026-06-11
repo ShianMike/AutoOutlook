@@ -14,7 +14,7 @@ from typing import Any, Iterator, Mapping
 import numpy as np
 
 from backend.ml.add_intensity_labels import DEFAULT_OUTPUT as DEFAULT_INPUT
-from backend.ml.features import FEATURE_NAMES
+from backend.ml.features import FEATURE_NAMES, ensure_feature_frame_columns
 from backend.ml.gridded_outlook import (
     GriddedFeatures,
     SPC_CIG_CATEGORY_FEATURE_FLAG,
@@ -149,13 +149,7 @@ def verify_sample(
     run_dates: list[str] | None = None,
 ) -> dict[str, Any]:
     pd = _require_deps()
-    columns = [
-        "runDate",
-        "sampleLat",
-        "sampleLon",
-        *FEATURE_NAMES,
-    ]
-    frame = pd.read_parquet(input_path, columns=columns)
+    frame = ensure_feature_frame_columns(pd.read_parquet(input_path))
     selected_run_dates = sorted(str(value) for value in frame["runDate"].astype(str).unique())
     if run_dates:
         wanted = {str(value).replace("-", "") for value in run_dates}

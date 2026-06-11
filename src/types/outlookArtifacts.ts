@@ -16,6 +16,7 @@ export interface OutlookArtifactFeature {
     sourceCellCount?: number;
     cumulativeCellCount?: number;
     componentCount?: number;
+    displayAreaKm2?: number;
     vectorization?: Record<string, unknown>;
   };
 }
@@ -69,6 +70,7 @@ export interface OutlookProbabilityShapeFeature {
     cellCount?: number;
     sourceCellCount?: number;
     componentCount?: number;
+    displayAreaKm2?: number;
     vectorization?: Record<string, unknown>;
   };
 }
@@ -93,8 +95,14 @@ export interface OutlookCigShapeFeature {
     validTimeISO?: string;
     cellCount?: number;
     sourceCellCount?: number;
+    sourceFeatureCount?: number;
     componentCount?: number;
+    displayAreaKm2?: number;
     cigSource?: string;
+    hatchGeometry?: {
+      type: 'Polygon' | 'MultiPolygon';
+      coordinates: number[][][] | number[][][][];
+    };
     vectorization?: Record<string, unknown>;
   };
 }

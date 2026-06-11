@@ -360,15 +360,15 @@ export default function OutlookMapPanel({
         : 'Auto-generated · XGBoost hazard model · artifact pending'
       : 'Auto-generated · rule-based outlook engine v1';
   const hourLabel = viewType === 'merged'
-    ? 'D1 MERGED'
+    ? 'MERGED'
     : effectiveSnapshot
       ? FORECAST_HOUR_LABELS[effectiveSnapshot.forecastHour] ?? `+${effectiveSnapshot.forecastHour}h`
       : '—';
   const panelTitle = viewType === 'merged'
-    ? 'D1 Merged Automated Convective Outlook'
+    ? 'Merged Automated Convective Outlook'
     : `F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h Automated Convective Outlook`;
   const exportHourTitle = viewType === 'merged'
-    ? 'D1 Merged'
+    ? 'Merged Outlook'
     : `F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h`;
 
   const validTime = effectiveSnapshot
@@ -400,7 +400,7 @@ export default function OutlookMapPanel({
     : stormReportsMode !== 'none' && stormReports.length === 0
       ? `No reports · SPC thru ${fmtShortDate(latestAvailableReportDate)}`
       : `SPC thru ${fmtShortDate(latestAvailableReportDate)}`;
-  const mergedCycleLabel = (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.mergedCycles?.[0] ?? 'Merged D1';
+  const mergedCycleLabel = (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.mergedCycles?.[0] ?? 'Merged Outlook';
 
   const timeRows = [
     ['Cycle', viewType === 'merged' ? mergedCycleLabel : (artifactMetadata?.cycle ?? fmtUTC(artifactMetadata?.cycleTimeISO))],
@@ -703,6 +703,7 @@ export default function OutlookMapPanel({
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
                     spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -715,6 +716,7 @@ export default function OutlookMapPanel({
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
                     spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -727,6 +729,7 @@ export default function OutlookMapPanel({
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
                     spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
                     snapshot={effectiveSnapshot}
@@ -739,6 +742,7 @@ export default function OutlookMapPanel({
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
                     spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    cigOverlayEnabled={viewType === 'merged'}
                   />
                 </>
               ) : (
@@ -761,6 +765,7 @@ export default function OutlookMapPanel({
                   stormReports={mapStormReports}
                   comparisonMode={spcComparisonMode}
                   spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                  cigOverlayEnabled={viewType === 'merged'}
                 />
               )
             ) : useRuleHazardFallback ? (
@@ -859,7 +864,7 @@ export default function OutlookMapPanel({
             </select>
           </div>
 
-          {/* Dropdown: View Mode (Hourly vs Merged D1) */}
+          {/* Dropdown: View Mode (Hourly vs Merged Outlook) */}
           <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
               View
@@ -871,7 +876,7 @@ export default function OutlookMapPanel({
               className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
             >
               <option value="hourly">Hourly Scrubber</option>
-              <option value="merged">Merged D1 Outlook</option>
+              <option value="merged">Merged Outlook</option>
             </select>
           </div>
 

@@ -1,7 +1,7 @@
 """Fetch local inputs for the hardcoded historical risk verification archive.
 
 This command is intentionally local-only. It generates event-day HRRR 00Z
-f17-f28 artifacts first, then downloads the archived SPC Day 1 outlook
+f12-f36 artifacts for the full 12Z-to-12Z Day 1 window, then downloads the archived SPC Day 1 outlook
 inputs and daily storm reports. GitHub Actions must not run this command.
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.ml.historical_event_verification import (  # noqa: E402
     DEFAULT_ENH_PLUS_EVENT_DATES,
+    artifact_uses_model,
     event_slug,
     event_window_for_date,
     fetch_spc_daily_storm_reports,
@@ -30,6 +31,7 @@ from backend.ml.merged_outlook import fetch_archived_spc_day1_category  # noqa: 
 
 ARTIFACT_ROOT = PROJECT_ROOT / "backend" / "artifacts" / "historical_enh_plus"
 GENERATOR = PROJECT_ROOT / "scripts" / "generate-custom-hrrr-artifacts.py"
+MODEL_METADATA_PATH = PROJECT_ROOT / "backend" / "models" / "metadata.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,8 +99,16 @@ def fetch_event(
     window = event_window_for_date(event_date)
     output_dir = artifact_root / event_slug(event_date)
     output_dir.mkdir(parents=True, exist_ok=True)
+    expected_model = read_json(MODEL_METADATA_PATH)
+    model_is_current = event_artifacts_use_model(output_dir, expected_model)
 
-    if force or not event_artifacts_complete(output_dir, window.forecast_hours):
+    if force or not event_artifacts_complete(output_dir, window.forecast_hours, expected_model):
+        if not model_is_current:
+            print(
+                f"[event stale] {event_date.isoformat()} does not use "
+                f"{expected_model.get('version')}; regenerating all hours",
+                flush=True,
+            )
         command = [
             sys.executable,
             str(GENERATOR),
@@ -118,7 +128,7 @@ def fetch_event(
             str(max(1, range_workers)),
             "--no-spc-verify",
         ]
-        if force:
+        if force or not model_is_current:
             command.append("--force")
         if not keep_cache:
             command.append("--no-cache")
@@ -126,8 +136,11 @@ def fetch_event(
             command.append("--omit-hgt500")
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
-    if not event_artifacts_complete(output_dir, window.forecast_hours):
-        raise RuntimeError("HRRR generation did not complete all f17-f28 hours")
+    if not event_artifacts_complete(output_dir, window.forecast_hours, expected_model):
+        raise RuntimeError(
+            "HRRR generation did not complete all f12-f36 hours with "
+            f"model {expected_model.get('version')}"
+        )
 
     spc_payload = fetch_archived_spc_day1_category(event_date, output_dir=output_dir)
     spc_label, _ = max_spc_category(spc_payload["categoryGeojson"])
@@ -141,7 +154,11 @@ def fetch_event(
     return output_dir
 
 
-def event_artifacts_complete(output_dir: Path, forecast_hours: tuple[int, ...]) -> bool:
+def event_artifacts_complete(
+    output_dir: Path,
+    forecast_hours: tuple[int, ...],
+    expected_model: dict[str, Any],
+) -> bool:
     index_path = output_dir / "index.json"
     if not index_path.exists():
         return False
@@ -152,12 +169,31 @@ def event_artifacts_complete(output_dir: Path, forecast_hours: tuple[int, ...]) 
     ready = {int(value) for value in index.get("readyForecastHours", [])}
     return (
         index.get("status") == "complete"
+        and artifact_uses_model(index, expected_model)
         and set(forecast_hours).issubset(ready)
         and all(
             (output_dir / "hours" / f"f{hour:02d}" / "probability_tile.json").exists()
             for hour in forecast_hours
         )
     )
+
+
+def event_artifacts_use_model(output_dir: Path, expected_model: dict[str, Any]) -> bool:
+    index_path = output_dir / "index.json"
+    if not index_path.exists():
+        return False
+    try:
+        index = read_json(index_path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return artifact_uses_model(index, expected_model)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return payload
 
 
 def write_json(path: Path, payload: Any) -> None:

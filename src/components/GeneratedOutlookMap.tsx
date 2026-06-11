@@ -9,11 +9,9 @@ import type {
   SpcStormReport,
 } from '../types/outlookArtifacts';
 import {
-  artifactCigShapesToFeatureCollection,
   artifactRiskShapesToFeatureCollection,
   artifactRiskToFeatureCollection,
   getArtifactHourTile,
-  getArtifactMainHazard,
   getArtifactMaxCategory,
 } from '../utils/artifactProbabilities';
 import { map500mbLines } from '../utils/upperAirLines';
@@ -374,17 +372,6 @@ export default function GeneratedOutlookMap({
     () => normalizeArtifactCollection(artifactRiskToFeatureCollection(selectedTile)),
     [selectedTile],
   );
-  const controllingHazard = useMemo(
-    () => getArtifactMainHazard(artifacts, selectedForecastHour),
-    [artifacts, selectedForecastHour],
-  );
-  const cigCollection = useMemo(
-    () => artifactCigShapesToFeatureCollection(selectedTile, controllingHazard),
-    [selectedTile, controllingHazard],
-  );
-  const [showCigOverlay, setShowCigOverlay] = useState(true);
-  const hasCigOverlay = Boolean(cigCollection?.features.length);
-  const visibleCigCollection = showCigOverlay ? cigCollection : undefined;
   const selectedCollection = useMemo(
     () => artifactRiskCollection && artifactRiskCollection.features.length > 0
       ? artifactRiskCollection
@@ -457,17 +444,6 @@ export default function GeneratedOutlookMap({
           {comparisonTitle(effectiveComparisonMode, modelLabel)}
         </span>
         <div className="flex shrink-0 items-center gap-2">
-          {hasCigOverlay && showAutoLayer && (
-            <label className="flex h-6 items-center gap-1.5 border border-paper/40 px-1.5 font-mono text-[9px] font-bold uppercase tracking-wider text-paper">
-              <input
-                type="checkbox"
-                checked={showCigOverlay}
-                onChange={(event) => setShowCigOverlay(event.currentTarget.checked)}
-                className="h-3 w-3 accent-paper"
-              />
-              <span>CIG</span>
-            </label>
-          )}
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
             {effectiveComparisonMode === 'overlay'
               ? `${Math.round((spcVerification?.agreementFraction ?? 0) * 100)}% AGREE`
@@ -484,17 +460,6 @@ export default function GeneratedOutlookMap({
           projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
-          <defs>
-            <pattern id="generated-cig-dashedDiagonal" patternUnits="userSpaceOnUse" width="12" height="12">
-              <path d="M-3 12 L12 -3 M3 15 L15 3" stroke="#111111" strokeWidth="1.6" strokeDasharray="5 4" />
-            </pattern>
-            <pattern id="generated-cig-solidDiagonal" patternUnits="userSpaceOnUse" width="10" height="10">
-              <path d="M-3 10 L10 -3 M2 13 L13 2" stroke="#111111" strokeWidth="1.55" />
-            </pattern>
-            <pattern id="generated-cig-cross" patternUnits="userSpaceOnUse" width="12" height="12">
-              <path d="M-3 12 L12 -3 M3 15 L15 3 M-3 0 L12 15 M3 -3 L15 9" stroke="#111111" strokeWidth="1.35" />
-            </pattern>
-          </defs>
           <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
@@ -637,38 +602,6 @@ export default function GeneratedOutlookMap({
                           outline: 'none',
                           pointerEvents: 'none',
                         },
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
-          {showAutoLayer && visibleCigCollection && visibleCigCollection.features.length > 0 && (
-            <Geographies geography={visibleCigCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const pattern = String(geo.properties.hatchPattern || 'dashedDiagonal');
-                  const fill = `url(#generated-cig-${pattern})`;
-                  const cigStyle = {
-                    fill,
-                    fillOpacity: 0.72,
-                    stroke: '#111111',
-                    strokeWidth: 0.55,
-                    strokeOpacity: 0.78,
-                    outline: 'none',
-                    pointerEvents: 'none' as const,
-                  };
-                  return (
-                    <Geography
-                      key={`generated-cig-${geo.properties.hazard}-${geo.properties.cig}-${geo.rsmKey ?? index}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: cigStyle,
-                        hover: cigStyle,
-                        pressed: cigStyle,
                       }}
                     />
                   );
@@ -909,28 +842,6 @@ export default function GeneratedOutlookMap({
                   <span>{LEVEL_STYLE[category].label}</span>
                 </div>
               ))}
-            </div>
-          )}
-
-          {hasCigOverlay && showCigOverlay && showAutoLayer && (
-            <div className="mt-2.5 border-t-[1.5px] border-ink/30 pt-2">
-              <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/75 leading-none mb-1.5">
-                CIG Overlay
-              </div>
-              <div className="grid grid-cols-1 gap-y-1">
-                <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
-                  <span className="inline-block h-3 w-5 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px,transparent_6.5px,transparent_11px)]" aria-hidden />
-                  <span>CIG1 dashed</span>
-                </div>
-                <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
-                  <span className="inline-block h-3 w-5 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
-                  <span>CIG2 solid</span>
-                </div>
-                <div className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
-                  <span className="inline-block h-3 w-5 border-[1.5px] border-ink bg-[repeating-linear-gradient(135deg,transparent_0,transparent_5px,#111_5px,#111_6.5px),repeating-linear-gradient(45deg,transparent_0,transparent_5px,#111_5px,#111_6.5px)]" aria-hidden />
-                  <span>CIG3 cross</span>
-                </div>
-              </div>
             </div>
           )}
 

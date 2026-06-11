@@ -62,7 +62,7 @@ export default function VerificationPanel({ spcVerification, mergedD1Verificatio
           onClick={() => setActiveTab('merged')}
           className={`-ml-[3px] border-[3px] border-ink px-4 py-2 font-mono text-[10px] font-black uppercase tracking-widest transition-colors ${activeTab === 'merged' ? 'bg-ink text-paper' : 'bg-paper text-ink'}`}
         >
-          Merged D1 (Multi-Cycle)
+          Merged Outlook
         </button>
       </div>
 
@@ -94,14 +94,14 @@ function MissingMergedD1Panel() {
     <div className="border-[3px] border-ink bg-ink p-5 font-mono text-xs text-signal-lime shadow-retro">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-signal-lime/30 pb-2">
         <span className="font-black uppercase tracking-widest text-signal-amber">
-          STATUS: MERGED_D1_PENDING
+          STATUS: MERGED_PENDING
         </span>
         <span className="bg-signal-amber/20 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-signal-amber">
           AWAITING MULTI-CYCLE MERGE
         </span>
       </div>
       <p className="leading-relaxed">
-        Merged D1 multi-cycle verification is not available yet. This panel will populate once multiple HRRR cycles have been merged and verified against the SPC Day 1 outlook.
+        Merged Outlook verification is not available yet. This panel will populate once multiple HRRR cycles have been merged and verified against the SPC Day 1 outlook.
       </p>
       <p className="mt-3 leading-relaxed text-signal-lime/70">
         The merge combines the maximum risk category across contributing forecast hours from different model cycles within the SPC Day 1 valid window.
