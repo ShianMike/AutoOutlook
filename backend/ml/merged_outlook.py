@@ -134,33 +134,18 @@ def available_merged_d1_dates(
     *,
     day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
 ) -> list[str]:
-    """Return visible merged-D1 dates anchored to one forecast run.
-
-    The merged-D1 selector should not expose every D1 date touched by f00..f48.
-    It is a small run-anchored product, so only the latest eligible run date and
-    the next in-range day are considered.
-    """
-    anchor = _select_merged_d1_anchor_cycle(artifact_root, model)
-    if anchor is None or day_count <= 0:
+    """Return visible merged-D1 dates that map to same-day forecast cycles."""
+    if day_count <= 0:
         return []
-
-    cycle_time, _cycle_dir, index = anchor
-    ready_hours = _int_list(index.get("readyForecastHours"))
-    if not ready_hours:
-        return []
-
-    cycle_date = cycle_time.date()
-    max_date = cycle_date + timedelta(days=day_count - 1)
-    dates: set[date] = set()
-    for forecast_hour in ready_hours:
-        valid_time = cycle_time + timedelta(hours=forecast_hour)
-        d1_start = valid_time.date()
-        if valid_time.hour < 12:
-            d1_start -= timedelta(days=1)
-        if cycle_date <= d1_start <= max_date:
-            dates.add(d1_start)
-
-    return [item.isoformat() for item in sorted(dates, reverse=True)]
+    candidates = _merged_d1_cycle_candidates(artifact_root, model)
+    dates: list[str] = []
+    for cycle_date in sorted({cycle_time.date() for cycle_time, _path, _index in candidates}, reverse=True):
+        if _preferred_merged_d1_cycle_for_date(candidates, cycle_date) is None:
+            continue
+        dates.append(cycle_date.isoformat())
+        if len(dates) >= day_count:
+            break
+    return dates
 
 
 def resolve_cycle_dirs_for_merged_d1_date(
@@ -170,14 +155,17 @@ def resolve_cycle_dirs_for_merged_d1_date(
     *,
     day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
 ) -> list[Path]:
-    """Resolve the single run used by the public merged-D1 date selector."""
-    anchor = _select_merged_d1_anchor_cycle(artifact_root, model)
-    if anchor is None:
-        return []
+    """Resolve the same-day run used by the public merged-D1 date selector."""
     allowed = set(available_merged_d1_dates(artifact_root, model, day_count=day_count))
     if target_date.isoformat() not in allowed:
         return []
-    return [anchor[1]]
+    selected = _preferred_merged_d1_cycle_for_date(
+        _merged_d1_cycle_candidates(artifact_root, model),
+        target_date,
+    )
+    if selected is None:
+        return []
+    return [selected[1]]
 
 
 def fetch_archived_spc_day1_category(
@@ -845,13 +833,13 @@ def _read_index(path: Path) -> dict[str, Any] | None:
     return _read_json(path / "index.json") or _read_json(path / "metadata.json")
 
 
-def _select_merged_d1_anchor_cycle(
+def _merged_d1_cycle_candidates(
     artifact_root: Path,
     model: str,
-) -> tuple[datetime, Path, dict[str, Any]] | None:
+) -> list[tuple[datetime, Path, dict[str, Any]]]:
     candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
     if not artifact_root.exists():
-        return None
+        return candidates
 
     for child in artifact_root.iterdir():
         if not child.is_dir():
@@ -872,19 +860,33 @@ def _select_merged_d1_anchor_cycle(
             continue
         candidates.append((cycle_time, child, index))
 
+    candidates.sort(key=_merged_d1_cycle_rank, reverse=True)
+    return candidates
+
+
+def _preferred_merged_d1_cycle_for_date(
+    candidates: list[tuple[datetime, Path, dict[str, Any]]],
+    target_date: date,
+) -> tuple[datetime, Path, dict[str, Any]] | None:
+    same_day = [item for item in candidates if item[0].date() == target_date]
+    if not same_day:
+        return None
+    same_day_00z = [item for item in same_day if item[0].hour == 0]
+    preferred = same_day_00z or same_day
+    preferred.sort(key=_merged_d1_cycle_rank, reverse=True)
+    return preferred[0]
+
+
+def _select_merged_d1_anchor_cycle(
+    artifact_root: Path,
+    model: str,
+) -> tuple[datetime, Path, dict[str, Any]] | None:
+    candidates = _merged_d1_cycle_candidates(artifact_root, model)
     if not candidates:
         return None
 
-    candidates.sort(key=_merged_d1_cycle_rank, reverse=True)
-    latest_cycle_date = candidates[0][0].date()
-    same_day_00z = [
-        item for item in candidates
-        if item[0].date() == latest_cycle_date and item[0].hour == 0
-    ]
-    if same_day_00z:
-        same_day_00z.sort(key=_merged_d1_cycle_rank, reverse=True)
-        return same_day_00z[0]
-    return candidates[0]
+    latest_cycle_date = max(cycle_time.date() for cycle_time, _path, _index in candidates)
+    return _preferred_merged_d1_cycle_for_date(candidates, latest_cycle_date)
 
 
 def _merged_d1_cycle_rank(item: tuple[datetime, Path, dict[str, Any]]) -> tuple[Any, ...]:

@@ -195,7 +195,7 @@ class TestResolveMergeCycleDirs(unittest.TestCase):
 
 
 class TestMergedD1DateSelection(unittest.TestCase):
-    def test_limits_latest_cycle_to_two_run_anchored_dates(self) -> None:
+    def test_available_dates_use_cycle_dates_not_next_day_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grid = np.ones((5, 5), dtype=int)
@@ -203,7 +203,8 @@ class TestMergedD1DateSelection(unittest.TestCase):
 
             dates = available_merged_d1_dates(root)
 
-            self.assertEqual(dates, ["2026-06-08", "2026-06-07"])
+            self.assertEqual(dates, ["2026-06-07"])
+            self.assertNotIn("2026-06-08", dates)
             self.assertNotIn("2026-06-09", dates)
 
     def test_prefers_same_day_00z_cycle_when_available(self) -> None:
@@ -219,6 +220,35 @@ class TestMergedD1DateSelection(unittest.TestCase):
             )
 
             self.assertEqual(dirs, [cycle_00z])
+
+    def test_later_same_day_cycles_do_not_expose_partial_next_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_00z = _write_cycle_artifacts(root, "00z", "2026-06-11T00:00:00Z", list(range(49)), grid)
+            _write_cycle_artifacts(root, "12z", "2026-06-11T12:00:00Z", list(range(49)), grid)
+
+            dates = available_merged_d1_dates(root)
+            current_dirs = resolve_cycle_dirs_for_merged_d1_date(root, date(2026, 6, 11))
+            next_dirs = resolve_cycle_dirs_for_merged_d1_date(root, date(2026, 6, 12))
+
+            self.assertEqual(dates, ["2026-06-11"])
+            self.assertEqual(current_dirs, [cycle_00z])
+            self.assertEqual(next_dirs, [])
+
+    def test_available_dates_can_include_previous_same_day_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_10_00z = _write_cycle_artifacts(root, "20260610_00z", "2026-06-10T00:00:00Z", list(range(49)), grid)
+            cycle_11_00z = _write_cycle_artifacts(root, "20260611_00z", "2026-06-11T00:00:00Z", list(range(49)), grid)
+            _write_cycle_artifacts(root, "20260611_12z", "2026-06-11T12:00:00Z", list(range(49)), grid)
+
+            dates = available_merged_d1_dates(root)
+
+            self.assertEqual(dates, ["2026-06-11", "2026-06-10"])
+            self.assertEqual(resolve_cycle_dirs_for_merged_d1_date(root, date(2026, 6, 11)), [cycle_11_00z])
+            self.assertEqual(resolve_cycle_dirs_for_merged_d1_date(root, date(2026, 6, 10)), [cycle_10_00z])
 
 
 class TestMergeCyclesForSpcWindow(unittest.TestCase):
