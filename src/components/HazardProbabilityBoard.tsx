@@ -3,10 +3,7 @@ import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import {
-  getArtifactHazardLevel,
-  getArtifactHazardPeak,
-  getArtifactHazardPeakLocation,
-  getArtifactHourTile,
+  resolveHazardEstimate,
   type ArtifactHazardKey,
 } from '../utils/artifactProbabilities';
 import { focusLocationFromSnapshot, formatFocusCoord } from '../utils/focusLocation';
@@ -26,7 +23,7 @@ export default function HazardProbabilityBoard({ snapshot, artifacts, artifactSt
   return (
     <RetroPanel
       title="Hazard Probability Board"
-      eyebrow="03 / Per-hazard automated estimate"
+      eyebrow="05 / Per-hazard automated estimate"
       badge={<FocusLocationBadge focus={focus} />}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -118,30 +115,10 @@ function HazardCard({
   const artifactHazard = hazardKey === 'tornado' || hazardKey === 'hail' || hazardKey === 'wind'
     ? hazardKey as ArtifactHazardKey
     : null;
-  const selectedArtifactTile = getArtifactHourTile(artifacts, snapshot?.forecastHour);
-  const displayArtifactTile = selectedArtifactTile;
-  const displayArtifactHour = displayArtifactTile?.forecastHour ?? snapshot?.forecastHour;
-  const canUseArtifact = Boolean(artifactHazard && displayArtifactTile && (artifactStatus === 'ready' || artifactStatus === 'loading'));
-  const artifactPeak = artifactHazard && canUseArtifact
-    ? getArtifactHazardPeak(artifacts, displayArtifactHour, artifactHazard)
-    : undefined;
-  const artifactPeakLocation = artifactHazard && canUseArtifact
-    ? getArtifactHazardPeakLocation(artifacts, displayArtifactHour, artifactHazard)
-    : undefined;
-  const artifactUnavailable = Boolean(
-    artifactHazard
-      && artifactStatus
-      && artifactStatus !== 'missing'
-      && artifactStatus !== 'ready'
-      && !displayArtifactTile,
-  );
-  const isArtifact = artifactHazard && artifactPeak !== undefined;
-  const probability = artifactPeak ?? (artifactUnavailable ? 0 : hz?.probability ?? 0);
+  const { probability, level: riskLevel, isArtifact, artifactUnavailable, peakLocation: artifactPeakLocation } =
+    resolveHazardEstimate(hazardKey, snapshot, artifacts, artifactStatus);
   const probPct = formatHazardProbability(probability, isArtifact ? minimumArtifactHazardThreshold(artifactHazard) : undefined);
   const confPct = artifactUnavailable ? 0 : hz ? Math.round(hz.confidence * 100) : 0;
-  const riskLevel = artifactHazard && artifactPeak !== undefined
-    ? getArtifactHazardLevel(artifactHazard, artifactPeak, snapshot?.ingredients ?? undefined)
-    : artifactUnavailable ? 'TSTM' : hz?.level ?? 'TSTM';
   const riskMeta = RISK_META[riskLevel];
   const location = artifactPeakLocation && artifactPeakLocation.probability > 0
     ? describePeakLocation(snapshot, artifactPeakLocation.lat, artifactPeakLocation.lon)

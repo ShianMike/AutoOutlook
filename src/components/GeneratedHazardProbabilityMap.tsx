@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useId, useMemo, useState } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, UpperAirVector } from '../types/forecast';
 import type { OutlookArtifacts, OutlookProbabilityShapeFeatureCollection, SpcStormReport } from '../types/outlookArtifacts';
@@ -65,6 +65,7 @@ export default function GeneratedHazardProbabilityMap({
 }: GeneratedHazardProbabilityMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
+  const usClipId = `us-land-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const projection = 'geoAlbers';
   const projectionConfig = {
     rotate: [96, 0, 0] as [number, number, number],
@@ -271,6 +272,24 @@ export default function GeneratedHazardProbabilityMap({
             <pattern id="generated-hazard-cig" patternUnits="userSpaceOnUse" width="22" height="22">
               <path d="M-5 22 L22 -5 M6 27 L27 6" stroke="#111111" strokeWidth="1.05" strokeOpacity={0.74} />
             </pattern>
+            <mask id={usClipId} maskUnits="userSpaceOnUse" x="0" y="0" width="900" height="520">
+              <rect x="0" y="0" width="900" height="520" fill="#000000" />
+              <Geographies geography={geoUrl}>
+                {({ geographies }) =>
+                  geographies.map((geo) => (
+                    <Geography
+                      key={`us-clip-${geo.rsmKey}`}
+                      geography={geo}
+                      style={{
+                        default: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                        hover: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                        pressed: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                      }}
+                    />
+                  ))
+                }
+              </Geographies>
+            </mask>
           </defs>
           <Geographies geography={geoUrl}>
             {({ geographies }) =>
@@ -307,6 +326,7 @@ export default function GeneratedHazardProbabilityMap({
           )}
 
           {showAutoLayer && featureCollection.features.length > 0 && (
+            <g mask={`url(#${usClipId})`}>
             <Geographies geography={featureCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
@@ -356,6 +376,7 @@ export default function GeneratedHazardProbabilityMap({
                 })
               }
             </Geographies>
+            </g>
           )}
 
           {(showSpcFillLayer || showSpcOutlineLayer) && spcFeatureCollection.features.length > 0 && (

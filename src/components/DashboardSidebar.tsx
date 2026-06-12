@@ -5,11 +5,11 @@ import { viewLinkHandler } from '../utils/navigateView';
 const NAV_ITEMS = [
   { id: 'outlook-map', href: '#outlook-map', label: 'Outlook Map', code: '01' },
   { id: 'primary-outlook', href: '#primary-outlook', label: 'Primary Outlook', code: '02' },
-  { id: 'hazards', href: '#hazards', label: 'Hazards', code: '03' },
-  { id: 'ingredients', href: '#ingredients', label: 'Parameters', code: '04' },
-  { id: 'timeline', href: '#timeline', label: 'Risk Timeline', code: '05' },
-  { id: 'discussion', href: '#discussion', label: 'Discussion', code: '06' },
-  { id: 'verification', href: '#verification', label: 'SPC Verification', code: '07' },
+  { id: 'discussion', href: '#discussion', label: 'Discussion', code: '03' },
+  { id: 'verification', href: '#verification', label: 'SPC Verification', code: '04' },
+  { id: 'hazards', href: '#hazards', label: 'Hazards', code: '05' },
+  { id: 'ingredients', href: '#ingredients', label: 'Parameters', code: '06' },
+  { id: 'timeline', href: '#timeline', label: 'Risk Timeline', code: '07' },
   { id: 'system-status', href: '#system-status', label: 'System Status', code: '08' },
 ];
 

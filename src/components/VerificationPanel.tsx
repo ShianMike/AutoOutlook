@@ -46,7 +46,7 @@ export default function VerificationPanel({ spcVerification, mergedD1Verificatio
   return (
     <RetroPanel
       title="System Calibration / SPC QC"
-      eyebrow="07 / Forecast verification against SPC Day 1"
+      eyebrow="04 / Forecast verification against SPC Day 1"
       scanline
     >
       <div className="mb-4 flex gap-0">

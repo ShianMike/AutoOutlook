@@ -51,3 +51,6 @@ deploy_monitor.sh
 launch_gather.sh
 setup_vm.sh
 dev.ps1
+
+# Cloudflare Wrangler local build/runtime state
+.wrangler/

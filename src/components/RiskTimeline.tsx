@@ -52,7 +52,7 @@ export default function RiskTimeline({
   return (
     <RetroPanel
       title="Risk Timeline"
-      eyebrow="05 / Period-by-period severe outlook"
+      eyebrow="07 / Period-by-period severe outlook"
       badge={<FocusLocationBadge focus={activeFocus} />}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

@@ -84,10 +84,64 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.2.1',
+    codename: 'Hazard Ingredient & Discussion Consistency Fixes',
+    date: '2026-06-12',
+    status: 'CURRENT',
+    summary:
+      'This patch links the Forecast Discussion to the same per-hazard probabilities shown on the Hazard Probability Board, and repairs three composite ingredients that were dropped in the gridded outlook pipeline so the TorComp dashboard value, SHIP availability, and surface mixing ratio reflect real model output again. It also restores general-thunder TSTM support under organized-severe risk, keeps higher risk tiers nested inside their outlines, and clips risk fills to the US land outline.',
+    highlights: [
+      'TSTM drawn under severe risk: Organized-severe cells (MRGL and higher) now always carry at least general-thunder support, so the TSTM outlook no longer reads "below threshold" beneath an ENH risk when the trained thunder head under-predicts.',
+      'Risk stays inside its outline: Higher categorical tiers are clipped to the tier below before display, so a higher risk can no longer spill outside the lower band that should contain it.',
+      'Risk clipped to the US map: Categorical and hazard-probability fills are masked to the US land outline so risk no longer bleeds into the ocean, Canada, or Mexico.',
+      'Discussion matches the board: The automated Forecast Discussion now reports the same tornado, hail, and wind probabilities the Hazard Probability Board displays, including the SIGNIFICANT tag, instead of diverging rule-engine numbers.',
+      'TorComp populated: The Composite Signals TorComp parameter now shows the trained tornado composite value instead of always reading 0.0 in the gridded/deployable path.',
+      'SHIP availability fixed: The gridded path now forwards the SHIP availability flag, so the hail reasoning no longer reports "SHIP unavailable" while a real SHIP value is displayed.',
+      'Mixing ratio restored: The surface mixing ratio (g/kg) is forwarded through the gridded ingredients instead of defaulting to 0.',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Forecast Discussion linked to Hazard Probability Board',
+        body: 'Added a shared hazard-estimate resolver so the Hazard Probability Board and the Forecast Discussion read the same effective per-hazard probability and risk level. When trained artifacts are available, the discussion hazard callouts and SIGNIFICANT flags now use the artifact peaks the board shows, falling back to rule-engine values only when artifacts are missing.',
+      },
+      {
+        kind: 'FIX',
+        title: 'TorComp composite no longer reads zero',
+        body: 'The gridded outlook pipeline computed the tornado composite but never forwarded it into the per-point ingredient sample, so the dashboard TorComp card always showed 0.0. The composite is now carried through to the served ingredients.',
+      },
+      {
+        kind: 'FIX',
+        title: 'SHIP availability and surface mixing ratio forwarded',
+        body: 'The gridded raw feature grid omitted the SHIP availability flag and surface mixing ratio, leaving SHIP marked unavailable and the mixing ratio at 0 in the deployable path. Both values are now forwarded from the diagnostics, restoring accurate hail reasoning and ingredient reporting.',
+      },
+      {
+        kind: 'FIX',
+        title: 'General-thunder support floored to the categorical risk',
+        body: 'The TSTM categorical outline and Thunder probability are drawn from the trained general-thunder head, which could under-predict and leave an organized-severe area (MRGL and higher) with sub-threshold thunder probability — so an ENH risk could render with no surrounding TSTM. The category-consistency step now floors general-thunder up to the category-implied minimum (TSTM 10%, MRGL 40%, ENH+ 70%) wherever a severe tier exists, while NONE cells stay below the draw threshold so no spurious offshore or dry-air TSTM appears.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Higher risk tiers stay inside their outline',
+        body: 'Each risk tier was smoothed independently, so a higher category could bulge outside the lower category that should contain it. The display pipeline now clips every tier to the tier directly below it (transitively nesting ENH within SLGT within MRGL within TSTM), removing the spillover and the jagged slivers it produced.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Risk fills clipped to the US land outline',
+        body: 'Smoothing and buffering pushed risk fills past the coastline and the Canada/Mexico borders. The categorical Outlook map and the hazard-probability maps now mask their risk fills to the same US geography the map draws, so risk renders only over US land.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.2.1',
+        body: 'Recorded the discussion-linkage and gridded ingredient fixes as the v1.2.1 patch release, bumped package metadata and the app/landing/changelog footers, and moved v1.2 to stable in the in-app changelog.',
+      },
+    ],
+  },
+  {
     version: 'v1.2',
     codename: 'Retrained Hazard Models & Feature Schema v5',
     date: '2026-06-11',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This release retrains the AutoOutlook hazard system on 849,720 HRRR samples, expands the model from three severe-hazard heads to four trained hazards including general thunder, adds location, reflectivity, temperature, height, and time-season inputs, improves CIG intensity and merged-outlook rendering, and removes obsolete non-HRRR paths.',
     highlights: [
@@ -1345,7 +1399,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.2
+          AutoOutlook · Automated Convective Risk Intelligence · v1.2.1
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>
