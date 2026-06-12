@@ -176,6 +176,18 @@ export default function App() {
             <PrimaryOutlookBanner snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
           </section>
 
+          <section id="discussion" className="scroll-mt-4">
+            <ForecastDiscussion snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
+          </section>
+
+          <section id="verification" className="scroll-mt-4">
+            <VerificationPanel
+              spcVerification={outlookArtifacts.artifacts?.metadata?.spcVerification}
+              mergedD1Verification={mergedD1Verification}
+              viewType={viewType}
+            />
+          </section>
+
           <section id="hazards" className="scroll-mt-4">
             <HazardProbabilityBoard snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
           </section>
@@ -201,23 +213,11 @@ export default function App() {
             />
           </section>
 
-          <section id="discussion" className="scroll-mt-4">
-            <ForecastDiscussion snapshot={snapshot} />
-          </section>
-
           <section id="readiness" className="scroll-mt-4">
             <WatchReadinessPanel
               snapshot={snapshot}
               artifacts={outlookArtifacts.artifacts}
               artifactStatus={outlookArtifacts.status}
-            />
-          </section>
-
-          <section id="verification" className="scroll-mt-4">
-            <VerificationPanel
-              spcVerification={outlookArtifacts.artifacts?.metadata?.spcVerification}
-              mergedD1Verification={mergedD1Verification}
-              viewType={viewType}
             />
           </section>
 
@@ -240,7 +240,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v1.2
+              AutoOutlook · Automated Convective Risk Intelligence · v1.2.1
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

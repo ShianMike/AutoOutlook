@@ -5,10 +5,24 @@
 // reads differently across parameter-space.
 
 import type { HazardKey, HourSnapshot, Ingredients, RiskCategory, SignalStrength, StormMode } from '../types/forecast';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
+import { resolveHazardEstimate } from './artifactProbabilities';
 import { focusLocationFromSnapshot } from './focusLocation';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 const r = Math.round;
+
+/**
+ * Context shared across builders so the discussion narrative stays linked
+ * to the same per-hazard probabilities the Hazard Probability Board renders.
+ * When artifacts are present, tornado/hail/wind use the trained artifact
+ * peaks; otherwise the rule-engine snapshot values are used.
+ */
+interface DiscussionContext {
+  artifacts: OutlookArtifacts | null;
+  artifactStatus?: ArtifactStatus;
+}
 
 const HAZARD_TAG: Record<HazardKey, string> = {
   tornado: 'tornadoes',
@@ -390,17 +404,26 @@ function stormModeDiscussion(mode: StormMode, ing: Ingredients, snap: HourSnapsh
 }
 
 // ── 5. Per-hazard detailed callouts ──────────────────────────────────
-function buildHazardSection(snap: HourSnapshot): string {
+function buildHazardSection(snap: HourSnapshot, ctx: DiscussionContext): string {
   const keys: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
   const parts: string[] = [];
   const ing = snap.ingredients;
 
   for (const k of keys) {
     const h = snap.hazards[k];
-    if (h.level === 'TSTM' && h.probability < 0.02) continue;
+    // Use the same resolved probability/level the Hazard Probability Board
+    // renders, so the discussion callouts stay linked to the board numbers.
+    const resolved = resolveHazardEstimate(k, snap, ctx.artifacts, ctx.artifactStatus);
+    const probability = resolved.probability;
+    const level = resolved.level;
+    if (resolved.artifactUnavailable) continue;
+    if (level === 'TSTM' && probability < 0.02) continue;
 
-    const pct = r(h.probability * 100);
-    const sigNote = h.significantSevere ? ' (SIGNIFICANT — 10%+ for EF2+/74mph+/2″+)' : '';
+    const pct = r(probability * 100);
+    const significantSevere = resolved.isArtifact
+      ? k !== 'flood' && probability >= 0.10
+      : h.significantSevere;
+    const sigNote = significantSevere ? ' (SIGNIFICANT — 10%+ for EF2+/74mph+/2″+)' : '';
 
     if (k === 'tornado') {
       if (pct >= 15) {
@@ -500,13 +523,18 @@ function buildUncertainty(snap: HourSnapshot): string {
 }
 
 // ── Public entry point ──────────────────────────────────────────────
-export function generateDiscussion(snap: HourSnapshot): string {
+export function generateDiscussion(
+  snap: HourSnapshot,
+  artifacts: OutlookArtifacts | null = null,
+  artifactStatus?: ArtifactStatus,
+): string {
+  const ctx: DiscussionContext = { artifacts, artifactStatus };
   const sections = [
     summaryLine(snap),
     buildSynopsis(snap),
     buildMesoscale(snap),
     buildDiscussion(snap),
-    buildHazardSection(snap),
+    buildHazardSection(snap, ctx),
     buildUncertainty(snap),
   ].filter(Boolean);
 

@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
 import { toPng } from 'html-to-image';
 import type { HourSnapshot } from '../types/forecast';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import { generateDiscussion } from '../utils/discussionGenerator';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import FocusLocationBadge from './FocusLocationBadge';
@@ -8,6 +10,8 @@ import RetroPanel from './retro/RetroPanel';
 
 interface ForecastDiscussionProps {
   snapshot: HourSnapshot | null;
+  artifacts?: OutlookArtifacts | null;
+  artifactStatus?: ArtifactStatus;
 }
 
 function fmtIssued(iso: string | undefined): string {
@@ -16,8 +20,8 @@ function fmtIssued(iso: string | undefined): string {
   return `${String(d.getUTCHours()).padStart(2, '0')}${String(d.getUTCMinutes()).padStart(2, '0')}Z ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
 }
 
-export default function ForecastDiscussion({ snapshot }: ForecastDiscussionProps) {
-  const text = snapshot ? generateDiscussion(snapshot) : 'Awaiting forecast bundle…';
+export default function ForecastDiscussion({ snapshot, artifacts, artifactStatus }: ForecastDiscussionProps) {
+  const text = snapshot ? generateDiscussion(snapshot, artifacts ?? null, artifactStatus) : 'Awaiting forecast bundle…';
   const mlDriven = Boolean(snapshot?.mlHazards);
   const focus = focusLocationFromSnapshot(snapshot);
   const discussionRef = useRef<HTMLElement | null>(null);
@@ -52,7 +56,7 @@ export default function ForecastDiscussion({ snapshot }: ForecastDiscussionProps
   return (
     <RetroPanel
       title="Automated Forecast Discussion"
-      eyebrow={mlDriven ? '06 / Generated from ML hazard probabilities' : '06 / Generated from rule engines'}
+      eyebrow={mlDriven ? '03 / Generated from ML hazard probabilities' : '03 / Generated from rule engines'}
       badge={(
         <div className="flex flex-wrap items-center justify-end gap-2">
           <FocusLocationBadge focus={focus} />

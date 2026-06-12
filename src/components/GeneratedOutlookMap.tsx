@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
 import type { ActiveRegion, HourSnapshot, RiskCategory, UpperAirVector } from '../types/forecast';
 import type {
@@ -297,6 +297,7 @@ export default function GeneratedOutlookMap({
   const modelLabel = generatedModelLabel(activeRegion, artifacts);
   const effectiveComparisonMode: SpcComparisonMode = comparisonMode;
   const geoUrl = STATES_URL;
+  const usClipId = `us-land-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const projection = 'geoAlbers';
   const projectionConfig = {
     rotate: [96, 0, 0] as [number, number, number],
@@ -460,6 +461,26 @@ export default function GeneratedOutlookMap({
           projectionConfig={projectionConfig}
           style={{ width: '100%', height: '100%' }}
         >
+          <defs>
+            <mask id={usClipId} maskUnits="userSpaceOnUse" x="0" y="0" width="900" height="520">
+              <rect x="0" y="0" width="900" height="520" fill="#000000" />
+              <Geographies geography={geoUrl}>
+                {({ geographies }) =>
+                  geographies.map((geo) => (
+                    <Geography
+                      key={`us-clip-${geo.rsmKey}`}
+                      geography={geo}
+                      style={{
+                        default: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                        hover: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                        pressed: { fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1.2, outline: 'none' },
+                      }}
+                    />
+                  ))
+                }
+              </Geographies>
+            </mask>
+          </defs>
           <Geographies geography={geoUrl}>
             {({ geographies }) =>
               geographies.map((geo) => (
@@ -495,6 +516,7 @@ export default function GeneratedOutlookMap({
           )}
 
           {showAutoLayer && hasGeneratedLayer && (
+            <g mask={`url(#${usClipId})`}>
             <Geographies geography={renderedCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
@@ -550,6 +572,7 @@ export default function GeneratedOutlookMap({
                 })
               }
             </Geographies>
+            </g>
           )}
 
           {showSpcLayer && hasSpcLayer && normalizedSpcDay1 && (

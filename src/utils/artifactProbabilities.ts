@@ -1,5 +1,6 @@
 import { geoArea, type GeoPermissibleObjects } from 'd3-geo';
-import type { RiskCategory, Ingredients } from '../types/forecast';
+import type { RiskCategory, Ingredients, HazardKey, HourSnapshot } from '../types/forecast';
+import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import { lvlFromProb } from './hazardEngine';
 import type {
   OutlookArtifactFeatureCollection,
@@ -285,6 +286,68 @@ export function getArtifactHazardLevel(
   ing?: Ingredients,
 ): RiskCategory {
   return lvlFromProb(hazard, probability, ing);
+}
+
+/**
+ * Resolves the "effective" hazard estimate that the Hazard Probability Board
+ * actually renders for a given hazard. For tornado/hail/wind this prefers the
+ * trained artifact (ML) peak probability when the artifact is ready/loading,
+ * falling back to the rule-engine snapshot value otherwise. Flood always uses
+ * the snapshot value (no artifact surface is trained for it).
+ *
+ * This is the single source of truth so the board, the forecast discussion,
+ * and any other narrative descriptions stay linked to the same numbers.
+ */
+export interface ResolvedHazardEstimate {
+  probability: number;
+  level: RiskCategory;
+  /** true when the value originates from the trained artifact surface. */
+  isArtifact: boolean;
+  /** true when an artifact was expected for this hour but is offline. */
+  artifactUnavailable: boolean;
+  peakLocation?: ArtifactHazardPeakLocation;
+}
+
+export function resolveHazardEstimate(
+  hazardKey: HazardKey,
+  snapshot: HourSnapshot | null,
+  artifacts: OutlookArtifacts | null,
+  artifactStatus?: ArtifactStatus,
+): ResolvedHazardEstimate {
+  const hz = snapshot?.hazards?.[hazardKey];
+  const artifactHazard: ArtifactHazardKey | null =
+    hazardKey === 'tornado' || hazardKey === 'hail' || hazardKey === 'wind'
+      ? hazardKey
+      : null;
+
+  const tile = getArtifactHourTile(artifacts, snapshot?.forecastHour);
+  const tileHour = tile?.forecastHour ?? snapshot?.forecastHour;
+  const canUseArtifact = Boolean(
+    artifactHazard && tile && (artifactStatus === 'ready' || artifactStatus === 'loading'),
+  );
+
+  const peakLocation = artifactHazard && canUseArtifact
+    ? getArtifactHazardPeakLocation(artifacts, tileHour, artifactHazard)
+    : undefined;
+  const artifactPeak = peakLocation?.probability;
+
+  const artifactUnavailable = Boolean(
+    artifactHazard
+      && artifactStatus
+      && artifactStatus !== 'missing'
+      && artifactStatus !== 'ready'
+      && !tile,
+  );
+
+  const isArtifact = artifactHazard !== null && artifactPeak !== undefined;
+  const probability = artifactPeak ?? (artifactUnavailable ? 0 : hz?.probability ?? 0);
+  const level: RiskCategory = isArtifact
+    ? getArtifactHazardLevel(artifactHazard as ArtifactHazardKey, artifactPeak as number, snapshot?.ingredients ?? undefined)
+    : artifactUnavailable
+      ? 'TSTM'
+      : hz?.level ?? 'TSTM';
+
+  return { probability, level, isArtifact, artifactUnavailable, peakLocation };
 }
 
 export function artifactProbabilityToFeatureCollection(
