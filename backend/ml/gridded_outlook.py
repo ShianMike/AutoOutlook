@@ -37,7 +37,7 @@ _CIG_MIN_SOURCE_CELLS = {1: 12, 2: 18, 3: 24}
 _CIG_MIN_COMPONENT_CELLS = {1: 6, 2: 8, 3: 10}
 _TORNADO_PROBABILITY_THRESHOLDS = (0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60)
 _SEVERE_PROBABILITY_THRESHOLDS = (0.05, 0.15, 0.30, 0.45, 0.60)
-_THUNDER_PROBABILITY_THRESHOLDS = (0.01, 0.10, 0.40, 0.70)
+_THUNDER_PROBABILITY_THRESHOLDS = (0.10, 0.40, 0.70)
 _DISPLAY_BAND_GAP_METERS = 10_000.0
 _LOWER_OWNED_BOUNDARY_METERS = 5_000.0
 _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
@@ -214,8 +214,11 @@ def gridded_features_from_fields(
         "scp": comps["scp"],
         "ehi": comps["ehi"],
         "ship": comps["ship"],
+        "tornadoComposite": comps["tor_comp"],
         "lapseRate700500CPerKm": comps["lapse_rate_700_500"],
         "freezingLevelM": comps["freezing_level_m"],
+        "mixingRatioGKg": comps["mixing_ratio_gkg"],
+        "shipAvailable": np.asarray(comps["ship_available"], dtype=float),
         "surfacePressurePa": _field(fields, "surface_pressure", np.full(shape, 101325.0)),
         "refc": _field(fields, "refc", np.zeros(shape)),
         "hgt500": hgt500,
@@ -1246,19 +1249,38 @@ def apply_category_probability_ceiling(
     probabilities: Mapping[str, np.ndarray],
     category_grid: np.ndarray,
 ) -> ProbabilityCapResult:
-    """Keep displayed hazard probabilities consistent with final risk bands."""
+    """Keep displayed hazard probabilities consistent with final risk bands.
+
+    Every hazard is clamped DOWN to the ceiling implied by its cell's
+    category. General-thunder probability is additionally floored UP to the
+    category-implied minimum (TSTM -> 0.10, MRGL -> 0.40, ENH+ -> 0.70) so any
+    organized-severe cell always carries at least general-thunder support: a
+    severe thunderstorm is, by definition, a thunderstorm. Without this floor
+    an under-predicting trained thunder head can leave an ENH severe area with
+    sub-threshold thunder probability, so the TSTM outlook reads "below
+    threshold" and the general-thunder polygon is never drawn even though
+    organized severe storms are expected. The floor is itself capped by the
+    category ceiling so it can never lift thunder past the next band.
+    """
     grid = np.asarray(category_grid, dtype=np.int16)
+    thunder_floor = _thunder_probability_from_category_grid(grid)
     capped: dict[str, np.ndarray] = {}
     capped_counts: dict[str, int] = {}
+    thunder_floored_cells = 0
     for hazard, values in probabilities.items():
         arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
         cap = _category_probability_cap_grid(hazard, grid)
         capped_values = np.minimum(arr, cap)
+        if str(hazard).lower() in {"thunder", "thunderstorm"}:
+            floored_values = np.maximum(capped_values, np.minimum(thunder_floor, cap))
+            thunder_floored_cells = int(np.sum(floored_values > capped_values))
+            capped_values = floored_values
         capped[hazard] = capped_values
         capped_counts[hazard] = int(np.sum(arr > capped_values))
     return ProbabilityCapResult(capped, {
         "categoryConsistencyCapsApplied": True,
         "categoryConsistencyCappedCellCounts": capped_counts,
+        "categoryConsistencyThunderFlooredCells": thunder_floored_cells,
         "categoryConsistencyProbabilityMax": _probability_max(capped),
     })
 
@@ -3017,6 +3039,29 @@ def _display_gap_features(
         if not projected_by_index:
             continue
         consumed_indices.update(group_indices)
+
+        # Strict containment: a higher tier must never extend beyond the
+        # next-lower tier's display outline. Each tier is smoothed/simplified
+        # independently above, so without this clip a higher band can bulge
+        # outside its containing band (the "risk pokes out of the outline"
+        # artifact). Walking low -> high and intersecting each tier with the
+        # already-nested tier below makes containment transitive across all
+        # tiers, and also removes the boxy spillover slivers that appear where
+        # a higher band escaped its outline.
+        for position in range(1, len(ordered)):
+            idx = ordered[position][0]
+            lower_idx = ordered[position - 1][0]
+            higher = projected_by_index.get(idx)
+            lower = projected_by_index.get(lower_idx)
+            if higher is None or lower is None or higher.is_empty or lower.is_empty:
+                continue
+            clipped = _clean_projected_geometry(higher.intersection(lower))
+            clipped = _drop_small_projected_parts(
+                clipped,
+                settings_by_index[idx]["minimumAreaKm2"] * 0.35 * 1_000_000.0,
+            )
+            if not clipped.is_empty:
+                projected_by_index[idx] = clipped
 
         higher_display_union = None
         for position in range(len(ordered) - 1, -1, -1):

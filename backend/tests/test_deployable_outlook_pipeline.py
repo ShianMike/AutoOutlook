@@ -2238,6 +2238,44 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(float(capped.probabilities["thunder"][0, 5]), 0.80)
         self.assertTrue(capped.report["categoryConsistencyCapsApplied"])
 
+    def test_category_probability_ceiling_floors_thunder_in_severe_cells(self) -> None:
+        # An under-predicting trained thunder head leaves organized-severe
+        # cells with sub-threshold thunder probability. The category-consistency
+        # floor must lift general-thunder up to the category-implied minimum so
+        # the TSTM outlook is drawn wherever severe storms are expected.
+        probabilities = {
+            "tornado": np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]),
+            "hail": np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]),
+            "wind": np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]),
+            "thunder": np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]),
+        }
+        final_categories = np.array([[
+            SPC_RISK_LABELS.index("NONE"),
+            SPC_RISK_LABELS.index("TSTM"),
+            SPC_RISK_LABELS.index("MRGL"),
+            SPC_RISK_LABELS.index("SLGT"),
+            SPC_RISK_LABELS.index("ENH"),
+            SPC_RISK_LABELS.index("MDT"),
+            SPC_RISK_LABELS.index("HIGH"),
+        ]], dtype=np.int16)
+
+        capped = apply_category_probability_ceiling(probabilities, final_categories)
+        thunder = capped.probabilities["thunder"][0]
+
+        # NONE stays below the lowest thunder threshold (no TSTM offshore/dry).
+        self.assertLess(float(thunder[0]), 0.01)
+        # TSTM/MRGL/SLGT/ENH+ all carry at least general-thunder support so the
+        # TSTM polygon (thunder >= 10%) is always drawn over a severe area.
+        self.assertGreaterEqual(float(thunder[1]), 0.10)
+        self.assertGreaterEqual(float(thunder[2]), 0.40)
+        self.assertGreaterEqual(float(thunder[3]), 0.40)
+        self.assertGreaterEqual(float(thunder[4]), 0.70)
+        self.assertGreaterEqual(float(thunder[5]), 0.70)
+        self.assertGreaterEqual(float(thunder[6]), 0.70)
+        # Severe hazards are not floored — only general thunder is.
+        self.assertEqual(float(capped.probabilities["hail"][0, 4]), 0.0)
+        self.assertGreater(capped.report["categoryConsistencyThunderFlooredCells"], 0)
+
     def test_postprocess_downgrades_isolated_high_cells(self) -> None:
         fields = small_fields((9, 9))
         fields["cape_mu"] = np.full((9, 9), 3200.0)
@@ -2618,7 +2656,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         lons = np.linspace(-100.0, -96.0, 5)
         category = np.full((5, 5), SPC_RISK_LABELS.index("MRGL"), dtype=np.int16)
         thunder = np.zeros((5, 5), dtype=float)
-        thunder[1:4, 1:4] = 0.01
+        thunder[1:4, 1:4] = 0.10
 
         geojson = risk_polygons_from_grid(
             lats,
@@ -2826,6 +2864,50 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             vectorization = features[category_name]["properties"]["vectorization"]
             self.assertEqual(vectorization["displayLowerOwnedBoundaryKm"], 0.0)
             self.assertEqual(vectorization["targetDisplayLowerOwnedBoundaryKm"], 5.0)
+
+    def test_risk_polygon_higher_tiers_stay_within_lower_outline(self) -> None:
+        # Trained-thunder path: TSTM comes from the thunder grid while the
+        # severe tiers come from the category grid. Independent per-tier
+        # smoothing must not let a higher tier poke outside the lower tier's
+        # outline. Assert every severe tier is contained within the filled
+        # (hole-less) outer outline of the lowest (TSTM) tier.
+        lats = np.linspace(28.0, 44.0, 110)
+        lons = np.linspace(-104.0, -84.0, 130)
+        category = np.zeros((110, 130), dtype=np.int16)
+        category[20:90, 20:110] = SPC_RISK_LABELS.index("MRGL")
+        category[36:74, 40:96] = SPC_RISK_LABELS.index("SLGT")
+        category[48:62, 56:80] = SPC_RISK_LABELS.index("ENH")
+        thunder = np.zeros((110, 130), dtype=float)
+        thunder[18:92, 18:112] = 0.40
+
+        geojson = risk_polygons_from_grid(
+            lats, lons, category, 0, "2024-05-04T12:00:00Z",
+            probabilities={"thunder": thunder}, min_cells=10,
+        )
+        features = {feature["properties"]["category"]: feature for feature in geojson["features"]}
+        self.assertIn("TSTM", features)
+        self.assertIn("ENH", features)
+
+        from shapely.geometry import MultiPolygon, Polygon
+        from shapely.ops import unary_union
+
+        def filled_outline(feature):
+            geom = projected_geojson_geometry(feature["geometry"])
+            polys = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+            return unary_union([Polygon(p.exterior) for p in polys])
+
+        tstm_outline = filled_outline(features["TSTM"])
+        tolerant_outline = tstm_outline.buffer(2_000.0)  # 2 km projection/rounding slack
+        for category_name in ("MRGL", "SLGT", "ENH"):
+            if category_name not in features:
+                continue
+            higher = projected_geojson_geometry(features[category_name]["geometry"])
+            outside = higher.difference(tolerant_outline)
+            self.assertLess(
+                float(outside.area),
+                float(higher.area) * 0.01,
+                f"{category_name} extends beyond the TSTM outline",
+            )
 
     def test_risk_polygon_display_smoothing_removes_boxy_rectangles(self) -> None:
         lats = np.linspace(28.0, 40.0, 80)
@@ -3085,7 +3167,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         thunder = constrained["features"][0]["properties"]
         self.assertEqual(thunder["hazard"], "thunder")
         self.assertEqual(thunder["label"], "TSTM")
-        self.assertEqual(thunder["probability"], 0.01)
+        self.assertEqual(thunder["probability"], 0.10)
         self.assertEqual(thunder["sourceCellCount"], 13)
         self.assertEqual(thunder["vectorization"]["supportSource"], "trained_thunder_probability")
         self.assertEqual(thunder["vectorization"]["supportGeometry"], "trained_tstm_risk_polygon")
@@ -3168,7 +3250,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             "wind": np.zeros((9, 9)),
             "thunder": np.zeros((9, 9)),
         }
-        probabilities["thunder"][2:7, 2:7] = 0.01
+        probabilities["thunder"][2:7, 2:7] = 0.10
 
         shapes = hazard_probability_shapes_from_grids(
             lats,
@@ -3186,7 +3268,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             if feature["properties"]["hazard"] == "thunder"
         ]
         self.assertEqual([feature["label"] for feature in thunder], ["TSTM"])
-        self.assertEqual(thunder[0]["probability"], 0.01)
+        self.assertEqual(thunder[0]["probability"], 0.10)
         self.assertEqual(thunder[0]["vectorization"]["supportSource"], "hazard_probability")
 
     def test_hazard_probability_shapes_generalize_nearby_contours(self) -> None:
