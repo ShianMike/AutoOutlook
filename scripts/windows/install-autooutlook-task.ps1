@@ -3,7 +3,7 @@ param(
     [string]$RepoDir = "",
     [string]$TaskName = "AutoOutlook Static Refresh",
     [string]$EnvFile = (Join-Path $env:ProgramData "AutoOutlook\refresh.env"),
-    [string[]]$UtcRunTimes = @("01:30", "07:30", "13:30", "19:30"),
+    [string[]]$UtcRunTimes = @("03:00", "09:00", "15:00", "21:00"),
     [switch]$RegisterWithoutCredentials
 )
 
@@ -137,7 +137,7 @@ Register-ScheduledTask `
     -Trigger $triggers `
     -Settings $settings `
     -Principal $principal `
-    -Description "Runs AutoOutlook refresh at 01:30Z, 07:30Z, 13:30Z, and 19:30Z." `
+    -Description "Runs AutoOutlook refresh at 03:00Z, 09:00Z, 15:00Z, and 21:00Z." `
     -Force | Out-Null
 
 Write-Host "Registered scheduled task '$TaskName'."

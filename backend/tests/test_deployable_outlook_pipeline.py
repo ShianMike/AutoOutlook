@@ -295,6 +295,19 @@ class SequenceSession:
 
 
 class DeployableOutlookPipelineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests assert the regional regime / storm-mode behavior, which is
+        # now opt-in (off by default). Enable it for the duration of the class so
+        # the regime-specific expectations remain valid.
+        self._prev_regional_regimes = os.environ.get("AUTOOUTLOOK_REGIONAL_REGIMES")
+        os.environ["AUTOOUTLOOK_REGIONAL_REGIMES"] = "1"
+
+    def tearDown(self) -> None:
+        if self._prev_regional_regimes is None:
+            os.environ.pop("AUTOOUTLOOK_REGIONAL_REGIMES", None)
+        else:
+            os.environ["AUTOOUTLOOK_REGIONAL_REGIMES"] = self._prev_regional_regimes
+
     def test_grib_bit_reader_preserves_values_wider_than_one_byte(self) -> None:
         values, bit_offset = _extract_n_bits_from_bytes(
             np.asarray([0x12, 0x34, 0xAB, 0xCD], dtype=np.uint8),
@@ -1150,6 +1163,33 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertGreater(capped.report["discreteSupercellCells"], 0)
         # raw 0.10 * 1.15 = 0.115
         self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.115)
+
+    def test_regional_regimes_disabled_by_default_skips_storm_mode_boosts(self) -> None:
+        # Same favorable discrete-supercell environment as above, but with the
+        # regional/storm-mode layer disabled (the default). The +15% tornado
+        # boost must NOT be applied; only the ingredient-based caps act, so the
+        # raw 0.10 probability passes through unchanged.
+        fields = small_fields((2, 2))
+        fields["cape_ml"] = np.full((2, 2), 1200.0)
+        fields["cape"] = np.full((2, 2), 1200.0)
+        fields["u500"] = np.full((2, 2), 40.0)
+        fields["srh01"] = np.full((2, 2), 220.0)
+        fields["srh03"] = np.full((2, 2), 350.0)
+        fields["td2m"] = np.full((2, 2), 292.0)
+
+        features = gridded_features_from_fields(fields, forecast_hour=0)
+        high_probs = {
+            "tornado": np.full((2, 2), 0.10),
+            "hail": np.full((2, 2), 0.05),
+            "wind": np.full((2, 2), 0.05),
+        }
+
+        with patch.dict(os.environ, {"AUTOOUTLOOK_REGIONAL_REGIMES": "0"}):
+            capped = apply_environmental_probability_caps(high_probs, features)
+
+        self.assertFalse(capped.report["regionalRegimeLogicEnabled"])
+        self.assertEqual(capped.report["discreteSupercellCells"], 0)
+        self.assertAlmostEqual(float(np.nanmax(capped.probabilities["tornado"])), 0.10)
 
     def test_storm_mode_qlcs_favors_wind_and_limits_tornado(self) -> None:
         fields = small_fields((2, 2))

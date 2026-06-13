@@ -6,7 +6,8 @@ import {
   resolveHazardEstimate,
   type ArtifactHazardKey,
 } from '../utils/artifactProbabilities';
-import { focusLocationFromSnapshot, formatFocusCoord } from '../utils/focusLocation';
+import { focusLocationFromSnapshot, formatFocusCoord, focusLocationFromRegion } from '../utils/focusLocation';
+import { mergedRegionFromArtifacts } from '../utils/mergedFocus';
 import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
@@ -14,17 +15,20 @@ interface HazardProbabilityBoardProps {
   snapshot: HourSnapshot | null;
   artifacts?: OutlookArtifacts | null;
   artifactStatus?: ArtifactStatus;
+  viewType?: 'hourly' | 'merged';
 }
 
 const HAZARD_ORDER: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
 
-export default function HazardProbabilityBoard({ snapshot, artifacts, artifactStatus }: HazardProbabilityBoardProps) {
-  const focus = focusLocationFromSnapshot(snapshot);
+export default function HazardProbabilityBoard({ snapshot, artifacts, artifactStatus, viewType = 'hourly' }: HazardProbabilityBoardProps) {
+  const isMerged = viewType === 'merged';
+  const mergedRegion = isMerged ? mergedRegionFromArtifacts(artifacts ?? null) : null;
+  const focus = mergedRegion ? focusLocationFromRegion(mergedRegion) : focusLocationFromSnapshot(snapshot);
   return (
     <RetroPanel
       title="Hazard Probability Board"
       eyebrow="05 / Per-hazard automated estimate"
-      badge={<FocusLocationBadge focus={focus} />}
+      badge={<FocusLocationBadge focus={focus} label={isMerged ? 'Day 1 Focus' : 'Risk Center'} showCoord={!isMerged} />}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {HAZARD_ORDER.map((key) => (

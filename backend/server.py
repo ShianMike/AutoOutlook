@@ -609,6 +609,96 @@ def incremental_outlook_hour_probability_tile(forecast_hour: int):
     return _incremental_hour_json(forecast_hour, "probability_tile.json")
 
 
+def _spc_geojsons_for_dates(target_dates, model: str, session=None) -> list[dict]:
+    """Assemble SPC Day 1 categorical geojsons for the given convective-day dates.
+
+    Serve-time and fast: reads only the cached ``spc_day1_cat.geojson`` written by
+    the merged-D1 products (each window's Day 1 outlook is the most accurate
+    envelope, and the next date's Day 1 supplies the 'Day 2' span). No blocking
+    network fetches happen in the request path; if a window's SPC isn't cached,
+    that hour simply has no backing (the raw tile is served).
+    """
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+    geojsons: list[dict] = []
+    for target_date in target_dates:
+        cached = artifact_root / f"merged_{model}_{target_date.isoformat()}" / "spc_day1_cat.geojson"
+        if not cached.exists():
+            continue
+        try:
+            geo = json.loads(cached.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(geo, dict):
+            geojsons.append(geo)
+    return geojsons
+
+
+@app.get("/api/outlook/incremental/hour/<int:forecast_hour>/spc-backed-tile")
+def incremental_outlook_hour_spc_backed_tile(forecast_hour: int):
+    """Serve an hourly probability tile backed by the SPC envelope for its window.
+
+    The raw artifact is never modified; SPC backing is applied at serve time.
+    ``mode`` defaults to ``ceiling`` (SPC as a per-day envelope) and the SPC day
+    window (Day 1 / Day 2) is selected automatically from the hour's valid time.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    hour = int(forecast_hour)
+    index = _incremental_index()
+    if index is not None:
+        ready_hours = {
+            int(item) for item in index.get("readyForecastHours", [])
+            if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+        }
+        if hour not in ready_hours:
+            return _json_error({
+                "error": f"incremental outlook hour F{hour:02d} is not ready",
+                "code": "incremental_hour_pending",
+            }, 404)
+
+    tile_path = _incremental_hour_path(hour) / "probability_tile.json"
+    if not _artifact_exists(tile_path):
+        return _artifact_not_ready_response(tile_path)
+    tile = _read_json_path(tile_path)
+    if not isinstance(tile, dict):
+        return _json_error({"error": "probability tile unavailable", "code": "tile_unavailable"}, 404)
+
+    mode = (request.args.get("mode") or "ceiling").strip().lower()
+    if mode not in ("ceiling", "blend"):
+        mode = "ceiling"
+
+    cycle_time = _parse_iso_utc(index.get("cycleTimeISO")) if index else None
+    if cycle_time is None:
+        cycle_time = datetime.now(timezone.utc)
+    base_date = cycle_time.date()
+    window_dates = [base_date, base_date + timedelta(days=1)]
+
+    cache_key = f"spc-geojsons-{_request_model()}-{base_date.isoformat()}"
+    spc_geojsons = cache.get(cache_key)
+    if spc_geojsons is None:
+        spc_geojsons = _spc_geojsons_for_dates(window_dates, _request_model())
+        cache.set(cache_key, spc_geojsons)
+
+    if not spc_geojsons:
+        # No SPC envelope available; return the raw tile with a note.
+        tile = dict(tile)
+        tile["spcBacking"] = {"spcSupportApplied": False, "reason": "no SPC outlook available for window"}
+        return _json_response(tile)
+
+    from backend.ml.merged_outlook import spc_backed_hour_tile
+    result_key = f"spc-backed-tile-{_request_model()}-{base_date.isoformat()}-{hour}-{mode}"
+    cached_tile = cache.get(result_key)
+    if cached_tile is not None:
+        return _json_response(cached_tile)
+    try:
+        result = spc_backed_hour_tile(tile, spc_geojsons, mode=mode)
+    except Exception:
+        log.exception("SPC-backed hour tile transform failed for F%02d", hour)
+        return _json_error({"error": "spc backing failed", "code": "spc_backing_failed"}, 500)
+    cache.set(result_key, result["tile"])
+    return _json_response(result["tile"])
+
+
 @app.get("/api/outlook/incremental/hour/<int:forecast_hour>/metadata")
 def incremental_outlook_hour_metadata(forecast_hour: int):
     return _incremental_hour_json(forecast_hour, "metadata.json")

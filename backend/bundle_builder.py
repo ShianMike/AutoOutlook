@@ -1645,8 +1645,18 @@ def _blend_ingredients(
         if key in categorical:
             out[key] = nearest.get(key, value)
             continue
-        av = float(value)
-        bv = float(b.get(key, value))
+        try:
+            av = float(value)
+        except (TypeError, ValueError):
+            # Non-numeric ingredient (e.g. an ISO timestamp that leaked into the
+            # ingredients dict). Pass it through from the nearest anchor instead
+            # of attempting to blend it as a float.
+            out[key] = nearest.get(key, value)
+            continue
+        try:
+            bv = float(b.get(key, value))
+        except (TypeError, ValueError):
+            bv = av
         blended = _lerp(av, bv, weight)
         if key == "initiationConf":
             blended = float(np.clip(blended, 0.0, 1.0))

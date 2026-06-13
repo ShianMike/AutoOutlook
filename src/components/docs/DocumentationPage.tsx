@@ -20,7 +20,7 @@ const LEVELS: LevelRow[] = [
   { code: 'SLGT', blurb: 'Scattered severe storms. A few organized cells with brief tornadoes, large hail, or damaging gusts.',                        tornado: '≥ 5%',  hail: '≥ 15%', wind: '≥ 15%' },
   { code: 'ENH',  blurb: 'Numerous severe storms. Several intense, longer-lived storms; significant severe possible.',                                 tornado: '≥ 10%', hail: '≥ 30%', wind: '≥ 30%' },
   { code: 'MOD',  blurb: 'Widespread severe weather. Strong/significant tornadoes, very large hail, or widespread damaging winds expected.',           tornado: '≥ 30%', hail: '≥ 60%', wind: '≥ 60%' },
-  { code: 'HIGH', blurb: 'Outbreak-level threat. Long-track strong tornadoes or extensive derecho-scale wind events likely.',                          tornado: '≥ 45%', hail: 'not used', wind: '60% + sig' },
+  { code: 'HIGH', blurb: 'Outbreak-level threat. Reserved for long-track strong tornadoes at the highest tornado probabilities; severe hail and wind cap at MOD in this system.', tornado: '≥ 45%', hail: 'not used', wind: 'not used' },
 ];
 
 interface ConfidenceFloor {

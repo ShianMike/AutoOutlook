@@ -7,6 +7,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import numpy as np
 
@@ -14,10 +15,14 @@ from backend.ml.merged_outlook import (
     _merge_cig_shape_collections,
     _spc_geojson_max_category_ordinal,
     available_merged_d1_dates,
+    blend_merged_outlook_with_spc,
     merge_cycles_for_spc_window,
     resolve_cycle_dirs_for_merged_d1_date,
     resolve_merge_cycle_dirs,
+    select_spc_geojson_for_valid_time,
+    spc_backed_hour_tile,
     spc_d1_window,
+    spc_day_window,
 )
 
 
@@ -117,6 +122,30 @@ def _write_cycle_artifacts(
         tile = _make_probability_tile(grid, stride=tile_stride)
         (hour_dir / "probability_tile.json").write_text(json.dumps(tile), encoding="utf-8")
     return cycle_dir
+
+
+def _spc_anchoring_disabled():
+    """Context manager that runs the merge with no SPC backing (pure HRRR).
+
+    Used by tests that exercise the underlying HRRR max-merge layer, which now
+    sits beneath the SPC-support blend.
+    """
+    return mock.patch.dict(
+        "os.environ",
+        {"AUTOOUTLOOK_SPC_SUPPORT_WEIGHT": "0"},
+    )
+
+
+def _spc_anchoring_enabled():
+    """Context manager that runs the merge fully anchored to SPC (weight 1.0).
+
+    The default backing is partial (25%), so tests that verify full-anchor
+    behavior set the support weight to 1.0 explicitly.
+    """
+    return mock.patch.dict(
+        "os.environ",
+        {"AUTOOUTLOOK_SPC_SUPPORT_WEIGHT": "1"},
+    )
 
 
 def _mock_spc_fetch(geojson: dict[str, Any] | None = None):
@@ -474,11 +503,12 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
                 grid,
             )
             output = root / "output"
-            merge_cycles_for_spc_window(
-                [cycle_dir],
-                spc_fetch_fn=_mock_spc_fetch(),
-                output_dir=output,
-            )
+            with _spc_anchoring_disabled():
+                merge_cycles_for_spc_window(
+                    [cycle_dir],
+                    spc_fetch_fn=_mock_spc_fetch(),
+                    output_dir=output,
+                )
 
             merged_tile = json.loads((output / "merged_probability_tile.json").read_text(encoding="utf-8"))
             risk_features = merged_tile["riskShapes"]["features"]
@@ -666,13 +696,124 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             grid_high = np.array([[3, 2, 1], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]])
             dir_a = _write_cycle_artifacts(root, "00z", "2026-06-03T00:00:00Z", list(range(12, 25)), grid_low)
             dir_b = _write_cycle_artifacts(root, "12z", "2026-06-03T12:00:00Z", list(range(0, 13)), grid_high)
-            result = merge_cycles_for_spc_window(
-                [dir_a, dir_b],
-                spc_fetch_fn=_mock_spc_fetch(),
-            )
+            with _spc_anchoring_disabled():
+                result = merge_cycles_for_spc_window(
+                    [dir_a, dir_b],
+                    spc_fetch_fn=_mock_spc_fetch(),
+                )
             pred = result.get("predictedCategories", {})
             has_nonzero = any(pred.get(cat, 0) > 0 for cat in ("SLGT", "ENH", "MRGL", "TSTM"))
             self.assertTrue(has_nonzero, f"Expected non-zero predicted categories but got {pred}")
+
+    def test_spc_anchored_outlook_conforms_categories_to_spc(self) -> None:
+        # HRRR paints a broad ENH blob; SPC only draws a small SLGT box.
+        # With full anchoring (weight 1.0), the merged categories must follow
+        # SPC: nothing outside the SPC box, and no category above SPC's level.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.full((9, 9), 4, dtype=int)  # ENH everywhere
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                list(range(12, 19)),
+                grid,
+            )
+            # SPC SLGT box covering only part of the tile domain.
+            spc_geojson = _make_spc_geojson(
+                label="SLGT",
+                dn=3,
+                polygon=[[[-100.0, 34.0], [-95.0, 34.0], [-95.0, 38.0], [-100.0, 38.0], [-100.0, 34.0]]],
+            )
+            output = root / "output"
+            with _spc_anchoring_enabled():
+                result = merge_cycles_for_spc_window(
+                    [cycle_dir],
+                    spc_fetch_fn=_mock_spc_fetch(spc_geojson),
+                    output_dir=output,
+                )
+
+            support = result.get("spcSupport", {})
+            self.assertTrue(support.get("spcSupportApplied"))
+            self.assertTrue(support.get("fullyAnchored"))
+            self.assertEqual(support.get("spcSupportWeight"), 1.0)
+            pred = result.get("predictedCategories", {})
+            # SPC has no ENH/MDT/HIGH, so the anchored output must not either,
+            # even though HRRR predicted ENH across the whole grid.
+            self.assertEqual(pred.get("ENH", 0), 0)
+            self.assertEqual(pred.get("MDT", 0), 0)
+            self.assertEqual(pred.get("HIGH", 0), 0)
+            # The official SLGT footprint should be represented.
+            self.assertGreater(pred.get("SLGT", 0), 0)
+
+    def test_spc_support_default_backs_outlook_50_percent(self) -> None:
+        # HRRR paints a broad ENH blob; SPC draws only a small SLGT box.
+        # With the default 50% backing, the outlook is an even blend: outside
+        # the SPC box the broad ENH is pulled halfway toward NONE, and inside
+        # the box it blends with SLGT.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.full((9, 9), 4, dtype=int)  # ENH everywhere
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                list(range(12, 19)),
+                grid,
+            )
+            spc_geojson = _make_spc_geojson(
+                label="SLGT",
+                dn=3,
+                polygon=[[[-100.0, 34.0], [-95.0, 34.0], [-95.0, 38.0], [-100.0, 38.0], [-100.0, 34.0]]],
+            )
+            output = root / "output"
+            # No env override -> default 50% support.
+            result = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(spc_geojson),
+                output_dir=output,
+            )
+
+            support = result.get("spcSupport", {})
+            self.assertTrue(support.get("spcSupportApplied"))
+            self.assertFalse(support.get("fullyAnchored"))
+            self.assertAlmostEqual(support.get("spcSupportWeight"), 0.50)
+            pred = result.get("predictedCategories", {})
+            # Outside the SPC box: 0.5*ENH(4) + 0.5*NONE(0) = 2.0 -> MRGL, so the
+            # broad ENH is pulled down to MRGL and MRGL dominates. Inside the SPC
+            # SLGT box: 0.5*4 + 0.5*3 = 3.5 -> ENH (round-half-to-even -> 4).
+            self.assertGreater(pred.get("MRGL", 0), 0)
+            self.assertGreater(pred.get("MRGL", 0), pred.get("ENH", 0))
+
+    def test_spc_support_blends_hazard_probabilities_toward_spc(self) -> None:
+        # SPC draws SLGT over the whole 3x3 domain; HRRR has zero hazard
+        # probability. At weight 0.5 the hazard probabilities must be pulled up
+        # toward the SPC-implied level (not left at zero), bounded by the blended
+        # category ceiling.
+        lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
+        lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
+        hrrr_grid = np.full((3, 3), 3, dtype=np.int16)  # SLGT
+        hrrr_probs = {
+            "tornado": np.zeros((3, 3)),
+            "hail": np.zeros((3, 3)),
+            "wind": np.zeros((3, 3)),
+            "thunder": np.zeros((3, 3)),
+        }
+        spc_geojson = _make_spc_geojson(
+            label="SLGT",
+            dn=3,
+            polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
+        )
+
+        out = blend_merged_outlook_with_spc(
+            lats, lons, hrrr_grid, hrrr_probs, spc_geojson, weight=0.5
+        )
+
+        self.assertTrue(out["report"]["hazardProbabilitiesBlended"])
+        # HRRR hail/wind were 0 but SPC SLGT implies a positive hail/wind band,
+        # so the blended probabilities must be lifted above zero.
+        self.assertGreater(float(np.max(out["probabilities"]["hail"])), 0.0)
+        self.assertGreater(float(np.max(out["probabilities"]["wind"])), 0.0)
 
     def test_resolve_cycle_dirs_for_window(self) -> None:
         from backend.ml.merged_outlook import resolve_cycle_dirs_for_window
@@ -716,6 +857,87 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             )
             self.assertEqual(result["d1WindowValidISO"], "2026-06-03T12:00:00Z")
             self.assertEqual(result["d1WindowExpireISO"], "2026-06-04T12:00:00Z")
+
+
+class TestSpcBackedHourTile(unittest.TestCase):
+    @staticmethod
+    def _hour_tile(category: int, valid_iso: str, forecast_hour: int) -> dict[str, Any]:
+        lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
+        lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
+        grid = np.full((3, 3), category, dtype=int)
+        return {
+            "forecastHour": forecast_hour,
+            "validTimeISO": valid_iso,
+            "stride": 1,
+            "lats": lats.tolist(),
+            "lons": lons.tolist(),
+            "categoryOrdinal": grid.tolist(),
+            "probabilities": {
+                "tornado": np.zeros((3, 3)).tolist(),
+                "hail": np.full((3, 3), 0.5).tolist(),
+                "wind": np.zeros((3, 3)).tolist(),
+                "thunder": np.full((3, 3), 0.5).tolist(),
+            },
+        }
+
+    def _spc(self, valid_iso, expire_iso, label, dn):
+        return _make_spc_geojson(
+            valid_iso=valid_iso,
+            expire_iso=expire_iso,
+            label=label,
+            dn=dn,
+            polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
+        )
+
+    def test_spc_day_window_anchors_to_12z(self) -> None:
+        valid, expire = spc_day_window(datetime(2026, 6, 10, 18, tzinfo=timezone.utc))
+        self.assertEqual(valid, datetime(2026, 6, 10, 12, tzinfo=timezone.utc))
+        self.assertEqual(expire, datetime(2026, 6, 11, 12, tzinfo=timezone.utc))
+        # Before 12Z rolls back to the previous convective day.
+        valid2, _ = spc_day_window(datetime(2026, 6, 10, 6, tzinfo=timezone.utc))
+        self.assertEqual(valid2, datetime(2026, 6, 9, 12, tzinfo=timezone.utc))
+
+    def test_window_selection_switches_d1_to_d2(self) -> None:
+        d1 = self._spc("2026-06-10T12:00:00Z", "2026-06-11T12:00:00Z", "SLGT", 3)
+        d2 = self._spc("2026-06-11T12:00:00Z", "2026-06-12T12:00:00Z", "MRGL", 2)
+        # An hour valid in the D1 window selects D1; one in the D2 window selects D2.
+        sel_d1 = select_spc_geojson_for_valid_time([d1, d2], datetime(2026, 6, 10, 18, tzinfo=timezone.utc))
+        sel_d2 = select_spc_geojson_for_valid_time([d1, d2], datetime(2026, 6, 11, 18, tzinfo=timezone.utc))
+        self.assertIs(sel_d1, d1)
+        self.assertIs(sel_d2, d2)
+        # An hour outside both windows selects nothing.
+        self.assertIsNone(
+            select_spc_geojson_for_valid_time([d1, d2], datetime(2026, 6, 20, 18, tzinfo=timezone.utc))
+        )
+
+    def test_ceiling_caps_hour_to_spc_and_zeroes_outside(self) -> None:
+        # HRRR ENH everywhere; SPC D1 SLGT box covering the whole 3x3 domain.
+        d1 = self._spc("2026-06-10T12:00:00Z", "2026-06-11T12:00:00Z", "SLGT", 3)
+        tile = self._hour_tile(category=4, valid_iso="2026-06-10T18:00:00Z", forecast_hour=18)
+        out = spc_backed_hour_tile(tile, [d1], mode="ceiling")
+        self.assertTrue(out["applied"])
+        grid = np.asarray(out["tile"]["categoryOrdinal"])
+        # min(ENH=4, SLGT=3) = SLGT everywhere inside the box; never above SPC.
+        self.assertTrue(np.all(grid <= 3))
+        self.assertTrue(np.any(grid == 3))
+
+    def test_ceiling_unchanged_when_no_spc_window(self) -> None:
+        d1 = self._spc("2026-06-10T12:00:00Z", "2026-06-11T12:00:00Z", "SLGT", 3)
+        # Tile valid days later: no SPC window covers it, so it is returned as-is.
+        tile = self._hour_tile(category=4, valid_iso="2026-06-20T18:00:00Z", forecast_hour=18)
+        out = spc_backed_hour_tile(tile, [d1], mode="ceiling")
+        self.assertFalse(out["applied"])
+        self.assertEqual(out["tile"]["categoryOrdinal"], tile["categoryOrdinal"])
+
+    def test_d2_window_hour_uses_day2_outlook(self) -> None:
+        d1 = self._spc("2026-06-10T12:00:00Z", "2026-06-11T12:00:00Z", "ENH", 4)
+        d2 = self._spc("2026-06-11T12:00:00Z", "2026-06-12T12:00:00Z", "MRGL", 2)
+        # Hour valid in the D2 window: capped by Day 2's MRGL, not Day 1's ENH.
+        tile = self._hour_tile(category=4, valid_iso="2026-06-11T18:00:00Z", forecast_hour=42)
+        out = spc_backed_hour_tile(tile, [d1, d2], mode="ceiling")
+        self.assertTrue(out["applied"])
+        grid = np.asarray(out["tile"]["categoryOrdinal"])
+        self.assertTrue(np.all(grid <= 2))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Windows Task Scheduler Runner
 
-This is now a fallback runner. The scheduled GitHub Action uses the same cycle-aligned `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z` primary schedule, with backup triggers 15 minutes later in case GitHub drops a scheduled event.
+This is now a fallback runner. The scheduled GitHub Action uses the same cycle-aligned `03:00Z`, `09:00Z`, `15:00Z`, and `21:00Z` primary schedule, with backup triggers 15 minutes later in case GitHub drops a scheduled event.
 
 This is the temporary free runner for AutoOutlook on the local Windows machine. It replaces the GitHub Actions scheduler with a Windows scheduled task that:
 
@@ -68,12 +68,12 @@ Then rerun the installer to register the cycle-aligned task:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1
 ```
 
-By default, the Windows task runs at `01:30Z`, `07:30Z`, `13:30Z`, and `19:30Z`, which is one hour and thirty minutes after the `00Z`, `06Z`, `12Z`, and `18Z` HRRR cycles. On a UTC+8 Windows timezone, that appears in Task Scheduler as `09:30`, `15:30`, `21:30`, and `03:30` local time. The GitHub Actions workflow also has backup triggers at `01:45Z`, `07:45Z`, `13:45Z`, and `19:45Z`; the workflow freshness gate skips the backup when the primary run already deployed the cycle.
+By default, the Windows task runs at `03:00Z`, `09:00Z`, `15:00Z`, and `21:00Z`, which is about two and a half to three hours after the `00Z`, `06Z`, `12Z`, and `18Z` HRRR cycles — late enough for the extended f48 index to have posted, so the freshly initialized cycle is selectable instead of falling back to the previous one. On a UTC+8 Windows timezone, that appears in Task Scheduler as `11:00`, `17:00`, `23:00`, and `05:00` local time. The GitHub Actions workflow also has backup triggers at `03:15Z`, `09:15Z`, `15:15Z`, and `21:15Z`; the workflow freshness gate skips the backup when the primary run already deployed the cycle.
 
 To override the UTC run times:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1 -UtcRunTimes 01:30,07:30,13:30,19:30
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\install-autooutlook-task.ps1 -UtcRunTimes 03:00,09:00,15:00,21:00
 ```
 
 ## Manual Test

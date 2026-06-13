@@ -177,6 +177,7 @@ export interface MergedD1VerificationSummary extends SpcVerificationSummary {
   contributingHours?: Array<{ cycle: string; forecastHour: number; validTimeISO: string }>;
   mergeMethod?: 'maximum';
   latencyMs?: number;
+  generatedAtISO?: string;
 }
 
 export interface SpcStormReport {

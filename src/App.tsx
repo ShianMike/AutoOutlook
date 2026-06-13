@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
-import { useOutlookArtifacts, useMergedD1Verification, useSpcStormReports } from './hooks/useOutlookArtifacts';
+import { useOutlookArtifacts, useMergedD1Verification, useSpcStormReports, useMergedD1Artifacts } from './hooks/useOutlookArtifacts';
 import { FORECAST_HOUR_LABELS, type ActiveRegion } from './types/forecast';
 
 import DashboardSidebar from './components/DashboardSidebar';
@@ -69,6 +69,17 @@ export default function App() {
   );
   const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate, dashboardDataEnabled);
   const stormReports = useSpcStormReports(activeRegion, selectedMergedDate, dashboardDataEnabled);
+  const isMerged = viewType === 'merged';
+  // In merged mode the summary panels must describe the multi-cycle Day 1
+  // outlook (which the map already shows), not the selected forecast hour.
+  // Feed them the merged artifact + a hour-0 snapshot so the category and
+  // hazard probabilities match the merged map instead of reading e.g. MRGL
+  // from the scrubber hour while the map shows ENH.
+  const mergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
+    enabled: dashboardDataEnabled && isMerged,
+  });
+  const panelArtifactState = isMerged ? mergedArtifacts : outlookArtifacts;
+  const panelSnapshot = isMerged && snapshot ? { ...snapshot, forecastHour: 0 } : snapshot;
   const mlDriven = Boolean(auto.bundle?.mlModel?.active && auto.bundle.mlHazardHours);
   const hourLabel = snapshot
     ? FORECAST_HOUR_LABELS[snapshot.forecastHour] ?? `+${snapshot.forecastHour}h`
@@ -173,11 +184,11 @@ export default function App() {
           </section>
 
           <section id="primary-outlook" className="scroll-mt-4">
-            <PrimaryOutlookBanner snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
+            <PrimaryOutlookBanner snapshot={panelSnapshot} artifacts={panelArtifactState.artifacts} artifactStatus={panelArtifactState.status} viewType={viewType} />
           </section>
 
           <section id="discussion" className="scroll-mt-4">
-            <ForecastDiscussion snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
+            <ForecastDiscussion snapshot={snapshot} artifacts={panelArtifactState.artifacts} artifactStatus={panelArtifactState.status} viewType={viewType} />
           </section>
 
           <section id="verification" className="scroll-mt-4">
@@ -189,11 +200,11 @@ export default function App() {
           </section>
 
           <section id="hazards" className="scroll-mt-4">
-            <HazardProbabilityBoard snapshot={snapshot} artifacts={outlookArtifacts.artifacts} artifactStatus={outlookArtifacts.status} />
+            <HazardProbabilityBoard snapshot={panelSnapshot} artifacts={panelArtifactState.artifacts} artifactStatus={panelArtifactState.status} viewType={viewType} />
           </section>
 
           <section id="ingredients" className="scroll-mt-4">
-            <EnvironmentalIngredientsGrid snapshot={snapshot} />
+            <EnvironmentalIngredientsGrid snapshot={snapshot} artifacts={panelArtifactState.artifacts} viewType={viewType} />
           </section>
 
           <section id="timeline" className="scroll-mt-4">
@@ -240,7 +251,7 @@ export default function App() {
         <footer className="border-t-[3px] border-ink bg-ink text-paper">
           <div className="w-full px-4 py-3 xl:px-5 flex items-center justify-between flex-wrap gap-2">
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-              AutoOutlook · Automated Convective Risk Intelligence · v1.2.1
+              AutoOutlook · Automated Convective Risk Intelligence · v1.2.2
             </span>
             <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
               {mlDriven

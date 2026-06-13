@@ -1,10 +1,14 @@
 import type { HourSnapshot, Ingredients } from '../types/forecast';
-import { focusLocationFromSnapshot } from '../utils/focusLocation';
+import type { OutlookArtifacts } from '../types/outlookArtifacts';
+import { focusLocationFromSnapshot, focusLocationFromRegion } from '../utils/focusLocation';
+import { mergedRegionFromArtifacts } from '../utils/mergedFocus';
 import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
 interface EnvironmentalIngredientsGridProps {
   snapshot: HourSnapshot | null;
+  artifacts?: OutlookArtifacts | null;
+  viewType?: 'hourly' | 'merged';
 }
 
 interface MetricSpec {
@@ -64,13 +68,15 @@ const GROUPS: { title: string; metrics: MetricSpec[] }[] = [
   },
 ];
 
-export default function EnvironmentalIngredientsGrid({ snapshot }: EnvironmentalIngredientsGridProps) {
-  const focus = focusLocationFromSnapshot(snapshot);
+export default function EnvironmentalIngredientsGrid({ snapshot, artifacts, viewType = 'hourly' }: EnvironmentalIngredientsGridProps) {
+  const isMerged = viewType === 'merged';
+  const mergedRegion = isMerged ? mergedRegionFromArtifacts(artifacts ?? null) : null;
+  const focus = mergedRegion ? focusLocationFromRegion(mergedRegion) : focusLocationFromSnapshot(snapshot);
   return (
     <RetroPanel
       title="Environmental Ingredients"
       eyebrow="06 / HRRR fields + derived proxies"
-      badge={<FocusLocationBadge focus={focus} />}
+      badge={<FocusLocationBadge focus={focus} label={isMerged ? 'Day 1 Focus' : 'Risk Center'} showCoord={!isMerged} />}
     >
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {GROUPS.map((g) => (

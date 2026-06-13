@@ -3,13 +3,15 @@ import type { FocusLocation } from '../utils/focusLocation';
 interface FocusLocationBadgeProps {
   focus: FocusLocation;
   label?: string;
+  showCoord?: boolean;
 }
 
 export default function FocusLocationBadge({
   focus,
   label = 'Risk Center',
+  showCoord = true,
 }: FocusLocationBadgeProps) {
-  const detail = [focus.usesCoordinateLabel ? '' : focus.coord, focus.states].filter(Boolean).join(' · ');
+  const detail = [showCoord && !focus.usesCoordinateLabel ? focus.coord : '', focus.states].filter(Boolean).join(' · ');
   return (
     <div className="max-w-[16rem] border-[2px] border-paper px-2 py-1 text-right">
       <div className="font-mono text-[8px] font-bold uppercase tracking-[0.18em] text-paper/55">

@@ -845,6 +845,74 @@ export function useMergedD1Artifacts(
   return state;
 }
 
+export function useSpcBackedHourArtifacts(
+  activeRegion: ActiveRegion = 'conus',
+  forecastHour: number | undefined,
+  enabled = true,
+): OutlookArtifactState {
+  const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
+
+  useEffect(() => {
+    if (!enabled || forecastHour === undefined) {
+      setState(INITIAL_STATE);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setState(INITIAL_STATE);
+
+    const load = async () => {
+      try {
+        const tile = await fetchJson<OutlookProbabilityTile>(
+          `/api/outlook/incremental/hour/${forecastHour}/spc-backed-tile`,
+          controller.signal,
+          activeRegion,
+        );
+        const probabilityTiles: OutlookProbabilityTiles = {
+          cycle: 'SPC-backed hourly',
+          hours: [
+            {
+              forecastHour,
+              validTimeISO: tile.validTimeISO,
+              tile,
+            },
+          ],
+        };
+        const metadata: OutlookArtifactMetadata = {
+          generatedAtISO: new Date().toISOString(),
+          cycle: 'SPC-backed hourly',
+          mode: 'full',
+        };
+        setState({
+          status: 'ready',
+          artifacts: {
+            metadata,
+            riskPolygons: tile.riskShapes ?? { type: 'FeatureCollection', features: [] },
+            probabilityTiles,
+            selectedArtifactForecastHour: forecastHour,
+            selectedHourStatus: 'ready',
+          },
+          message: null,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setState({
+          status: 'error',
+          artifacts: null,
+          message: `Failed to load SPC-backed hour: ${message}`,
+        });
+      }
+    };
+
+    load();
+    return () => controller.abort();
+  }, [activeRegion, forecastHour, enabled]);
+
+  return state;
+}
+
+
 export function useSpcStormReports(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,

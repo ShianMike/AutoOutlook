@@ -27,6 +27,19 @@ from backend import metpy_diagnostics as diag
 
 SPC_RISK_LABELS = ("NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH")
 SPC_CIG_CATEGORY_FEATURE_FLAG = "AUTOOUTLOOK_SPC_CIG_CATEGORIES"
+REGIONAL_REGIME_LOGIC_FLAG = "AUTOOUTLOOK_REGIONAL_REGIMES"
+_STORM_MODE_KEYS = (
+    "discrete_supercell",
+    "mixed_mode",
+    "qlcs",
+    "mcs",
+    "pulse",
+    "elevated",
+    "high_based",
+    "landspout",
+    "tropical",
+    "cold_core",
+)
 CIG_SOURCE_ENVIRONMENTAL = "environmental_estimator_v1"
 CIG_SOURCE_TRAINED_INTENSITY = "trained_intensity_with_environment_fallback_v1"
 _MATPLOTLIB_CONTOUR_LOCK = threading.Lock()
@@ -806,6 +819,20 @@ def apply_environmental_probability_caps(
 
     The caps are deliberately conservative because these probabilities feed
     both category generation and frontend hazard displays.
+
+    Two layers of suppression are applied:
+
+    1. Ingredient-based environmental caps and the convective-initiation guard.
+       These are simple physical floors/ceilings derived from the HRRR
+       ingredients (CAPE, shear, SRH, LCL, CIN, simulated reflectivity) and are
+       always applied. They let the trained model + ingredients drive the
+       outlook while preventing obvious false alarms.
+
+    2. Geography-bound regional regime heuristics and storm-mode bonus/penalty
+       multipliers. These are hand-tuned overrides layered on top of the model
+       and are only applied when :func:`_regional_regime_logic_enabled` is true
+       (env var ``AUTOOUTLOOK_REGIONAL_REGIMES``). They are off by default so the
+       default outlook is model/ingredient driven.
     """
     raw = {hazard: np.clip(np.asarray(values, dtype=float), 0.0, 1.0) for hazard, values in probabilities.items()}
     shape = features.shape
@@ -877,8 +904,13 @@ def apply_environmental_probability_caps(
     )
     wind_cap = _cap_where(wind_cap, (dewpoint < 52.0) | (cin <= -225.0), 0.14, reason_counts, "strongCapOrDryAir")
 
-    # Set up coordinates for Plains and Great Lakes logic
-    if lats is not None and lons is not None:
+    # Set up coordinates for Plains and Great Lakes logic. When regional regime
+    # logic is disabled (the default), the lat/lon grids are withheld so every
+    # geography-bound detector below returns an all-False mask and the storm-mode
+    # multipliers are no-ops, leaving the outlook driven purely by the trained
+    # model + the ingredient-based caps already applied above.
+    regional_regimes_enabled = _regional_regime_logic_enabled()
+    if regional_regimes_enabled and lats is not None and lons is not None:
         lat_grid, lon_grid = _lat_lon_grid(lats, lons, shape)
     else:
         lat_grid, lon_grid = None, None
@@ -901,20 +933,23 @@ def apply_environmental_probability_caps(
     )
 
     # Diagnose storm modes
-    modes = _classify_storm_modes(
-        sbcape=features.raw["sbcape"],
-        mucape=mucape,
-        mlcape=mlcape,
-        cin=cin,
-        dewpoint=dewpoint,
-        lcl=lcl,
-        srh01=srh01,
-        srh03=srh03,
-        shear=shear,
-        storm_rel=storm_rel,
-        hgt500=features.raw["hgt500"],
-        pwat=features.raw["pwatIn"],
-    )
+    if regional_regimes_enabled:
+        modes = _classify_storm_modes(
+            sbcape=features.raw["sbcape"],
+            mucape=mucape,
+            mlcape=mlcape,
+            cin=cin,
+            dewpoint=dewpoint,
+            lcl=lcl,
+            srh01=srh01,
+            srh03=srh03,
+            shear=shear,
+            storm_rel=storm_rel,
+            hgt500=features.raw["hgt500"],
+            pwat=features.raw["pwatIn"],
+        )
+    else:
+        modes = {key: np.zeros(shape, dtype=bool) for key in _STORM_MODE_KEYS}
 
     # Diagnose Dixie Alley & Southeast severe weather regimes
     dixie_se = _detect_dixie_se_regimes(
@@ -1182,6 +1217,7 @@ def apply_environmental_probability_caps(
 
     report = {
         "environmentalCapsApplied": True,
+        "regionalRegimeLogicEnabled": regional_regimes_enabled,
         "modelCategoryCap": SPC_RISK_LABELS[model_cap],
         "rawProbabilityMax": _probability_max(raw),
         "cappedProbabilityMax": _probability_max(capped),
@@ -1448,6 +1484,20 @@ def category_grid_from_probabilities(
 
 def _spc_cig_categories_enabled() -> bool:
     return os.environ.get(SPC_CIG_CATEGORY_FEATURE_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _regional_regime_logic_enabled() -> bool:
+    """Whether geography-bound regional regime heuristics modulate the outlook.
+
+    Defaults to disabled so the trained model + ingredient-based environmental
+    caps drive the outlook. When the ``AUTOOUTLOOK_REGIONAL_REGIMES`` env var is
+    truthy, the bounding-box regional engines (Dixie/SE, Midwest/Corn Belt, High
+    Plains/Front Range, Northern Plains, Northeast/Appalachians, Desert SW,
+    Intermountain West, PNW, Great Basin, California, Great Lakes) and the
+    associated storm-mode bonus/penalty multipliers are applied on top of the
+    model output.
+    """
+    return os.environ.get(REGIONAL_REGIME_LOGIC_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def estimate_cig_grids(features: GriddedFeatures) -> dict[str, np.ndarray]:

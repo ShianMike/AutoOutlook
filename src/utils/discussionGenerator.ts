@@ -522,13 +522,173 @@ function buildUncertainty(snap: HourSnapshot): string {
   return `...UNCERTAINTY...\n${parts.join('\n')}`;
 }
 
+// ── Merged (multi-cycle Day 1) discussion ───────────────────────────
+// The hourly builders narrate a single hour's ingredient profile (CAPE,
+// shear, LCL, etc.). A merged Day 1 product has no single environment, so
+// the merged discussion is intentionally different: it describes the overall
+// risk envelope, the categorical reasoning, and the aggregate hazard
+// probabilities, without quoting hour-specific parameter values.
+
+function mergedThreatList(snap: HourSnapshot, ctx: DiscussionContext): HazardKey[] {
+  const keys: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
+  return keys
+    .map((k) => ({ k, p: resolveHazardEstimate(k, snap, ctx.artifacts, ctx.artifactStatus).probability }))
+    .filter((x) => Number.isFinite(x.p) && x.p > 0.02)
+    .sort((a, b) => b.p - a.p)
+    .map((x) => x.k);
+}
+
+function categoryNarrative(category: RiskCategory, hazardTag: string, region: string): string {
+  switch (category) {
+    case 'TSTM': return `Severe coverage is low near ${region}, and any stronger storm should be brief and isolated.`;
+    case 'MRGL': return `A low-coverage severe setup is expected near ${region}, with isolated ${hazardTag} where storms can briefly organize.`;
+    case 'SLGT': return `Scattered organized severe storms are possible near ${region}, with ${hazardTag} the main concern.`;
+    case 'ENH': return `A more focused area of organized severe storms is expected near ${region}, with ${hazardTag} the main concern.`;
+    case 'MOD': return `A higher-end severe setup is possible near ${region}, with numerous severe storms or a few intense storms expected.`;
+    case 'HIGH': return `A major severe weather setup is expected near ${region}, with high confidence in numerous intense storms.`;
+    default: return `Organized severe potential near ${region} is uncertain.`;
+  }
+}
+
+function mergedSummaryLine(snap: HourSnapshot, ctx: DiscussionContext): string {
+  const region = discussionFocus(snap);
+  const out = snap.outlook;
+  if (out.category === 'TSTM') {
+    return `...${region}...\nGeneral thunderstorms are the main story across the Day 1 period, with limited organized severe potential.`;
+  }
+  const threats = mergedThreatList(snap, ctx);
+  const threatStr = threats.length > 0 ? threats.map((k) => HAZARD_TAG[k]).join(', ') : HAZARD_TAG[out.mainHazard];
+  return `...${region}...\n${out.headline}\nPrimary Day 1 threats: ${threatStr}.`;
+}
+
+function mergedSynopsis(snap: HourSnapshot): string {
+  const region = discussionFocus(snap);
+  const ing = snap.ingredients;
+  const parts: string[] = [];
+
+  parts.push('This is the merged multi-cycle Day 1 outlook, which combines the most recent model cycles into a single categorical and probabilistic surface. It reflects the overall risk envelope across those cycles rather than a single forecast hour.');
+  parts.push(categoryNarrative(snap.outlook.category, HAZARD_TAG[snap.outlook.mainHazard], region));
+
+  // Upper-level pattern (qualitative — no single-hour values).
+  if (ing.shear06Kt >= 40) {
+    parts.push('A strong upper-level disturbance with strong winds aloft supports organized storms across the period.');
+  } else if (ing.shear06Kt >= 25) {
+    parts.push('A weaker upper-level disturbance should provide some lift across the period.');
+  } else {
+    parts.push('Upper-level support is generally weak, so storms will lean on local boundaries and daytime heating.');
+  }
+
+  // Surface forcing (qualitative).
+  if (snap.surfaceBoundary?.kind === 'triple-point') {
+    parts.push('A boundary intersection may locally focus development and raise the tornado concern within the broader risk area.');
+  } else if (snap.surfaceBoundary?.kind === 'dryline') {
+    parts.push('A dryline is expected to focus storm development along the western edge of the risk area.');
+  } else if (snap.surfaceBoundary?.kind === 'frontal') {
+    parts.push('A front provides the main focus for storm development across the risk area.');
+  } else if (ing.frontSignal === 'strong') {
+    parts.push('Strong large-scale lift should help storms develop across the risk area.');
+  } else {
+    parts.push('Storm development is more dependent on local boundaries and heating across the risk area.');
+  }
+
+  return `...SYNOPSIS...\n${parts.join(' ')}`;
+}
+
+function mergedTechnicalDiscussion(snap: HourSnapshot): string {
+  const ing = snap.ingredients;
+  const parts: string[] = [];
+
+  // Instability (qualitative).
+  if (ing.mlcape >= 3000) {
+    parts.push('Instability is strong over the risk area, supporting intense updrafts and large hail where storms form.');
+  } else if (ing.mlcape >= 2000) {
+    parts.push('Instability is sufficient for organized severe storms across much of the risk area.');
+  } else if (ing.mlcape >= 1000) {
+    parts.push('Instability is moderate, enough for severe storms without extreme updraft strength.');
+  } else {
+    parts.push('Instability is limited, so the severe threat leans on wind shear making up for weaker storm fuel.');
+  }
+
+  // Kinematics (qualitative).
+  if (ing.shear06Kt >= 50) {
+    parts.push('Deep-layer shear is very strong, favoring organized, long-lived storms and a rotating-storm threat.');
+  } else if (ing.shear06Kt >= 35) {
+    parts.push('Deep-layer shear is sufficient for organized storms, with some potential for rotation.');
+  } else if (ing.shear06Kt >= 25) {
+    parts.push('Shear supports clusters or mixed storm modes; long-lived supercells are less likely.');
+  } else {
+    parts.push('Shear is weak, so storms should be less organized, with brief gusty winds the main concern.');
+  }
+
+  // Capping (qualitative).
+  if (ing.capStrength === 'strong') {
+    parts.push('A strong cap may limit storm coverage, but any storm that breaks through could intensify quickly.');
+  } else if (ing.capStrength === 'moderate') {
+    parts.push('A moderate cap may delay initiation before storms strengthen later in the period.');
+  } else {
+    parts.push('Little capping is in place, so storms should initiate readily where moisture is sufficient.');
+  }
+
+  parts.push(stormModeDiscussion(ing.stormMode, ing, snap));
+  parts.push(hazardScenario(snap));
+
+  return `...DISCUSSION...\n${parts.join(' ')}`;
+}
+
+function buildMergedHazardSection(snap: HourSnapshot, ctx: DiscussionContext): string {
+  const keys: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
+  const labels: Record<HazardKey, string> = { tornado: 'TORNADO', hail: 'HAIL', wind: 'WIND', flood: 'FLOOD' };
+  const parts: string[] = [];
+  for (const k of keys) {
+    const resolved = resolveHazardEstimate(k, snap, ctx.artifacts, ctx.artifactStatus);
+    if (resolved.artifactUnavailable) continue;
+    const pct = r(resolved.probability * 100);
+    const minShow = k === 'tornado' ? 2 : 5;
+    if (pct < minShow) continue;
+    const sig = resolved.isArtifact
+      ? (k !== 'flood' && resolved.probability >= 0.10)
+      : Boolean(snap.hazards[k]?.significantSevere);
+    const sigNote = sig ? ' (SIGNIFICANT — 10%+ coverage)' : '';
+    parts.push(`${labels[k]}: ${pct}% within 25 miles of a point over the Day 1 period${sigNote}.`);
+  }
+  if (parts.length === 0) return '';
+  return `...HAZARD PROBABILITIES...\n${parts.join('\n')}`;
+}
+
+function mergedUncertainty(snap: HourSnapshot): string {
+  const cat = snap.outlook.category;
+  const lines: string[] = [];
+  if (cat === 'TSTM' || cat === 'MRGL') {
+    lines.push('Confidence in organized severe weather is limited; storm coverage and organization remain the main questions.');
+  } else if (cat === 'SLGT') {
+    lines.push('Confidence is moderate; storm mode and the exact placement of the strongest cells remain the main uncertainties.');
+  } else {
+    lines.push('Confidence is moderate to high in an organized severe threat; exact placement and storm mode are the main questions.');
+  }
+  lines.push('As a merged multi-cycle product, this represents the combined risk envelope across recent cycles rather than a single deterministic solution.');
+  return `...UNCERTAINTY...\n${lines.join(' ')}`;
+}
+
 // ── Public entry point ──────────────────────────────────────────────
 export function generateDiscussion(
   snap: HourSnapshot,
   artifacts: OutlookArtifacts | null = null,
   artifactStatus?: ArtifactStatus,
+  isMerged = false,
 ): string {
   const ctx: DiscussionContext = { artifacts, artifactStatus };
+
+  if (isMerged) {
+    const mergedSections = [
+      mergedSummaryLine(snap, ctx),
+      mergedSynopsis(snap),
+      mergedTechnicalDiscussion(snap),
+      buildMergedHazardSection(snap, ctx),
+      mergedUncertainty(snap),
+    ].filter(Boolean);
+    return applyMergedDiscussionFraming(mergedSections.join('\n\n'));
+  }
+
   const sections = [
     summaryLine(snap),
     buildSynopsis(snap),
@@ -539,4 +699,14 @@ export function generateDiscussion(
   ].filter(Boolean);
 
   return sections.join('\n\n');
+}
+
+// In merged (multi-cycle Day 1) mode the discussion describes the whole
+// outlook period rather than a single forecast hour, so neutralize the
+// hour-specific phrasing produced by the hourly builders.
+function applyMergedDiscussionFraming(text: string): string {
+  return text
+    .replace(/\bfor this hour\b/gi, 'for the Day 1 outlook period')
+    .replace(/\bthis hour\b/gi, 'the Day 1 outlook period')
+    .replace(/\b(?:around|at|by)\s+\d{1,2}Z\b/gi, 'through the Day 1 period');
 }

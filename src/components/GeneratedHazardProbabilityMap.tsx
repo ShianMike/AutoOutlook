@@ -245,15 +245,20 @@ export default function GeneratedHazardProbabilityMap({
         </span>
         <div className="flex shrink-0 items-center gap-2">
           {hasCigOverlay && showAutoLayer && (
-            <label className="flex h-6 items-center gap-1.5 border border-paper/40 px-1.5 font-mono text-[9px] font-bold uppercase tracking-wider text-paper">
-              <input
-                type="checkbox"
-                checked={showCigOverlay}
-                onChange={(event) => setShowCigOverlay(event.currentTarget.checked)}
-                className="h-3 w-3 accent-paper"
-              />
-              <span>CIG</span>
-            </label>
+            <button
+              type="button"
+              onClick={() => setShowCigOverlay((value) => !value)}
+              aria-pressed={showCigOverlay}
+              title={showCigOverlay ? 'Hide CIG overlay' : 'Show CIG overlay'}
+              className={[
+                'outlook-export-hide retro-button min-h-6 gap-1.5 px-2 py-1 text-[10px] leading-none tracking-wider',
+                showCigOverlay
+                  ? 'bg-signal-amber text-ink translate-x-[2px] translate-y-[2px] shadow-[1px_1px_0_0_#111111] hover:bg-signal-amber hover:text-ink'
+                  : 'bg-paper text-ink hover:bg-signal-amber hover:text-ink',
+              ].join(' ')}
+            >
+              CIG
+            </button>
           )}
           <span className="font-mono text-[10px] uppercase tracking-widest text-paper/70">
             {metricLabel}

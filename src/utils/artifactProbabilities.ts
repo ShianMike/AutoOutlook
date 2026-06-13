@@ -219,19 +219,65 @@ export function getArtifactHazardPeakLocation(
   hazard: ArtifactHazardKey,
 ): ArtifactHazardPeakLocation | undefined {
   const tile = getArtifactHourTile(artifacts, forecastHour);
-  const grid = tile?.probabilities?.[hazard];
-  if (!tile || !isGrid(grid)) return undefined;
+  if (!tile) return undefined;
+  const grid = tile.probabilities?.[hazard];
+  if (isGrid(grid) && grid.length > 0) {
+    let best: ArtifactHazardPeakLocation | undefined;
+    grid.forEach((row, rowIndex) => row.forEach((value, colIndex) => {
+      const probability = Number(value);
+      const lat = Number(tile.lats[rowIndex]?.[colIndex]);
+      const lon = Number(tile.lons[rowIndex]?.[colIndex]);
+      if (!Number.isFinite(probability) || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      if (!best || probability > best.probability) {
+        best = { probability, lat, lon, row: rowIndex, col: colIndex };
+      }
+    }));
+    if (best) return best;
+  }
+  // Fallback: the static production export strips the dense probability grid
+  // from the merged tile but keeps the hazard probability band shapes, so the
+  // peak is recovered from the highest-probability band.
+  return hazardPeakFromShapes(tile, hazard);
+}
+
+function hazardPeakFromShapes(
+  tile: OutlookProbabilityTile,
+  hazard: ArtifactHazardKey,
+): ArtifactHazardPeakLocation | undefined {
+  const fc = tile.hazardProbabilityShapes;
+  if (!fc || !Array.isArray(fc.features) || fc.features.length === 0) return undefined;
   let best: ArtifactHazardPeakLocation | undefined;
-  grid.forEach((row, rowIndex) => row.forEach((value, colIndex) => {
-    const probability = Number(value);
-    const lat = Number(tile.lats[rowIndex]?.[colIndex]);
-    const lon = Number(tile.lons[rowIndex]?.[colIndex]);
-    if (!Number.isFinite(probability) || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  for (const feature of fc.features) {
+    if (normalizeHazardName(String(feature.properties.hazard)) !== hazard) continue;
+    const probability = Number(feature.properties.probability);
+    if (!Number.isFinite(probability)) continue;
     if (!best || probability > best.probability) {
-      best = { probability, lat, lon, row: rowIndex, col: colIndex };
+      const centroid = geometryCentroid(feature.geometry);
+      best = { probability, lat: centroid.lat, lon: centroid.lon, row: -1, col: -1 };
     }
-  }));
+  }
   return best;
+}
+
+function geometryCentroid(
+  geometry: { type: string; coordinates: unknown } | null | undefined,
+): { lat: number; lon: number } {
+  let sumLat = 0;
+  let sumLon = 0;
+  let count = 0;
+  const add = (lon: number, lat: number) => {
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      sumLat += lat;
+      sumLon += lon;
+      count += 1;
+    }
+  };
+  if (geometry?.type === 'Polygon') {
+    (geometry.coordinates as number[][][]).forEach((ring) => ring.forEach((p) => add(Number(p[0]), Number(p[1]))));
+  } else if (geometry?.type === 'MultiPolygon') {
+    (geometry.coordinates as number[][][][]).forEach((poly) => poly.forEach((ring) => ring.forEach((p) => add(Number(p[0]), Number(p[1])))));
+  }
+  return count > 0 ? { lat: sumLat / count, lon: sumLon / count } : { lat: NaN, lon: NaN };
 }
 
 /**
@@ -476,13 +522,34 @@ export function getArtifactMaxCategory(
   forecastHour: number | undefined,
 ): ArtifactRiskCategory | undefined {
   const tile = getArtifactHourTile(artifacts, forecastHour);
-  if (!tile) return undefined;
-  if (!isGrid(tile.categoryOrdinal)) return undefined;
-  let maxOrdinal = 0;
-  tile.categoryOrdinal.forEach((row) => row.forEach((value) => {
-    if (Number.isFinite(value)) maxOrdinal = Math.max(maxOrdinal, Number(value));
-  }));
-  return (['NONE', 'TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'][maxOrdinal] ?? 'NONE') as ArtifactRiskCategory;
+  if (tile && isGrid(tile.categoryOrdinal) && tile.categoryOrdinal.length > 0) {
+    let maxOrdinal = 0;
+    tile.categoryOrdinal.forEach((row) => row.forEach((value) => {
+      if (Number.isFinite(value)) maxOrdinal = Math.max(maxOrdinal, Number(value));
+    }));
+    return (['NONE', 'TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'][maxOrdinal] ?? 'NONE') as ArtifactRiskCategory;
+  }
+  // Fallback: the static production export strips the merged tile's category
+  // grid, so derive the highest category from the exported risk polygons.
+  return maxCategoryFromRiskPolygons(artifacts);
+}
+
+function maxCategoryFromRiskPolygons(
+  artifacts: OutlookArtifacts | null,
+): ArtifactRiskCategory | undefined {
+  const fc = artifacts?.riskPolygons;
+  if (!fc || !Array.isArray(fc.features) || fc.features.length === 0) return undefined;
+  let best: ArtifactRiskCategory | undefined;
+  let bestRank = 0;
+  for (const feature of fc.features) {
+    const category = String(feature.properties?.category ?? 'NONE') as ArtifactRiskCategory;
+    const rank = categoryOrdinal(category);
+    if (rank > bestRank) {
+      bestRank = rank;
+      best = category;
+    }
+  }
+  return best;
 }
 
 export function getArtifactMainHazard(

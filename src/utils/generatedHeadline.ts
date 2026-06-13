@@ -15,6 +15,8 @@ interface GeneratedHeadlineInput {
   snapshot: HourSnapshot;
   artifacts?: OutlookArtifacts | null;
   artifactStatus?: ArtifactStatusLike;
+  isMerged?: boolean;
+  focusLabelOverride?: string;
 }
 
 export interface GeneratedOutlookSummary {
@@ -31,13 +33,18 @@ export function buildGeneratedOutlookSummary({
   snapshot,
   artifacts,
   artifactStatus,
+  isMerged = false,
+  focusLabelOverride,
 }: GeneratedHeadlineInput): GeneratedOutlookSummary {
   const usingGeneratedArtifacts = artifactStatus === 'ready';
   if (!usingGeneratedArtifacts) {
+    const fallbackHeadline = focusLabelOverride
+      ? replaceRegionLabel(snapshot.outlook.headline, focusLocationFromSnapshot(snapshot).label, focusLabelOverride)
+      : snapshot.outlook.headline;
     return {
       category: snapshot.outlook.category,
       hazard: snapshot.outlook.mainHazard,
-      headline: snapshot.outlook.headline,
+      headline: isMerged ? applyMergedFraming(fallbackHeadline) : fallbackHeadline,
       usingGeneratedArtifacts: false,
     };
   }
@@ -48,7 +55,7 @@ export function buildGeneratedOutlookSummary({
     ? normalizeRiskCategory(artifactCategory)
     : 'TSTM';
   const hazard = getBestArtifactHazard(artifacts, snapshot.forecastHour, timelineHour) ?? snapshot.outlook.mainHazard;
-  const headline = buildArtifactHeadline(snapshot, artifacts, category, hazard, artifactCategory, timelineHour);
+  const headline = buildArtifactHeadline(snapshot, artifacts, category, hazard, artifactCategory, timelineHour, isMerged, focusLabelOverride);
 
   return {
     category,
@@ -58,6 +65,23 @@ export function buildGeneratedOutlookSummary({
   };
 }
 
+// Swap a region label inside a pre-built headline (used for merged mode so the
+// fallback rule-engine headline names the merged peak region, not the hour's).
+function replaceRegionLabel(headline: string, from: string, to: string): string {
+  if (!from || from === to) return headline;
+  return headline.split(from).join(to);
+}
+
+// In merged (multi-cycle Day 1) mode the banner describes the whole outlook
+// period rather than a single forecast hour, so strip any hour-specific time
+// phrase ("around 10Z") and replace it with day-period framing.
+function applyMergedFraming(headline: string): string {
+  return headline
+    .replace(/\b(?:around|at|by|near)\s+\d{1,2}Z\b/gi, 'through the Day 1 period')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function buildArtifactHeadline(
   snapshot: HourSnapshot,
   artifacts: OutlookArtifacts | null | undefined,
@@ -65,24 +89,27 @@ function buildArtifactHeadline(
   hazard: HazardKey,
   artifactCategory: ArtifactRiskCategory | undefined,
   timelineHour: OutlookTimelineHourSummary | undefined,
+  isMerged = false,
+  focusLabelOverride?: string,
 ): string {
   const timeLabel = formatForecastTime(snapshot.forecastHour, snapshot.validTimeISO);
-  const region = focusLocationFromSnapshot(snapshot).label;
+  const whenPhrase = isMerged ? 'through the Day 1 period' : `around ${timeLabel}`;
+  const region = focusLabelOverride ?? focusLocationFromSnapshot(snapshot).label;
   const hazards = rankedHazards(artifacts, snapshot.forecastHour, timelineHour);
 
   if (!artifactCategory || artifactCategory === 'NONE') {
-    return `Organized severe weather remains below categorical thresholds near ${region} around ${timeLabel}.`;
+    return `Organized severe weather remains below categorical thresholds near ${region} ${whenPhrase}.`;
   }
 
   if (category === 'TSTM') {
-    return `General thunder near ${region} around ${timeLabel}, with organized severe weather limited.`;
+    return `General thunder near ${region} ${whenPhrase}, with organized severe weather limited.`;
   }
 
   const hazardPhrase = hazards.length > 0
     ? `mainly ${hazardListPhrase(hazards)}`
     : `mainly ${HAZARD_META[hazard].label.toLowerCase()}`;
 
-  return `Severe storms possible near ${region} around ${timeLabel}, ${hazardPhrase}.`;
+  return `Severe storms possible near ${region} ${whenPhrase}, ${hazardPhrase}.`;
 }
 
 function getBestArtifactCategory(

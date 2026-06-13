@@ -8,7 +8,7 @@ import HazardOutlookMap from './HazardOutlookMap';
 import GeneratedOutlookMap, { type SpcComparisonMode } from './GeneratedOutlookMap';
 import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
-import { useMergedD1Artifacts, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
+import { useMergedD1Artifacts, useSpcBackedHourArtifacts, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
 import type {
   OutlookArtifacts,
   MergedD1VerificationSummary,
@@ -143,6 +143,9 @@ const EXPORT_FIXED_LAYOUT_CSS = `
   min-height: 48px !important;
   max-height: 48px !important;
   overflow: hidden !important;
+}
+[data-outlook-export-area="true"] .outlook-export-hide {
+  display: none !important;
 }
 `;
 const GIF_QUALITY_CONFIG: Record<GifQualityPreset, { label: string; encoderQuality: number }> = {
@@ -333,7 +336,21 @@ export default function OutlookMapPanel({
   });
   const mergedArtifacts = mergedArtifactsOverride ?? liveMergedArtifacts;
 
-  const effectiveArtifactState = viewType === 'merged' ? mergedArtifacts : outlookArtifacts;
+  // SPC-backed hourly scrubber: apply the SPC day envelope (ceiling mode) to the
+  // selected forecast hour at serve time. The SPC Day 1/Day 2 window is chosen
+  // automatically from the hour's valid time by the backend.
+  const [hourlySpcBacked, setHourlySpcBacked] = useState(false);
+  const spcBackedHourArtifacts = useSpcBackedHourArtifacts(
+    activeRegion,
+    snapshot?.forecastHour,
+    viewType === 'hourly' && hourlySpcBacked,
+  );
+
+  const effectiveArtifactState = viewType === 'merged'
+    ? mergedArtifacts
+    : (hourlySpcBacked && spcBackedHourArtifacts.status === 'ready')
+      ? spcBackedHourArtifacts
+      : outlookArtifacts;
   const effectiveMetadata = effectiveArtifactState.artifacts?.metadata;
   const effectiveSnapshot = viewType === 'merged' && snapshot ? {
     ...snapshot,
@@ -371,21 +388,23 @@ export default function OutlookMapPanel({
     ? 'Merged Outlook'
     : `F${String(snapshot?.forecastHour ?? 0).padStart(3, '0')}h`;
 
-  const validTime = effectiveSnapshot
-    ? (() => {
-        const d = new Date(effectiveSnapshot.validTimeISO);
-        const hh = String(d.getUTCHours()).padStart(2, '0');
-        const mm = String(d.getUTCMinutes()).padStart(2, '0');
-        return `${hh}${mm}Z ${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-      })()
-    : '—';
-
   const shear = effectiveSnapshot ? `${Math.round(effectiveSnapshot.ingredients.shear06Kt)} kt SHR` : '—';
   const cape = effectiveSnapshot ? `${Math.round(effectiveSnapshot.ingredients.mucape)} CAPE` : '—';
 
   const validTimeText = viewType === 'merged' && (effectiveMetadata?.spcVerification as MergedD1VerificationSummary)?.d1WindowValidISO
     ? `${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowValidISO)} – ${fmtValidSelect((effectiveMetadata?.spcVerification as MergedD1VerificationSummary).d1WindowExpireISO)}`
     : fmtUTC(effectiveSnapshot?.validTimeISO);
+  const mergedSummaryMeta = effectiveMetadata?.spcVerification as MergedD1VerificationSummary | undefined;
+  // Export header (metabar) values, made merged-aware so the cycle / valid
+  // window / generated time are populated correctly in the exported image.
+  const exportCycleLabel = viewType === 'merged' ? 'Merged cycle' : 'HRRR cycle';
+  const exportCycleText = viewType === 'merged'
+    ? (Array.from(new Set(mergedSummaryMeta?.mergedCycles ?? [])).join(', ') || (mergedSummaryMeta?.mergedCycles?.[0] ?? 'Merged Outlook'))
+    : fmtUTC(artifactMetadata?.cycleTimeISO);
+  const exportValidText = validTimeText;
+  const exportGeneratedText = viewType === 'merged'
+    ? fmtUTC(mergedSummaryMeta?.generatedAtISO ?? artifactMetadata?.generatedAtISO)
+    : fmtUTC(artifactMetadata?.generatedAtISO);
   const latestAvailableReportDate = latestAvailableSpcReportDate();
   const reportsPendingForSelectedDate = !staticStormReportsAvailable
     && viewType === 'merged'
@@ -654,9 +673,9 @@ export default function OutlookMapPanel({
             isAnyExporting ? 'flex' : 'hidden',
           ].join(' ')}
         >
-          <span className="shrink-0">HRRR cycle: {fmtUTC(artifactMetadata?.cycleTimeISO)}</span>
-          <span className="shrink-0">Forecast valid: {validTime}</span>
-          <span className="shrink-0">Generated: {fmtUTC(artifactMetadata?.generatedAtISO)}</span>
+          <span className="shrink-0">{exportCycleLabel}: {exportCycleText}</span>
+          <span className="shrink-0">Forecast valid: {exportValidText}</span>
+          <span className="shrink-0">Generated: {exportGeneratedText}</span>
           <span className="min-w-[220px] flex-1 text-center leading-snug text-paper/80">
             {snapshot ? focusLocationFromSnapshot(snapshot).label : 'AWAITING REGION DETECTION…'}
           </span>
@@ -879,6 +898,33 @@ export default function OutlookMapPanel({
               <option value="merged">Merged Outlook</option>
             </select>
           </div>
+
+          {/* Toggle: SPC backing for the hourly scrubber */}
+          {viewType === 'hourly' && (
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                SPC
+              </label>
+              <button
+                type="button"
+                onClick={() => setHourlySpcBacked((value) => !value)}
+                aria-pressed={hourlySpcBacked}
+                disabled={isAnyExporting}
+                title={hourlySpcBacked
+                  ? 'SPC-backed: this hour is capped by the SPC Day 1/Day 2 envelope'
+                  : 'Show the raw HRRR/XGBoost hour (no SPC backing)'}
+                className={[
+                  'retro-button min-h-8 px-3 py-1.5 text-[11px] leading-none',
+                  isAnyExporting ? 'cursor-not-allowed opacity-50' : '',
+                  hourlySpcBacked
+                    ? 'bg-signal-amber text-ink translate-x-[2px] translate-y-[2px] shadow-[1px_1px_0_0_#111111] hover:bg-signal-amber hover:text-ink'
+                    : 'bg-paper text-ink hover:bg-signal-amber hover:text-ink',
+                ].join(' ')}
+              >
+                {hourlySpcBacked ? 'SPC-Backed' : 'HRRR Only'}
+              </button>
+            </div>
+          )}
 
           {/* Dropdown: Merged Date (Conditional) */}
           {viewType === 'merged' && availableMergedDates.length > 0 && (

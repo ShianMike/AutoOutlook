@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -10,16 +11,185 @@ from typing import Any, Callable, Mapping
 import numpy as np
 import requests
 
-from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
+from backend.ml.spc_verification import (
+    _lat_lon_grid,
+    compare_prediction_to_spc,
+    fetch_current_spc_day1_category,
+    official_category_grid,
+)
 from backend.ml.gridded_outlook import (
+    SPC_RISK_LABELS,
+    _category_probability_cap_grid,
     _clean_projected_geometry,
     _drop_small_projected_parts,
     _projected_component_count,
     _smooth_display_projected_geometry,
+    apply_category_probability_ceiling,
     constrain_hazard_probability_shapes_to_risk_support,
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
 )
+
+
+SPC_ANCHORED_OUTLOOK_FLAG = "AUTOOUTLOOK_SPC_ANCHORED_OUTLOOK"
+SPC_SUPPORT_WEIGHT_FLAG = "AUTOOUTLOOK_SPC_SUPPORT_WEIGHT"
+DEFAULT_SPC_SUPPORT_WEIGHT = 0.50
+_MAX_CATEGORY_ORDINAL = len(SPC_RISK_LABELS) - 1
+
+
+def _spc_implied_hazard_probability(hazard: str, spc_category_grid: np.ndarray) -> np.ndarray:
+    """Per-cell probability implied by the SPC category for a single hazard.
+
+    SPC's Day 1 categorical outlook is hazard-agnostic (one category per cell),
+    so there is no true per-hazard SPC probability. We approximate the SPC
+    "target" for each hazard as the midpoint of that hazard's probability band
+    for the SPC category: ``0.5 * (band_floor + band_ceiling)``. Cells where SPC
+    draws no risk (category NONE) imply a zero target.
+    """
+    grid = np.asarray(spc_category_grid, dtype=np.int16)
+    ceiling = _category_probability_cap_grid(hazard, grid)
+    lower_category = np.clip(grid - 1, 0, _MAX_CATEGORY_ORDINAL).astype(np.int16)
+    floor = _category_probability_cap_grid(hazard, lower_category)
+    implied = 0.5 * (floor + ceiling)
+    return np.where(grid <= 0, 0.0, implied)
+
+
+def _spc_anchored_outlook_enabled() -> bool:
+    """Whether the merged outlook is fully anchored to the SPC Day 1 outlook.
+
+    Full anchoring is equivalent to an SPC support weight of 1.0. It is
+    disabled by default; the default behavior is a partial SPC backing (see
+    :func:`_spc_support_weight`). Set ``AUTOOUTLOOK_SPC_ANCHORED_OUTLOOK`` truthy
+    to force full anchoring.
+    """
+    value = os.environ.get(SPC_ANCHORED_OUTLOOK_FLAG)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _spc_support_weight() -> float:
+    """How strongly the official SPC Day 1 outlook backs the merged outlook.
+
+    Returns a weight in ``[0, 1]`` used to blend the HRRR/XGBoost categorical
+    grid toward SPC: ``final = (1 - w) * hrrr + w * spc``. ``0`` is pure HRRR,
+    ``1`` is full SPC anchoring, and the default ``0.50`` means the outlook is a
+    50/50 blend of HRRR/XGBoost and SPC.
+
+    Resolution order:
+    1. ``AUTOOUTLOOK_SPC_SUPPORT_WEIGHT`` (explicit float, clamped to [0, 1]).
+    2. ``AUTOOUTLOOK_SPC_ANCHORED_OUTLOOK`` truthy -> 1.0 (full anchoring).
+    3. Default 0.50.
+    """
+    raw = os.environ.get(SPC_SUPPORT_WEIGHT_FLAG)
+    if raw is not None and raw.strip() != "":
+        try:
+            return min(1.0, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    if _spc_anchored_outlook_enabled():
+        return 1.0
+    return DEFAULT_SPC_SUPPORT_WEIGHT
+
+
+def blend_merged_outlook_with_spc(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    hrrr_category_grid: np.ndarray,
+    hrrr_probabilities: Mapping[str, np.ndarray],
+    spc_geojson: Mapping[str, Any],
+    weight: float = DEFAULT_SPC_SUPPORT_WEIGHT,
+    mode: str = "blend",
+) -> dict[str, Any]:
+    """Back the HRRR/XGBoost outlook with the official SPC categorical outlook.
+
+    Two modes:
+
+    ``"blend"`` (default, used by the merged D1/D2 products): the categorical grid
+    is blended per cell toward SPC by ``weight``::
+
+        final_ordinal = round((1 - weight) * hrrr_ordinal + weight * spc_ordinal)
+
+    so ``weight=0`` leaves the HRRR outlook untouched, ``weight=1`` conforms it
+    fully to SPC, and ``weight=0.5`` produces a 50/50 blend. HRRR hazard
+    probabilities are blended toward the SPC-category-implied level by the same
+    weight.
+
+    ``"ceiling"`` (used by the hourly scrubber): SPC is treated as a per-day
+    envelope rather than a symmetric target. The HRRR category is capped at the
+    SPC category and zeroed outside SPC's footprint (``min(hrrr, spc)``), so quiet
+    hours stay quiet and no risk is drawn where SPC drew none, but the model is
+    never inflated. ``weight`` is ignored in this mode.
+
+    In both modes the hazard probabilities (and implied CIG / hazard overlays)
+    are clipped to stay consistent with the resulting categories.
+    """
+    normalized_mode = str(mode).strip().lower()
+    weight = min(1.0, max(0.0, float(weight)))
+    hrrr_grid = np.asarray(hrrr_category_grid, dtype=np.int16)
+
+    if normalized_mode == "blend" and weight <= 0.0:
+        return {
+            "category_grid": hrrr_grid,
+            "probabilities": dict(hrrr_probabilities),
+            "report": {
+                "spcSupportApplied": False,
+                "spcSupportWeight": 0.0,
+                "spcSupportMode": normalized_mode,
+            },
+        }
+
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, hrrr_grid.shape)
+    spc_grid = np.asarray(
+        official_category_grid(lat_grid, lon_grid, spc_geojson),
+        dtype=np.int16,
+    )
+
+    if normalized_mode == "ceiling":
+        # SPC as a per-day envelope: cap to SPC and zero outside its footprint.
+        blended_grid = np.minimum(hrrr_grid, spc_grid).astype(np.int16)
+        # Keep the HRRR hazard gradient but clip it to the capped categories.
+        blended_probabilities = {
+            hazard: np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
+            for hazard, values in hrrr_probabilities.items()
+        }
+        hazards_blended = False
+    else:
+        blended_grid = np.rint(
+            (1.0 - weight) * hrrr_grid.astype(float) + weight * spc_grid.astype(float)
+        )
+        blended_grid = np.clip(blended_grid, 0, _MAX_CATEGORY_ORDINAL).astype(np.int16)
+        # Blend each HRRR hazard probability toward the SPC-category-implied level
+        # for that hazard by the same weight.
+        blended_probabilities = {}
+        for hazard, values in hrrr_probabilities.items():
+            arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
+            spc_target = _spc_implied_hazard_probability(hazard, spc_grid)
+            blended_probabilities[hazard] = np.clip(
+                (1.0 - weight) * arr + weight * spc_target, 0.0, 1.0
+            )
+        hazards_blended = True
+
+    ceiling = apply_category_probability_ceiling(blended_probabilities, blended_grid)
+
+    report = {
+        "spcSupportApplied": True,
+        "spcSupportMode": normalized_mode,
+        "spcSupportWeight": weight if normalized_mode == "blend" else None,
+        "fullyAnchored": normalized_mode == "blend" and weight >= 1.0,
+        "hazardProbabilitiesBlended": hazards_blended,
+        "spcCategoryCells": int(np.sum(spc_grid > 0)),
+        "hrrrCategoryCells": int(np.sum(hrrr_grid > 0)),
+        "blendedCategoryCells": int(np.sum(blended_grid > 0)),
+        "raisedTowardSpcCells": int(np.sum(blended_grid > hrrr_grid)),
+        "loweredTowardSpcCells": int(np.sum(blended_grid < hrrr_grid)),
+        "categoryConsistency": ceiling.report,
+    }
+    return {
+        "category_grid": blended_grid,
+        "probabilities": ceiling.probabilities,
+        "report": report,
+    }
 
 
 
@@ -174,7 +344,26 @@ def fetch_archived_spc_day1_category(
     output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Fetch historical SPC Day 1 categorical GeoJSON from NOAA archives."""
+    return fetch_archived_spc_category(target_date, session, output_dir, day=1)
+
+
+# Archive issue times that commonly appear in the geojson zip filenames, per day.
+_SPC_ARCHIVE_RUN_TIMES: dict[int, list[str]] = {
+    1: ["1200", "1300", "1630", "2000", "0100"],
+    2: ["0600", "1730", "0700"],
+}
+
+
+def fetch_archived_spc_category(
+    target_date: Any,
+    session: requests.Session | None = None,
+    output_dir: Path | None = None,
+    day: int = 1,
+) -> dict[str, Any]:
+    """Fetch historical SPC Day ``day`` (1 or 2) categorical GeoJSON from NOAA archives."""
     from datetime import date
+    if day not in (1, 2):
+        raise ValueError(f"Unsupported SPC outlook day: {day}")
     if isinstance(target_date, str):
         target_date = date.fromisoformat(target_date)
 
@@ -182,64 +371,69 @@ def fetch_archived_spc_day1_category(
     session = session or requests.Session()
     session.headers.setdefault("User-Agent", "AutoOutlook-SPC-verifier/1.0")
 
+    product = f"day{day}otlk"
     year = target_date.year
     date_str = target_date.strftime("%Y%m%d")
-
-    # Common issue times in the archive zip filenames.
-    # Try 1200, then 1300, 1630, 2000, 0100.
-    run_times = ["1200", "1300", "1630", "2000", "0100"]
+    run_times = _SPC_ARCHIVE_RUN_TIMES[day]
     zip_url = None
     selected_run_time = None
     category_geojson = None
     selected_ordinal = -1
     last_error = None
 
-    for run_time in run_times:
-        url = f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}_{run_time}-geojson.zip"
-        try:
-            res = session.get(url, timeout=15)
-            if res.status_code != 200:
-                continue
-            import io
-            import zipfile
-            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                cat_name = next(
-                    name for name in zf.namelist()
-                    if name.endswith("_cat.nolyr.geojson") or name.endswith("day1otlk_cat.nolyr.geojson")
-                )
-                candidate_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
-            candidate_ordinal = _spc_geojson_max_category_ordinal(candidate_geojson)
-            if candidate_ordinal > selected_ordinal:
-                zip_url = url
-                selected_run_time = run_time
-                category_geojson = candidate_geojson
-                selected_ordinal = candidate_ordinal
-        except Exception as exc:
-            last_error = exc
+    try:
+        for run_time in run_times:
+            url = f"https://www.spc.noaa.gov/products/outlook/archive/{year}/{product}_{date_str}_{run_time}-geojson.zip"
+            try:
+                res = session.get(url, timeout=15)
+                if res.status_code != 200:
+                    continue
+                import io
+                import zipfile
+                with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                    cat_name = next(
+                        name for name in zf.namelist()
+                        if name.endswith("_cat.nolyr.geojson") or name.endswith(f"{product}_cat.nolyr.geojson")
+                    )
+                    candidate_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
+                candidate_ordinal = _spc_geojson_max_category_ordinal(candidate_geojson)
+                if candidate_ordinal > selected_ordinal:
+                    zip_url = url
+                    selected_run_time = run_time
+                    category_geojson = candidate_geojson
+                    selected_ordinal = candidate_ordinal
+            except Exception as exc:
+                last_error = exc
 
-    if category_geojson is None:
-        raise ValueError(
-            f"Could not find SPC Day 1 archive zip for date {date_str}. "
-            f"Tried run times {run_times}. Last error: {last_error}"
-        )
+        if category_geojson is None:
+            raise ValueError(
+                f"Could not find SPC Day {day} archive zip for date {date_str}. "
+                f"Tried run times {run_times}. Last error: {last_error}"
+            )
 
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "spc_day1_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
-        (output_dir / "spc_source.json").write_text(json.dumps({
-            "day1Url": f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}.html",
+        html_url = f"https://www.spc.noaa.gov/products/outlook/archive/{year}/{product}_{date_str}.html"
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"spc_day{day}_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
+            (output_dir / "spc_source.json").write_text(json.dumps({
+                "day1Url": html_url,
+                "spcDay": day,
+                "geojsonZipUrl": zip_url,
+                "selectedIssueTimeUTC": selected_run_time,
+                "fetchedAtISO": _now_iso(),
+            }, indent=2), encoding="utf-8")
+
+        return {
+            "day1Url": html_url,
+            "spcDay": day,
             "geojsonZipUrl": zip_url,
             "selectedIssueTimeUTC": selected_run_time,
             "fetchedAtISO": _now_iso(),
-        }, indent=2), encoding="utf-8")
-
-    return {
-        "day1Url": f"https://www.spc.noaa.gov/products/outlook/archive/{year}/day1otlk_{date_str}.html",
-        "geojsonZipUrl": zip_url,
-        "selectedIssueTimeUTC": selected_run_time,
-        "fetchedAtISO": _now_iso(),
-        "categoryGeojson": category_geojson,
-    }
+            "categoryGeojson": category_geojson,
+        }
+    finally:
+        if own_session:
+            session.close()
 
 
 def _spc_geojson_max_category_ordinal(category_geojson: Mapping[str, Any]) -> int:
@@ -473,6 +667,25 @@ def merge_cycles_for_spc_window(
             else:
                 merged_probs[hazard] = np.zeros(grid_shape)
 
+        # Back the merged categorical outlook with the official SPC Day 1 outlook.
+        # By default the HRRR/XGBoost guidance drives the outlook but is nudged
+        # 25% toward SPC (see _spc_support_weight); hazard probabilities are kept
+        # consistent with the resulting risk levels.
+        spc_support_report: dict[str, Any] | None = None
+        spc_support_weight = _spc_support_weight()
+        if spc_support_weight > 0.0:
+            blended = blend_merged_outlook_with_spc(
+                tile_lats,
+                tile_lons,
+                merged_grid,
+                merged_probs,
+                spc_geojson,
+                weight=spc_support_weight,
+            )
+            merged_grid = blended["category_grid"]
+            merged_probs = blended["probabilities"]
+            spc_support_report = blended["report"]
+
         # Generate merged GeoJSON risk polygons and hazard shapes
         valid_time_str = d1_valid.isoformat().replace("+00:00", "Z")
         merged_risk_polygons = risk_polygons_from_grid(
@@ -508,6 +721,7 @@ def merge_cycles_for_spc_window(
         summary["d1WindowExpireISO"] = d1_expire.isoformat().replace("+00:00", "Z")
         summary["contributingHours"] = contributing_hours
         summary["mergeMethod"] = "maximum"
+        summary["spcSupport"] = spc_support_report
         summary["spcDay1Url"] = spc.get("day1Url")
         summary["spcGeojsonZipUrl"] = spc.get("geojsonZipUrl")
         summary["spcFetchedAtISO"] = spc.get("fetchedAtISO")
@@ -554,6 +768,7 @@ def merge_cycles_for_spc_window(
                 "d1WindowExpireISO": summary["d1WindowExpireISO"],
                 "contributingHourCount": len(contributing_hours),
                 "mergeMethod": "maximum",
+                "spcSupportWeight": spc_support_weight,
                 "spcDay1Url": spc.get("day1Url"),
                 "latencyMs": summary["latencyMs"],
                 "tileStride": source_tile_stride,
@@ -587,6 +802,139 @@ def _tile_grid_payload(tile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray,
     if category_grid.ndim != 2 or lats.shape != category_grid.shape or lons.shape != category_grid.shape:
         raise ValueError("probability tile is missing matching category/lats/lons grids")
     return lats, lons, category_grid
+
+
+def spc_day_window(valid_dt: datetime) -> tuple[datetime, datetime]:
+    """The 12Z-to-12Z SPC convective-day window that contains ``valid_dt``."""
+    valid_dt = valid_dt.astimezone(timezone.utc)
+    anchor = valid_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+    if valid_dt < anchor:
+        anchor -= timedelta(days=1)
+    return anchor, anchor + timedelta(days=1)
+
+
+def _spc_geojson_window(geojson: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
+    """Return the (valid, expire) window declared in an SPC categorical geojson."""
+    if not isinstance(geojson, Mapping):
+        return None
+    for feature in geojson.get("features", []):
+        props = feature.get("properties", {}) if isinstance(feature, Mapping) else {}
+        valid = _parse_iso(props.get("VALID_ISO"))
+        expire = _parse_iso(props.get("EXPIRE_ISO"))
+        if valid is not None and expire is not None:
+            return valid, expire
+    return None
+
+
+def select_spc_geojson_for_valid_time(
+    spc_geojsons: list[Mapping[str, Any]],
+    valid_dt: datetime,
+) -> Mapping[str, Any] | None:
+    """Pick the SPC categorical geojson whose declared window contains ``valid_dt``.
+
+    This is what lets the hourly scrubber automatically switch between the SPC
+    Day 1 and Day 2 outlooks as the scrubbed forecast hour crosses 12Z.
+    """
+    valid_dt = valid_dt.astimezone(timezone.utc)
+    for geojson in spc_geojsons:
+        window = _spc_geojson_window(geojson)
+        if window is None:
+            continue
+        valid, expire = window
+        if valid <= valid_dt < expire:
+            return geojson
+    return None
+
+
+def spc_backed_hour_tile(
+    tile: Mapping[str, Any],
+    spc_geojsons: list[Mapping[str, Any]],
+    *,
+    mode: str = "ceiling",
+    weight: float = DEFAULT_SPC_SUPPORT_WEIGHT,
+    coarsen_max_dim: int | None = 160,
+) -> dict[str, Any]:
+    """Apply SPC backing to a single hourly probability tile at serve time.
+
+    The tile's valid time selects the SPC day window (Day 1 / Day 2), and the
+    category grid + hazard probabilities are re-derived through
+    :func:`blend_merged_outlook_with_spc` (default ``mode="ceiling"`` so SPC acts
+    as a per-day envelope). Risk polygons and hazard-probability shapes are
+    regenerated so the served tile is internally consistent.
+
+    Because re-vectorizing a full-resolution grid per request is slow, the grid
+    is coarsened to at most ``coarsen_max_dim`` cells per axis before the
+    transform (set to ``None`` to disable). This keeps the interactive scrubber
+    responsive at a small cost to polygon fidelity.
+
+    Returns a dict with ``tile`` (possibly unchanged), ``applied`` (bool), and a
+    ``report``. The raw on-disk artifact is never modified, preserving the
+    post-prediction SPC verification guarantee.
+    """
+    valid_iso = tile.get("validTimeISO")
+    valid_dt = _parse_iso(valid_iso)
+    if valid_dt is None:
+        return {"tile": dict(tile), "applied": False, "report": {"reason": "tile has no valid time"}}
+
+    spc_geojson = select_spc_geojson_for_valid_time(spc_geojsons, valid_dt)
+    if spc_geojson is None:
+        return {
+            "tile": dict(tile),
+            "applied": False,
+            "report": {"reason": "no SPC day window covers the tile valid time"},
+        }
+
+    try:
+        lats, lons, grid = _tile_grid_payload(tile)
+    except (ValueError, KeyError):
+        return {"tile": dict(tile), "applied": False, "report": {"reason": "tile grid payload invalid"}}
+
+    probabilities = {
+        hazard: np.asarray(values, dtype=float)
+        for hazard, values in (tile.get("probabilities") or {}).items()
+    }
+
+    # Coarsen the grid for a responsive serve-time re-vectorization.
+    step = 1
+    if coarsen_max_dim and coarsen_max_dim > 0:
+        step = max(1, int(np.ceil(max(grid.shape) / int(coarsen_max_dim))))
+    if step > 1:
+        lats = lats[::step, ::step]
+        lons = lons[::step, ::step]
+        grid = grid[::step, ::step]
+        probabilities = {hazard: values[::step, ::step] for hazard, values in probabilities.items()}
+
+    blended = blend_merged_outlook_with_spc(
+        lats, lons, grid, probabilities, spc_geojson, weight=weight, mode=mode
+    )
+    new_grid = np.asarray(blended["category_grid"], dtype=np.int16)
+    new_probs = blended["probabilities"]
+    forecast_hour = int(tile.get("forecastHour", 0) or 0)
+
+    risk_polygons = risk_polygons_from_grid(
+        lats, lons, new_grid, forecast_hour=forecast_hour,
+        valid_time_iso=valid_iso, probabilities=new_probs,
+    )
+    hazard_shapes = hazard_probability_shapes_from_grids(
+        lats, lons, new_probs, new_grid, forecast_hour=forecast_hour, valid_time_iso=valid_iso,
+    )
+    hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(hazard_shapes, risk_polygons)
+
+    spc_window = _spc_geojson_window(spc_geojson)
+    out_tile = dict(tile)
+    out_tile["lats"] = lats.tolist()
+    out_tile["lons"] = lons.tolist()
+    out_tile["categoryOrdinal"] = new_grid.tolist()
+    out_tile["categoryLabel"] = [[SPC_RISK_LABELS[int(value)] for value in row] for row in new_grid]
+    out_tile["probabilities"] = {hazard: np.asarray(values).tolist() for hazard, values in new_probs.items()}
+    out_tile["riskShapes"] = risk_polygons
+    out_tile["hazardProbabilityShapes"] = hazard_shapes
+    report = dict(blended["report"])
+    report["coarsenStep"] = step
+    report["spcWindowValidISO"] = spc_window[0].isoformat().replace("+00:00", "Z") if spc_window else None
+    report["spcWindowExpireISO"] = spc_window[1].isoformat().replace("+00:00", "Z") if spc_window else None
+    out_tile["spcBacking"] = report
+    return {"tile": out_tile, "applied": True, "report": report}
 
 
 def _merge_cig_shape_collections(

@@ -2,7 +2,8 @@ import type { HourSnapshot } from '../types/forecast';
 import { HAZARD_META, RISK_META } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
-import { focusLocationFromSnapshot } from '../utils/focusLocation';
+import { focusLocationFromSnapshot, focusLocationFromRegion } from '../utils/focusLocation';
+import { mergedRegionFromArtifacts } from '../utils/mergedFocus';
 import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
 import RetroBadge from './retro/RetroBadge';
 
@@ -10,9 +11,10 @@ interface PrimaryOutlookBannerProps {
   snapshot: HourSnapshot | null;
   artifacts?: OutlookArtifacts | null;
   artifactStatus?: ArtifactStatus;
+  viewType?: 'hourly' | 'merged';
 }
 
-export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStatus }: PrimaryOutlookBannerProps) {
+export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStatus, viewType = 'hourly' }: PrimaryOutlookBannerProps) {
   if (!snapshot) {
     return (
       <section className="border-[4px] border-ink shadow-retro-lg bg-paper p-6 min-h-[180px] flex items-center justify-center font-mono text-ink/60">
@@ -20,8 +22,11 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
       </section>
     );
   }
+  const isMerged = viewType === 'merged';
+  const mergedRegion = isMerged ? mergedRegionFromArtifacts(artifacts ?? null) : null;
+  const focusLabelOverride = mergedRegion ? focusLocationFromRegion(mergedRegion).label : undefined;
   const { outlook } = snapshot;
-  const outlookSummary = buildGeneratedOutlookSummary({ snapshot, artifacts, artifactStatus });
+  const outlookSummary = buildGeneratedOutlookSummary({ snapshot, artifacts, artifactStatus, isMerged, focusLabelOverride });
   const usingGeneratedArtifacts = outlookSummary.usingGeneratedArtifacts;
   const displayCategory = outlookSummary.category;
   const meta = RISK_META[displayCategory];
@@ -29,7 +34,7 @@ export default function PrimaryOutlookBanner({ snapshot, artifacts, artifactStat
   const confPct = Math.round(outlook.confidence * 100);
   const isDarkChip = meta.tw.includes('text-paper');
   const headline = outlookSummary.headline;
-  const regionLabel = focusLocationFromSnapshot(snapshot).label;
+  const regionLabel = (mergedRegion ? focusLocationFromRegion(mergedRegion) : focusLocationFromSnapshot(snapshot)).label;
 
   return (
     <section

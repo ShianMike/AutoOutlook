@@ -4,7 +4,9 @@ import type { HourSnapshot } from '../types/forecast';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import { generateDiscussion } from '../utils/discussionGenerator';
-import { focusLocationFromSnapshot } from '../utils/focusLocation';
+import { buildGeneratedOutlookSummary } from '../utils/generatedHeadline';
+import { focusLocationFromSnapshot, focusLocationFromRegion } from '../utils/focusLocation';
+import { mergedRegionFromArtifacts } from '../utils/mergedFocus';
 import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
@@ -12,6 +14,7 @@ interface ForecastDiscussionProps {
   snapshot: HourSnapshot | null;
   artifacts?: OutlookArtifacts | null;
   artifactStatus?: ArtifactStatus;
+  viewType?: 'hourly' | 'merged';
 }
 
 function fmtIssued(iso: string | undefined): string {
@@ -20,10 +23,36 @@ function fmtIssued(iso: string | undefined): string {
   return `${String(d.getUTCHours()).padStart(2, '0')}${String(d.getUTCMinutes()).padStart(2, '0')}Z ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
 }
 
-export default function ForecastDiscussion({ snapshot, artifacts, artifactStatus }: ForecastDiscussionProps) {
-  const text = snapshot ? generateDiscussion(snapshot, artifacts ?? null, artifactStatus) : 'Awaiting forecast bundle…';
+export default function ForecastDiscussion({ snapshot, artifacts, artifactStatus, viewType = 'hourly' }: ForecastDiscussionProps) {
+  const isMerged = viewType === 'merged';
+  const mergedRegion = isMerged ? mergedRegionFromArtifacts(artifacts ?? null) : null;
+  // In merged mode, align the discussion's summary category/headline/hazard
+  // and focus region with the merged Day 1 artifact (the same data the map and
+  // banner use), then generate with merged framing. Environmental detail still
+  // reflects a representative hour because the merged artifact carries no
+  // single ingredient profile.
+  const discussionSnapshot = isMerged && snapshot
+    ? (() => {
+        const focusLabelOverride = mergedRegion ? focusLocationFromRegion(mergedRegion).label : undefined;
+        const summary = buildGeneratedOutlookSummary({ snapshot, artifacts, artifactStatus, isMerged: true, focusLabelOverride });
+        return {
+          ...snapshot,
+          forecastHour: 0,
+          region: mergedRegion ?? snapshot.region,
+          outlook: {
+            ...snapshot.outlook,
+            category: summary.category,
+            mainHazard: summary.hazard,
+            headline: summary.headline,
+          },
+        };
+      })()
+    : snapshot;
+  const text = discussionSnapshot
+    ? generateDiscussion(discussionSnapshot, artifacts ?? null, artifactStatus, isMerged)
+    : 'Awaiting forecast bundle…';
   const mlDriven = Boolean(snapshot?.mlHazards);
-  const focus = focusLocationFromSnapshot(snapshot);
+  const focus = mergedRegion ? focusLocationFromRegion(mergedRegion) : focusLocationFromSnapshot(snapshot);
   const discussionRef = useRef<HTMLElement | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -56,10 +85,10 @@ export default function ForecastDiscussion({ snapshot, artifacts, artifactStatus
   return (
     <RetroPanel
       title="Automated Forecast Discussion"
-      eyebrow={mlDriven ? '03 / Generated from ML hazard probabilities' : '03 / Generated from rule engines'}
+      eyebrow={isMerged ? '03 / Merged multi-cycle Day 1 summary' : (mlDriven ? '03 / Generated from ML hazard probabilities' : '03 / Generated from rule engines')}
       badge={(
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <FocusLocationBadge focus={focus} />
+          <FocusLocationBadge focus={focus} label={isMerged ? 'Day 1 Focus' : 'Risk Center'} showCoord={!isMerged} />
           <button
             type="button"
             onClick={saveDiscussionPng}

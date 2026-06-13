@@ -84,10 +84,52 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.2.2',
+    codename: 'Merged Outlook Summary Consistency',
+    date: '2026-06-13',
+    status: 'CURRENT',
+    summary:
+      'This patch makes the Primary Outlook banner, Hazard Probability Board, and Automated Forecast Discussion describe the merged multi-cycle Day 1 outlook when Merged Outlook is selected, instead of continuing to read the forecast hour chosen on the hourly scrubber. The merged panels now take their category, per-hazard probabilities, focus region, and headline from the merged Day 1 artifact — the same surface the map draws — and the Discussion gains a dedicated merged narrative.',
+    highlights: [
+      'Merged category matches the map: The banner and Hazard Probability Board now read the merged Day 1 artifact, so a merged ENH outlook no longer shows MARGINAL because the hourly scrubber happened to sit on a low-risk hour.',
+      'Correct focus region: The merged focus is derived from the artifact\'s actual peak risk and snapped to the nearest named region, so an Illinois ENH area reads "Midwest (IL / IA / MO)" instead of the hourly snapshot\'s "Southeast".',
+      'Day 1 framing, not a single hour: Merged headlines and discussion say "through the Day 1 period" instead of an hour-specific "around 10Z", and the focus badge reads "Day 1 Focus" without a misleading pinpoint coordinate.',
+      'Dedicated merged discussion: In merged mode the Automated Forecast Discussion is rewritten with Day 1 SYNOPSIS, DISCUSSION, HAZARD PROBABILITIES, and UNCERTAINTY sections, described qualitatively rather than quoting single-hour CAPE/shear values that a multi-cycle product cannot represent.',
+      'Hourly view unchanged: The hourly scrubber keeps its per-hour category, focus, numeric ingredient detail, and full discussion.',
+    ],
+    changes: [
+      {
+        kind: 'FIX',
+        title: 'Merged summary panels read the merged artifact',
+        body: 'In Merged Outlook mode the Primary Outlook banner and Hazard Probability Board previously rendered the forecast hour selected on the hourly scrubber, so the category and per-hazard probabilities could disagree with the merged map (for example showing MARGINAL beneath a merged ENH surface). The dashboard now loads the merged Day 1 artifact at the app level and feeds it, plus an hour-0 snapshot, to those panels so their category and probabilities match the merged map.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Merged focus region derived from the actual peak',
+        body: 'The focus label was taken from the hourly snapshot\'s region, so a merged outlook maxing out in Illinois could still read "near Southeast". A new merged-focus utility takes the main-hazard probability peak (or the centroid of the highest categorical cells) from the merged tile and snaps it to the nearest named severe-weather region, then drives the banner headline, region label, the Hazard board badge, and the Discussion.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Dedicated merged Forecast Discussion',
+        body: 'Merged mode now generates its own discussion: a Day 1 SYNOPSIS (merged product context, categorical reasoning, upper-level pattern, surface forcing), a qualitative DISCUSSION (instability, deep-layer shear, capping, storm mode, dominant hazard), aggregate HAZARD PROBABILITIES across the Day 1 period, and an UNCERTAINTY section framing the combined risk envelope. It deliberately avoids quoting exact single-hour parameter values, which a multi-cycle product has no single value for.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Day 1 period framing across merged panels',
+        body: 'Merged headlines, the focus badge, and the discussion now use Day 1 period language instead of hour-specific time references. Hour phrases such as "around 10Z" become "through the Day 1 period", and the merged focus badge is labeled "Day 1 Focus" with the pinpoint coordinate suppressed since a full-day, multi-region outlook has no single point.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.2.2',
+        body: 'Recorded the merged-outlook summary consistency fixes as the v1.2.2 patch release, bumped package metadata and the app/landing/changelog footers, and moved v1.2.1 to stable in the in-app changelog.',
+      },
+    ],
+  },
+  {
     version: 'v1.2.1',
     codename: 'Hazard Ingredient & Discussion Consistency Fixes',
     date: '2026-06-12',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This patch links the Forecast Discussion to the same per-hazard probabilities shown on the Hazard Probability Board, and repairs three composite ingredients that were dropped in the gridded outlook pipeline so the TorComp dashboard value, SHIP availability, and surface mixing ratio reflect real model output again. It also restores general-thunder TSTM support under organized-severe risk, keeps higher risk tiers nested inside their outlines, and clips risk fills to the US land outline.',
     highlights: [
@@ -1399,7 +1441,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.2.1
+          AutoOutlook · Automated Convective Risk Intelligence · v1.2.2
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>
