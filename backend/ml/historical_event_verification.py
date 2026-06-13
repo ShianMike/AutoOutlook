@@ -39,6 +39,13 @@ DEFAULT_ENH_PLUS_EVENT_DATES = (
     date(2026, 5, 16),
     date(2026, 5, 17),
     date(2026, 5, 18),
+    date(2026, 6, 6),
+    date(2026, 6, 7),
+    date(2026, 6, 8),
+    date(2026, 6, 9),
+    date(2026, 6, 10),
+    date(2026, 6, 11),
+    date(2026, 6, 12),
 )
 EVENT_WINDOW_START_HOUR_UTC = 12
 EVENT_WINDOW_END_HOUR_UTC = 12

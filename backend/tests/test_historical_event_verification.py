@@ -61,7 +61,7 @@ class HistoricalEventVerificationTests(unittest.TestCase):
 
     def test_default_event_dates_resolve_inside_allowed_window(self) -> None:
         self.assertEqual(
-            resolve_event_dates(None, today=date(2026, 6, 4)),
+            resolve_event_dates(None, today=date(2026, 6, 13)),
             [
                 date(2026, 3, 5),
                 date(2026, 3, 6),
@@ -84,9 +84,16 @@ class HistoricalEventVerificationTests(unittest.TestCase):
                 date(2026, 5, 16),
                 date(2026, 5, 17),
                 date(2026, 5, 18),
+                date(2026, 6, 6),
+                date(2026, 6, 7),
+                date(2026, 6, 8),
+                date(2026, 6, 9),
+                date(2026, 6, 10),
+                date(2026, 6, 11),
+                date(2026, 6, 12),
             ],
         )
-        self.assertEqual(resolve_event_dates(None, today=date(2026, 6, 4)), list(DEFAULT_ENH_PLUS_EVENT_DATES))
+        self.assertEqual(resolve_event_dates(None, today=date(2026, 6, 13)), list(DEFAULT_ENH_PLUS_EVENT_DATES))
 
     def test_spc_day1_must_be_enh_or_higher(self) -> None:
         enh_geojson = {
