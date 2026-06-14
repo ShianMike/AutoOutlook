@@ -8,16 +8,14 @@ import {
   artifactProbabilityShapesToFeatureCollection,
   artifactProbabilityToFeatureCollection,
   getArtifactHazardPeak,
-  getArtifactHazardPeakLocation,
   getArtifactHourTile,
   getArtifactThunderPeak,
-  measureArtifactBandRadius,
   type ArtifactProbabilityFeature,
   type ArtifactProbabilityFeatureCollection,
   type ArtifactHazardKey,
   type GeneratedArtifactHazardKey,
 } from '../utils/artifactProbabilities';
-import { HAZARD_CONFIGS, getHazardConfig, buildArtifactSigBlob } from '../utils/hazardProbabilityBands';
+import { HAZARD_CONFIGS, getHazardConfig } from '../utils/hazardProbabilityBands';
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
@@ -130,60 +128,9 @@ export default function GeneratedHazardProbabilityMap({
     }, 0),
     [vectorFeatureCollection],
   );
-  // SIG (significant severe) overlay: a SINGLE smooth blob anchored at the
-  // peak hazard cell and OFFSET along a per-hazard axis, so the SIG core has
-  // its own location instead of perfectly overlaying every ENH+ cell.
-  // Mirrors the rule-based HazardOutlookMap's offset SIG core so the two
-  // map paths render the same visual signature.
-  const sigFeatureCollection = useMemo(() => {
-    if (cfg.sigThreshold === undefined) {
-      return { type: 'FeatureCollection' as const, features: [] };
-    }
-    const peakLocation = getArtifactHazardPeakLocation(
-      artifacts,
-      displayForecastHour,
-      hazard as ArtifactHazardKey,
-    );
-    if (!peakLocation || peakLocation.probability < cfg.sigThreshold) {
-      return { type: 'FeatureCollection' as const, features: [] };
-    }
-    // Measure the ACTUAL 5% (brown band) radius from the artifact's
-    // probability grid — the largest in-band circle around the peak cell.
-    // This is the authoritative containment bound the SIG must fit inside,
-    // and it's typically tighter than the formula-based estimate the SIG
-    // builder would compute on its own (because the real probability
-    // region can be smaller / asymmetric vs the idealized ellipse).
-    const measuredBandRadius = (hazard !== 'thunder')
-      ? measureArtifactBandRadius(tile, hazard as ArtifactHazardKey, peakLocation.lat, peakLocation.lon, 0.05)
-      : undefined;
-    // Feed the active hour's ingredients + region into the SIG generator so
-    // the blob morphs with the actual environmental profile (CAPE / shear /
-    // capStrength / stormMode / frontSignal / STP / SCP) instead of relying
-    // solely on a synthetic motion clock. Same morphHarmonics +
-    // ingredientAspect + ingredientTilt logic the rule-based bands use.
-    const blob = buildArtifactSigBlob(
-      hazard,
-      peakLocation.lat,
-      peakLocation.lon,
-      displayForecastHour ?? 0,
-      peakLocation.probability,
-      snapshot?.ingredients,
-      snapshot?.region,
-      measuredBandRadius,
-    );
-    if (!blob || blob.coords.length < 4) {
-      return { type: 'FeatureCollection' as const, features: [] };
-    }
-    const ring = [...blob.coords, blob.coords[0]] as [number, number][];
-    return {
-      type: 'FeatureCollection' as const,
-      features: [{
-        type: 'Feature' as const,
-        properties: { kind: 'sig' as const },
-        geometry: { type: 'Polygon' as const, coordinates: [ring] },
-      }],
-    };
-  }, [artifacts, tile, displayForecastHour, hazard, cfg.sigThreshold, snapshot?.ingredients, snapshot?.region]);
+  // SIG (significant severe) overlay removed: the legacy synthetic blob is
+  // no longer drawn. Significant-severe is now conveyed via the backend CIG
+  // hatch overlay only.
   const peakProb = hazard === 'thunder'
     ? Math.max(getArtifactThunderPeak(tile) ?? 0, vectorPeakProbability ?? 0)
     : getArtifactHazardPeak(artifacts, displayForecastHour, hazard as ArtifactHazardKey) ?? vectorPeakProbability ?? 0;
@@ -471,36 +418,6 @@ export default function GeneratedHazardProbabilityMap({
                         default: contourStyle,
                         hover: contourStyle,
                         pressed: contourStyle,
-                      }}
-                    />
-                  );
-                })
-              }
-            </Geographies>
-          )}
-
-          {sigFeatureCollection.features.length > 0 && (
-            <Geographies geography={sigFeatureCollection}>
-              {({ geographies }) =>
-                geographies.map((geo, index) => {
-                  const sigStyle = {
-                    fill: '#1a1a1a',
-                    fillOpacity: 0.58,
-                    stroke: '#cc1f1f',
-                    strokeWidth: 1.1,
-                    strokeDasharray: '3 2',
-                    outline: 'none',
-                    pointerEvents: 'none' as const,
-                  };
-                  return (
-                    <Geography
-                      key={`artifact-sig-${hazard}-${geo.rsmKey ?? index}`}
-                      geography={geo}
-                      tabIndex={-1}
-                      style={{
-                        default: sigStyle,
-                        hover: sigStyle,
-                        pressed: sigStyle,
                       }}
                     />
                   );
