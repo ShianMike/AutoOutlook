@@ -855,7 +855,10 @@ def apply_environmental_probability_caps(
     storm_rel = features.raw["stormRelWindKt"]
 
     hail_cap = np.ones(shape, dtype=float)
-    hail_cap = _cap_where(hail_cap, (mucape < 500.0) | (shear < 25.0), 0.04, reason_counts, "weakInstability")
+    # Require some surface-based instability (mlcape) in addition to MUCAPE so
+    # weak, elevated-only environments do not reach the 5% band and flood the
+    # hail panel with a broad lowest-tier swath.
+    hail_cap = _cap_where(hail_cap, (mucape < 500.0) | (shear < 25.0) | (mlcape < 250.0), 0.04, reason_counts, "weakInstability")
     hail_cap_cond = (
         ((shear < 30.0) & (mucape < 2000.0))
         | ((mucape < 800.0) & (shear < 40.0))
