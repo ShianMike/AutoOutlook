@@ -1,0 +1,43 @@
+name: Prune old GHCR images
+
+# Reclaims GitHub "Actions storage" (shared with Packages) by removing
+# untagged/dangling container versions left behind by image rebuilds, and
+# optionally trimming the number of retained versions on manual dispatch.
+
+on:
+  schedule:
+    # Weekly, Sunday 04:00 UTC.
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      min_versions_to_keep:
+        description: 'Also trim tagged versions, keeping only this many most-recent. Leave at 0 to delete untagged versions only.'
+        required: false
+        default: '0'
+
+permissions:
+  packages: write
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete untagged container versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: autooutlook
+          package-type: container
+          delete-only-untagged-versions: 'true'
+
+      - name: Trim retained versions (manual dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_versions_to_keep != '0' }}
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: autooutlook
+          package-type: container
+          min-versions-to-keep: ${{ github.event.inputs.min_versions_to_keep }}
