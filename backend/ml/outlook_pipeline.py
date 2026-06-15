@@ -2823,7 +2823,18 @@ def main() -> None:
             }, indent=2))
             if not args.loop:
                 return
-            time.sleep(max(60.0, args.interval_minutes * 60.0))
+            # Align the next run to a fixed wall-clock interval boundary instead
+            # of sleeping a fixed delay after the previous run finished. Sleeping
+            # `interval_minutes` from completion made the schedule drift by the
+            # duration of each run, so the loop never fired on the intended
+            # scheduled times. Anchoring to interval boundaries keeps successive
+            # runs on a stable cadence (for example :00 and :30 for a 30-minute
+            # interval) and, when a run overruns the interval, simply targets the
+            # next future boundary rather than falling further behind.
+            interval_seconds = max(60.0, args.interval_minutes * 60.0)
+            now = time.time()
+            next_run = (int(now // interval_seconds) + 1) * interval_seconds
+            time.sleep(max(0.0, next_run - now))
     finally:
         if run_lock is not None:
             _release_gcs_run_lock(run_lock)
