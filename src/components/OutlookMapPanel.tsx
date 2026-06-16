@@ -32,6 +32,8 @@ interface OutlookMapPanelProps {
   activeRegion: ActiveRegion;
   selectedMergedDate: string;
   setSelectedMergedDate: (date: string) => void;
+  mergedDay?: 1 | 2;
+  setMergedDay?: (day: 1 | 2) => void;
   viewType: 'hourly' | 'merged';
   setViewType: (type: 'hourly' | 'merged') => void;
   stormReportsMode?: StormReportsMode;
@@ -271,6 +273,8 @@ export default function OutlookMapPanel({
   activeRegion,
   selectedMergedDate,
   setSelectedMergedDate,
+  mergedDay = 1,
+  setMergedDay,
   viewType,
   setViewType,
   stormReportsMode = 'none',
@@ -298,7 +302,7 @@ export default function OutlookMapPanel({
   const [exportError, setExportError] = useState<string | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
 
-  // Fetch available merged D1 dates on mount
+  // Fetch available merged dates for the selected outlook day (D1 or D2).
   const [availableMergedDates, setAvailableMergedDates] = useState<string[]>([]);
   useEffect(() => {
     if (availableMergedDatesOverride) {
@@ -312,14 +316,17 @@ export default function OutlookMapPanel({
     const controller = new AbortController();
     const loadDates = async () => {
       try {
-        const response = await fetch(apiUrl(`/api/outlook/merged-d1-available-dates?region=${activeRegion}`), { signal: controller.signal });
+        const response = await fetch(apiUrl(`/api/outlook/merged-d${mergedDay}-available-dates?region=${activeRegion}`), { signal: controller.signal });
         if (response.ok) {
           const res = await response.json();
-          if (res.dates && res.dates.length > 0) {
-            setAvailableMergedDates(res.dates);
-            if (!selectedMergedDate) {
-              setSelectedMergedDate(res.dates[0]);
-            }
+          const dates: string[] = Array.isArray(res.dates) ? res.dates : [];
+          setAvailableMergedDates(dates);
+          // When the selected date is missing from the active day's list (e.g.
+          // after toggling D1 <-> D2), snap to the newest available date.
+          if (dates.length > 0 && !dates.includes(selectedMergedDate)) {
+            setSelectedMergedDate(dates[0]);
+          } else if (dates.length === 0) {
+            setAvailableMergedDates([]);
           }
         }
       } catch (err) {
@@ -329,12 +336,38 @@ export default function OutlookMapPanel({
     };
     loadDates();
     return () => controller.abort();
-  }, [activeRegion, availableMergedDatesOverride, selectedMergedDate, setSelectedMergedDate]);
+  }, [activeRegion, availableMergedDatesOverride, selectedMergedDate, setSelectedMergedDate, mergedDay]);
 
   const liveMergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
     enabled: !mergedArtifactsOverride,
+    day: mergedDay,
   });
   const mergedArtifacts = mergedArtifactsOverride ?? liveMergedArtifacts;
+
+  // When showing the merged Day 2 outlook, the SPC comparison overlay must show
+  // the SPC Day 2 categorical (not the default Day 1). Fetch it for the selected
+  // anchor date and feed it to the maps through the SPC override.
+  const [mergedD2Spc, setMergedD2Spc] = useState<SpcCategoryFeatureCollection | null>(null);
+  useEffect(() => {
+    if (viewType !== 'merged' || mergedDay !== 2 || !selectedMergedDate || availableMergedDatesOverride) {
+      setMergedD2Spc(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    fetch(apiUrl(`/api/outlook/merged-d2-spc-category?date=${selectedMergedDate}&region=${activeRegion}`), {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then((response) => (response.ok ? (response.json() as Promise<SpcCategoryFeatureCollection>) : null))
+      .then((payload) => setMergedD2Spc(payload))
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        setMergedD2Spc(null);
+      });
+    return () => controller.abort();
+  }, [viewType, mergedDay, selectedMergedDate, activeRegion, availableMergedDatesOverride]);
+
+  const effectiveSpcOverride = spcDay1Override ?? (mergedDay === 2 ? mergedD2Spc : null);
 
   // SPC-backed hourly scrubber: apply the SPC day envelope (ceiling mode) to the
   // selected forecast hour at serve time. The SPC Day 1/Day 2 window is chosen
@@ -370,7 +403,7 @@ export default function OutlookMapPanel({
   const mlDriven = Boolean(effectiveSnapshot?.mlHazards);
   const useRuleHazardFallback = !mlDriven && effectiveArtifactState.status === 'missing';
   const engineLabel = viewType === 'merged'
-    ? 'Multi-Cycle Merged Day 1 Outlook (Element-wise Maximum)'
+    ? `Multi-Cycle Merged Day ${mergedDay} Outlook (Element-wise Maximum)`
     : mlDriven
       ? effectiveArtifactState.status === 'ready'
         ? 'Auto-generated · HRRR/XGBoost artifact pipeline'
@@ -695,7 +728,7 @@ export default function OutlookMapPanel({
               comparisonMode={spcComparisonMode}
               stormReportsMode={mapStormReportsMode}
               stormReports={mapStormReports}
-              spcDay1Override={spcDay1Override}
+              spcDay1Override={effectiveSpcOverride}
             />
           </div>
         ) : (
@@ -926,6 +959,42 @@ export default function OutlookMapPanel({
             </div>
           )}
 
+          {/* Toggle: Outlook Day (D1 / D2) */}
+          {viewType === 'merged' && setMergedDay && (
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
+              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
+                Day
+              </label>
+              <div className="flex border-[2px] border-ink shadow-retro-sm">
+                {([1, 2] as const).map((day) => (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => {
+                      if (day === mergedDay) return;
+                      // Reset the date so the new day's available list picks its newest.
+                      setSelectedMergedDate('');
+                      setMergedDay(day);
+                    }}
+                    disabled={isAnyExporting}
+                    className={[
+                      'px-2 py-1 font-mono text-[11px] font-bold uppercase tracking-wider transition-colors outline-none',
+                      day === mergedDay
+                        ? 'bg-ink text-signal-lime'
+                        : 'bg-paper text-ink hover:bg-signal-amber',
+                      day === 1 ? 'border-r-[2px] border-ink' : '',
+                    ].join(' ')}
+                    title={day === 1
+                      ? 'Day 1 convective outlook (12Z–12Z today)'
+                      : 'Day 2 convective outlook (12Z tomorrow – 12Z next day, from the 12Z cycle F24–F48)'}
+                  >
+                    {`D${day}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Dropdown: Merged Date (Conditional) */}
           {viewType === 'merged' && availableMergedDates.length > 0 && (
             <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
@@ -1026,7 +1095,7 @@ export default function OutlookMapPanel({
                 className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
               >
                 <option value="auto">AutoOutlook Only</option>
-                <option value="spc">SPC Day 1 Only</option>
+                <option value="spc">{viewType === 'merged' ? `SPC Day ${mergedDay} Only` : 'SPC Day 1 Only'}</option>
                 <option value="overlay">Overlay Compare</option>
               </select>
             </div>

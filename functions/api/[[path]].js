@@ -33,6 +33,9 @@ function resolveStaticPath(pathname, region, model = null, date = null) {
   if (pathname === '/api/outlook/merged-d1-available-dates') {
     return `${prefix}/outlook/merged-d1/available-dates.json`;
   }
+  if (pathname === '/api/outlook/merged-d2-available-dates') {
+    return `${prefix}/outlook/merged-d2/available-dates.json`;
+  }
 
   // Merged D1 endpoints
   const isMergedD1Verification = pathname === '/api/outlook/merged-d1-verification';
@@ -53,6 +56,27 @@ function resolveStaticPath(pathname, region, model = null, date = null) {
       return `${prefix}/outlook/merged-d1/${date}/${filename}`;
     }
     return `${prefix}/outlook/merged-d1/${filename}`;
+  }
+
+  // Merged D2 endpoints (12Z cycle F24-F48, backed by SPC Day 2)
+  const isMergedD2Verification = pathname === '/api/outlook/merged-d2-verification';
+  const isMergedD2RiskPolygons = pathname === '/api/outlook/merged-d2-risk-polygons';
+  const isMergedD2ProbabilityTile = pathname === '/api/outlook/merged-d2-probability-tile';
+  const isMergedD2SpcCategory = pathname === '/api/outlook/merged-d2-spc-category';
+
+  if (isMergedD2Verification || isMergedD2RiskPolygons || isMergedD2ProbabilityTile || isMergedD2SpcCategory) {
+    const filename = isMergedD2Verification
+      ? 'verification.json'
+      : isMergedD2RiskPolygons
+        ? 'risk-polygons.geojson'
+        : isMergedD2ProbabilityTile
+          ? 'probability-tile.json'
+          : 'spc-day2-category.geojson';
+
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return `${prefix}/outlook/merged-d2/${date}/${filename}`;
+    }
+    return `${prefix}/outlook/merged-d2/${filename}`;
   }
 
   const direct = STATIC_ROUTES.get(pathname);

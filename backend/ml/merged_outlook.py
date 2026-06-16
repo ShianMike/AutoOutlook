@@ -15,6 +15,7 @@ from backend.ml.spc_verification import (
     _lat_lon_grid,
     compare_prediction_to_spc,
     fetch_current_spc_day1_category,
+    fetch_current_spc_day2_category,
     official_category_grid,
 )
 from backend.ml.gridded_outlook import (
@@ -216,6 +217,23 @@ def spc_d1_window(
     return today_12z, today_12z + timedelta(days=1)
 
 
+def spc_day_window_for_date(target_date: date, spc_day: int = 1) -> tuple[datetime, datetime]:
+    """The 12Z–12Z convective-day window for an SPC outlook anchored to ``target_date``.
+
+    ``spc_day=1`` -> ``12Z(target) .. 12Z(target+1)``.
+    ``spc_day=2`` -> ``12Z(target+1) .. 12Z(target+2)`` (the Day 2 convective day).
+
+    The Day 2 window is the span an SPC Day 2 outlook *issued* on ``target_date``
+    covers, and it is exactly the F24–F48 reach of that date's 12Z HRRR cycle.
+    """
+    if spc_day not in (1, 2):
+        raise ValueError(f"Unsupported SPC outlook day: {spc_day}")
+    valid = datetime(
+        target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc
+    ) + timedelta(days=spc_day - 1)
+    return valid, valid + timedelta(days=1)
+
+
 def resolve_merge_cycle_dirs(
     artifact_root: Path,
     now: datetime | None = None,
@@ -338,6 +356,86 @@ def resolve_cycle_dirs_for_merged_d1_date(
     return [selected[1]]
 
 
+# A merged Day 2 outlook spans 12Z(D+1)..12Z(D+2). Only the 12Z HRRR cycle of
+# day D reaches that window (F24 = 12Z(D+1), F48 = 12Z(D+2)), so D2 is anchored
+# to the 12Z run and requires the extended f48-reaching forecast range.
+MERGED_D2_ANCHOR_CYCLE_HOUR = 12
+MERGED_D2_MIN_MAX_FORECAST_HOUR = 47
+
+
+def _d2_cycle_reaches_window(cycle_time: datetime, index: Mapping[str, Any]) -> bool:
+    """Whether a cycle is a 12Z run that reaches into the Day 2 (F24–F48) window."""
+    if cycle_time.hour != MERGED_D2_ANCHOR_CYCLE_HOUR:
+        return False
+    ready = _int_list(index.get("readyForecastHours"))
+    if not ready:
+        return False
+    return max(ready) >= MERGED_D2_MIN_MAX_FORECAST_HOUR and any(h >= 24 for h in ready)
+
+
+def _merged_d2_cycle_candidates(
+    artifact_root: Path,
+    model: str,
+) -> list[tuple[datetime, Path, dict[str, Any]]]:
+    """Cycle candidates eligible to anchor a merged Day 2 outlook (12Z, f48-reaching)."""
+    return [
+        item
+        for item in _merged_d1_cycle_candidates(artifact_root, model)
+        if _d2_cycle_reaches_window(item[0], item[2])
+    ]
+
+
+def _preferred_merged_d2_cycle_for_date(
+    candidates: list[tuple[datetime, Path, dict[str, Any]]],
+    target_date: date,
+) -> tuple[datetime, Path, dict[str, Any]] | None:
+    same_day = [item for item in candidates if item[0].date() == target_date]
+    if not same_day:
+        return None
+    same_day.sort(key=_merged_d1_cycle_rank, reverse=True)
+    return same_day[0]
+
+
+def available_merged_d2_dates(
+    artifact_root: Path,
+    model: str = "hrrr",
+    *,
+    day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+) -> list[str]:
+    """Return anchor dates whose 12Z cycle can produce a merged Day 2 outlook."""
+    if day_count <= 0:
+        return []
+    candidates = _merged_d2_cycle_candidates(artifact_root, model)
+    dates: list[str] = []
+    for cycle_date in sorted({cycle_time.date() for cycle_time, _path, _index in candidates}, reverse=True):
+        if _preferred_merged_d2_cycle_for_date(candidates, cycle_date) is None:
+            continue
+        dates.append(cycle_date.isoformat())
+        if len(dates) >= day_count:
+            break
+    return dates
+
+
+def resolve_cycle_dirs_for_merged_d2_date(
+    artifact_root: Path,
+    target_date: date,
+    model: str = "hrrr",
+    *,
+    day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+) -> list[Path]:
+    """Resolve the 12Z anchor run used by the public merged-D2 date selector."""
+    allowed = set(available_merged_d2_dates(artifact_root, model, day_count=day_count))
+    if target_date.isoformat() not in allowed:
+        return []
+    selected = _preferred_merged_d2_cycle_for_date(
+        _merged_d2_cycle_candidates(artifact_root, model),
+        target_date,
+    )
+    if selected is None:
+        return []
+    return [selected[1]]
+
+
 def fetch_archived_spc_day1_category(
     target_date: Any,
     session: requests.Session | None = None,
@@ -345,6 +443,15 @@ def fetch_archived_spc_day1_category(
 ) -> dict[str, Any]:
     """Fetch historical SPC Day 1 categorical GeoJSON from NOAA archives."""
     return fetch_archived_spc_category(target_date, session, output_dir, day=1)
+
+
+def fetch_archived_spc_day2_category(
+    target_date: Any,
+    session: requests.Session | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Fetch historical SPC Day 2 categorical GeoJSON from NOAA archives."""
+    return fetch_archived_spc_category(target_date, session, output_dir, day=2)
 
 
 # Archive issue times that commonly appear in the geojson zip filenames, per day.
@@ -468,24 +575,34 @@ def merge_cycles_for_spc_window(
     target_date: Any | None = None,
     window_valid: datetime | None = None,
     window_expire: datetime | None = None,
+    spc_day: int = 1,
 ) -> dict[str, Any]:
-    """Merge per-hour category grids from multiple cycles and compare to SPC D1.
+    """Merge per-hour category grids from multiple cycles and compare to SPC D1/D2.
 
     Parameters
     ----------
     cycle_dirs:
         List of incremental artifact directories (one per HRRR cycle).
     spc_fetch_fn:
-        Optional override for SPC Day 1 fetch.  Defaults to
-        ``fetch_current_spc_day1_category``.
+        Optional override for the SPC fetch. Defaults to
+        ``fetch_current_spc_day1_category`` (or the Day 2 equivalent when
+        ``spc_day == 2``).
     session:
         Optional ``requests.Session`` for network calls.
     output_dir:
         If provided, write ``merged_verification_summary.json`` and
-        ``merged_d1_index.json`` here.
+        ``merged_d{spc_day}_index.json`` here.
     target_date:
-        Optional date object or YYYY-MM-DD string to target.
+        Optional date object or YYYY-MM-DD string to target. For ``spc_day == 1``
+        this is the convective day; for ``spc_day == 2`` it is the SPC issuance
+        date (the anchor cycle's date), whose Day 2 window is
+        ``12Z(target+1)..12Z(target+2)``.
+    spc_day:
+        SPC outlook day to merge against (1 or 2). Day 2 covers the F24–F48 reach
+        of a 12Z HRRR cycle.
     """
+    if spc_day not in (1, 2):
+        raise ValueError(f"Unsupported SPC outlook day: {spc_day}")
     started = time.perf_counter()
     own_session = session is None
     session = session or requests.Session()
@@ -504,18 +621,18 @@ def merge_cycles_for_spc_window(
             d1_valid = window_valid.astimezone(timezone.utc)
             d1_expire = window_expire.astimezone(timezone.utc)
         elif target_date is not None:
-            d1_valid = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc)
-            d1_expire = d1_valid + timedelta(days=1)
+            d1_valid, d1_expire = spc_day_window_for_date(target_date, spc_day)
         else:
             d1_valid, d1_expire = None, None
 
-        # 2. Try to find/fetch SPC Day 1 geojson
+        # 2. Try to find/fetch the SPC Day {spc_day} geojson
         spc = None
         spc_geojson = None
+        spc_cat_filename = f"spc_day{spc_day}_cat.geojson"
 
-        # Try to find a cached spc_day1_cat.geojson in the cycle_dirs
+        # Try to find a cached spc_day{spc_day}_cat.geojson in the cycle_dirs
         for cycle_dir in cycle_dirs:
-            cached_geojson_path = cycle_dir / "spc_day1_cat.geojson"
+            cached_geojson_path = cycle_dir / spc_cat_filename
             if cached_geojson_path.exists():
                 try:
                     geo = json.loads(cached_geojson_path.read_text(encoding="utf-8"))
@@ -525,7 +642,7 @@ def merge_cycles_for_spc_window(
                         if cv == d1_valid or (window_valid is not None and date_matches):
                             day1_url = (
                                 f"https://www.spc.noaa.gov/products/outlook/archive/{target_date.year}/"
-                                f"day1otlk_{target_date.strftime('%Y%m%d')}.html"
+                                f"day{spc_day}otlk_{target_date.strftime('%Y%m%d')}.html"
                                 if target_date is not None
                                 else None
                             )
@@ -533,6 +650,7 @@ def merge_cycles_for_spc_window(
                             spc = {
                                 "categoryGeojson": geo,
                                 "day1Url": day1_url,
+                                "spcDay": spc_day,
                                 "fetchedAtISO": _now_iso(),
                             }
                             break
@@ -540,6 +658,7 @@ def merge_cycles_for_spc_window(
                         spc_geojson = geo
                         spc = {
                             "categoryGeojson": geo,
+                            "spcDay": spc_day,
                             "fetchedAtISO": _now_iso(),
                         }
                         break
@@ -548,18 +667,24 @@ def merge_cycles_for_spc_window(
 
         # If not found in cache, fetch it
         if spc_geojson is None:
+            fetch_archived = (
+                fetch_archived_spc_day1_category if spc_day == 1 else fetch_archived_spc_day2_category
+            )
+            fetch_current_default = (
+                fetch_current_spc_day1_category if spc_day == 1 else fetch_current_spc_day2_category
+            )
             if target_date is not None:
                 now_utc = datetime.now(timezone.utc).date()
                 if abs((target_date - now_utc).days) <= 1:
                     try:
-                        spc = fetch_archived_spc_day1_category(target_date, session, output_dir)
+                        spc = fetch_archived(target_date, session, output_dir)
                     except Exception:
-                        spc_fetch = spc_fetch_fn or fetch_current_spc_day1_category
+                        spc_fetch = spc_fetch_fn or fetch_current_default
                         spc = spc_fetch(session, output_dir)
                 else:
-                    spc = fetch_archived_spc_day1_category(target_date, session, output_dir)
+                    spc = fetch_archived(target_date, session, output_dir)
             else:
-                spc_fetch = spc_fetch_fn or fetch_current_spc_day1_category
+                spc_fetch = spc_fetch_fn or fetch_current_default
                 spc = spc_fetch(session, output_dir)
 
             spc_geojson = spc.get("categoryGeojson")
@@ -717,6 +842,7 @@ def merge_cycles_for_spc_window(
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
         summary["mergedCycles"] = merged_cycles
         summary["mergedCycleTimeISOs"] = merged_cycle_time_isos
+        summary["spcDay"] = spc_day
         summary["d1WindowValidISO"] = d1_valid.isoformat().replace("+00:00", "Z")
         summary["d1WindowExpireISO"] = d1_expire.isoformat().replace("+00:00", "Z")
         summary["contributingHours"] = contributing_hours
@@ -733,7 +859,7 @@ def merge_cycles_for_spc_window(
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             _write_json(output_dir / "merged_verification_summary.json", summary)
-            _write_json(output_dir / "spc_day1_cat.geojson", spc_geojson)
+            _write_json(output_dir / spc_cat_filename, spc_geojson)
             _write_json(output_dir / "merged_risk_polygons.geojson", merged_risk_polygons)
             _write_json(output_dir / "merged_hazard_probability_shapes.geojson", merged_hazard_shapes)
             _write_json(output_dir / "merged_cig_shapes.geojson", merged_cig_shapes)
@@ -760,10 +886,12 @@ def merge_cycles_for_spc_window(
             }
             _write_json(output_dir / "merged_probability_tile.json", merged_probability_tile)
 
-            _write_json(output_dir / "merged_d1_index.json", {
+            index_filename = "merged_d1_index.json" if spc_day == 1 else f"merged_d{spc_day}_index.json"
+            _write_json(output_dir / index_filename, {
                 "generatedAtISO": summary["generatedAtISO"],
                 "mergedCycles": merged_cycles,
                 "mergedCycleTimeISOs": merged_cycle_time_isos,
+                "spcDay": spc_day,
                 "d1WindowValidISO": summary["d1WindowValidISO"],
                 "d1WindowExpireISO": summary["d1WindowExpireISO"],
                 "contributingHourCount": len(contributing_hours),

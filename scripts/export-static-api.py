@@ -267,6 +267,71 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         print(f"Default fallback merged D1 set to latest date: {dates[0]}")
 
 
+def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
+    # 1. Get available merged D2 dates list (12Z cycles reaching f48).
+    dates = helpers._available_merge_d2_dates_list(model="hrrr")
+    if not dates:
+        print("No available merged D2 dates found for static export.")
+        return
+
+    print(f"Exporting merged D2 archives for dates: {dates}")
+
+    # 2. Create target directory
+    merged_d2_out_dir = output_dir / "outlook" / "merged-d2"
+    merged_d2_out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3. Write available dates list
+    write_json(merged_d2_out_dir / "available-dates.json", {"dates": dates})
+
+    latest_date_dir = None
+
+    for date_str in dates:
+        merged_dir = helpers._generate_or_get_merged_d2_dir(date_str, model="hrrr")
+        if merged_dir is None or not merged_dir.exists():
+            print(f"Warning: could not resolve merged D2 dir for date {date_str}")
+            continue
+
+        date_out_dir = merged_d2_out_dir / date_str
+        date_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy small files (note: D2 backs against the SPC Day 2 categorical).
+        copy_if_exists(merged_dir / "merged_verification_summary.json", date_out_dir / "verification.json")
+        copy_if_exists(merged_dir / "merged_risk_polygons.geojson", date_out_dir / "risk-polygons.geojson")
+        copy_if_exists(merged_dir / "merged_hazard_probability_shapes.geojson", date_out_dir / "hazard-probability-shapes.geojson")
+        copy_if_exists(merged_dir / "spc_day2_cat.geojson", date_out_dir / "spc-day2-category.geojson")
+
+        # Process and write lightweight probability tile (drop heavy grids; keep
+        # the vector risk/hazard/cig shapes the merged maps actually render).
+        tile_path = merged_dir / "merged_probability_tile.json"
+        if tile_path.exists():
+            try:
+                tile = json.loads(tile_path.read_text(encoding="utf-8"))
+                if isinstance(tile, dict):
+                    tile["categoryOrdinal"] = []
+                    tile["categoryLabel"] = []
+                    tile["probabilities"] = {}
+                    write_json(date_out_dir / "probability-tile.json", tile)
+            except Exception as e:
+                print(f"Warning: failed to make lightweight D2 tile for {date_str}: {e}")
+
+        # D2 spans a future convective day, so there are no verifying storm
+        # reports yet; write an empty list so the client gets a clean response.
+        write_json(date_out_dir / "storm-reports.json", {"reports": []})
+
+        if latest_date_dir is None:
+            latest_date_dir = date_out_dir
+
+    # 4. Copy latest date's files directly as default fallbacks
+    if latest_date_dir is not None:
+        copy_if_exists(latest_date_dir / "verification.json", merged_d2_out_dir / "verification.json")
+        copy_if_exists(latest_date_dir / "risk-polygons.geojson", merged_d2_out_dir / "risk-polygons.geojson")
+        copy_if_exists(latest_date_dir / "hazard-probability-shapes.geojson", merged_d2_out_dir / "hazard-probability-shapes.geojson")
+        copy_if_exists(latest_date_dir / "probability-tile.json", merged_d2_out_dir / "probability-tile.json")
+        copy_if_exists(latest_date_dir / "spc-day2-category.geojson", merged_d2_out_dir / "spc-day2-category.geojson")
+        copy_if_exists(latest_date_dir / "storm-reports.json", merged_d2_out_dir / "storm-reports.json")
+        print(f"Default fallback merged D2 set to latest date: {dates[0]}")
+
+
 def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir: Path) -> None:
     artifact_dir = artifact_dir.resolve()
     legacy_artifact_dir = legacy_artifact_dir.resolve()
@@ -323,6 +388,9 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
 
     # Export merged D1 outlook archives
     export_merged_d1_archives(output_dir, artifact_dir.parent, helpers)
+
+    # Export merged D2 outlook archives (12Z cycle F24-F48)
+    export_merged_d2_archives(output_dir, artifact_dir.parent, helpers)
 
     print(json.dumps({
         "outputDir": str(output_dir),

@@ -16,7 +16,9 @@ import requests
 from .gridded_outlook import SPC_RISK_LABELS
 
 SPC_DAY1_URL = "https://www.spc.noaa.gov/products/outlook/day1otlk.html"
+SPC_DAY2_URL = "https://www.spc.noaa.gov/products/outlook/day2otlk.html"
 GEOJSON_ZIP_RE = re.compile(r'href=["\']([^"\']*day1otlk_[^"\']+-geojson\.zip)["\']', re.IGNORECASE)
+GEOJSON_ZIP_RE_DAY2 = re.compile(r'href=["\']([^"\']*day2otlk_[^"\']+-geojson\.zip)["\']', re.IGNORECASE)
 
 
 def fetch_current_spc_day1_category(
@@ -24,36 +26,60 @@ def fetch_current_spc_day1_category(
     output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Fetch current SPC Day 1 categorical GeoJSON without using it as model input."""
+    return _fetch_current_spc_category(session, output_dir, day=1)
+
+
+def fetch_current_spc_day2_category(
+    session: requests.Session | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Fetch current SPC Day 2 categorical GeoJSON without using it as model input."""
+    return _fetch_current_spc_category(session, output_dir, day=2)
+
+
+def _fetch_current_spc_category(
+    session: requests.Session | None = None,
+    output_dir: Path | None = None,
+    day: int = 1,
+) -> dict[str, Any]:
+    """Fetch the current SPC Day ``day`` (1 or 2) categorical GeoJSON."""
+    if day not in (1, 2):
+        raise ValueError(f"Unsupported SPC outlook day: {day}")
+    page_url = SPC_DAY1_URL if day == 1 else SPC_DAY2_URL
+    zip_re = GEOJSON_ZIP_RE if day == 1 else GEOJSON_ZIP_RE_DAY2
+    product = f"day{day}otlk"
     own_session = session is None
     session = session or requests.Session()
     session.headers.setdefault("User-Agent", "AutoOutlook-SPC-verifier/1.0")
     try:
-        page = session.get(SPC_DAY1_URL, timeout=30)
+        page = session.get(page_url, timeout=30)
         page.raise_for_status()
-        match = GEOJSON_ZIP_RE.search(page.text)
+        match = zip_re.search(page.text)
         if not match:
-            raise ValueError("SPC Day 1 page did not expose a geojson zip link")
-        zip_url = urljoin(SPC_DAY1_URL, match.group(1))
+            raise ValueError(f"SPC Day {day} page did not expose a geojson zip link")
+        zip_url = urljoin(page_url, match.group(1))
         zip_response = session.get(zip_url, timeout=45)
         zip_response.raise_for_status()
 
         with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zf:
             cat_name = next(
                 name for name in zf.namelist()
-                if name.endswith("_cat.nolyr.geojson") or name.endswith("day1otlk_cat.nolyr.geojson")
+                if name.endswith("_cat.nolyr.geojson") or name.endswith(f"{product}_cat.nolyr.geojson")
             )
             category_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
 
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "spc_day1_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
+            (output_dir / f"spc_day{day}_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
             (output_dir / "spc_source.json").write_text(json.dumps({
-                "day1Url": SPC_DAY1_URL,
+                "day1Url": page_url,
+                "spcDay": day,
                 "geojsonZipUrl": zip_url,
                 "fetchedAtISO": _now_iso(),
             }, indent=2), encoding="utf-8")
         return {
-            "day1Url": SPC_DAY1_URL,
+            "day1Url": page_url,
+            "spcDay": day,
             "geojsonZipUrl": zip_url,
             "fetchedAtISO": _now_iso(),
             "categoryGeojson": category_geojson,

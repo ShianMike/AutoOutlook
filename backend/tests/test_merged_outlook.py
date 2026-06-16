@@ -15,14 +15,17 @@ from backend.ml.merged_outlook import (
     _merge_cig_shape_collections,
     _spc_geojson_max_category_ordinal,
     available_merged_d1_dates,
+    available_merged_d2_dates,
     blend_merged_outlook_with_spc,
     merge_cycles_for_spc_window,
     resolve_cycle_dirs_for_merged_d1_date,
+    resolve_cycle_dirs_for_merged_d2_date,
     resolve_merge_cycle_dirs,
     select_spc_geojson_for_valid_time,
     spc_backed_hour_tile,
     spc_d1_window,
     spc_day_window,
+    spc_day_window_for_date,
 )
 
 
@@ -938,6 +941,102 @@ class TestSpcBackedHourTile(unittest.TestCase):
         self.assertTrue(out["applied"])
         grid = np.asarray(out["tile"]["categoryOrdinal"])
         self.assertTrue(np.all(grid <= 2))
+
+
+class TestSpcDayWindowForDate(unittest.TestCase):
+    def test_day1_window(self) -> None:
+        valid, expire = spc_day_window_for_date(date(2026, 6, 3), spc_day=1)
+        self.assertEqual(valid, datetime(2026, 6, 3, 12, tzinfo=timezone.utc))
+        self.assertEqual(expire, datetime(2026, 6, 4, 12, tzinfo=timezone.utc))
+
+    def test_day2_window_is_next_convective_day(self) -> None:
+        valid, expire = spc_day_window_for_date(date(2026, 6, 3), spc_day=2)
+        self.assertEqual(valid, datetime(2026, 6, 4, 12, tzinfo=timezone.utc))
+        self.assertEqual(expire, datetime(2026, 6, 5, 12, tzinfo=timezone.utc))
+
+    def test_rejects_unsupported_day(self) -> None:
+        with self.assertRaises(ValueError):
+            spc_day_window_for_date(date(2026, 6, 3), spc_day=3)
+
+
+class TestMergedD2DateSelection(unittest.TestCase):
+    def test_only_f48_reaching_12z_cycles_anchor_d2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            # 12Z cycle reaching f48 qualifies for its date's D2.
+            _write_cycle_artifacts(
+                root, "20260603_12z", "2026-06-03T12:00:00Z",
+                [0, 6, 12, 18, 24, 30, 36, 42, 48], grid,
+            )
+            # 00Z cycle (only reaches f36 here) does not anchor a D2 outlook.
+            _write_cycle_artifacts(
+                root, "20260603_00z", "2026-06-03T00:00:00Z",
+                [0, 6, 12, 18, 24, 30, 36], grid,
+            )
+            # 12Z cycle that does not reach f48 is excluded.
+            _write_cycle_artifacts(
+                root, "20260602_12z", "2026-06-02T12:00:00Z",
+                [0, 6, 12, 18, 24, 30], grid,
+            )
+
+            dates = available_merged_d2_dates(root, "hrrr")
+            self.assertEqual(dates, ["2026-06-03"])
+
+            dirs = resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 3), "hrrr")
+            self.assertEqual([d.name for d in dirs], ["20260603_12z"])
+
+            self.assertEqual(
+                resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 2), "hrrr"),
+                [],
+            )
+
+
+class TestMergeCyclesForD2Window(unittest.TestCase):
+    def test_d2_merge_uses_f24_to_f48_of_12z_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.full((6, 6), 3, dtype=int)  # SLGT everywhere
+            cycle_dir = _write_cycle_artifacts(
+                root, "20260603_12z", "2026-06-03T12:00:00Z",
+                [0, 6, 12, 18, 24, 30, 36, 42, 48], grid,
+            )
+            # Cache the SPC Day 2 geojson in the cycle dir so the merge avoids the
+            # network. Its declared window must match the D2 span 12Z(D+1)-12Z(D+2).
+            spc_geojson = _make_spc_geojson(
+                "2026-06-04T12:00:00Z", "2026-06-05T12:00:00Z", "MRGL", 2,
+            )
+            (cycle_dir / "spc_day2_cat.geojson").write_text(
+                json.dumps(spc_geojson), encoding="utf-8"
+            )
+
+            out_dir = root / "merged_hrrr_d2_2026-06-03"
+            summary = merge_cycles_for_spc_window(
+                [cycle_dir],
+                output_dir=out_dir,
+                target_date=date(2026, 6, 3),
+                spc_day=2,
+            )
+
+            self.assertEqual(summary["spcDay"], 2)
+            self.assertEqual(summary["d1WindowValidISO"], "2026-06-04T12:00:00Z")
+            self.assertEqual(summary["d1WindowExpireISO"], "2026-06-05T12:00:00Z")
+
+            # Only F24, F30, F36, F42 fall inside [12Z D+1, 12Z D+2); F48 is the
+            # exclusive end and F0-F18 are before the window.
+            contributing_hours = sorted(
+                item["forecastHour"] for item in summary["contributingHours"]
+            )
+            self.assertEqual(contributing_hours, [24, 30, 36, 42])
+
+            self.assertTrue((out_dir / "merged_d2_index.json").exists())
+            self.assertTrue((out_dir / "spc_day2_cat.geojson").exists())
+            self.assertTrue((out_dir / "merged_probability_tile.json").exists())
+            self.assertFalse((out_dir / "merged_d1_index.json").exists())
+
+            index = json.loads((out_dir / "merged_d2_index.json").read_text(encoding="utf-8"))
+            self.assertEqual(index["spcDay"], 2)
+            self.assertEqual(index["d1WindowValidISO"], "2026-06-04T12:00:00Z")
 
 
 if __name__ == "__main__":

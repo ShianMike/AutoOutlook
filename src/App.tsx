@@ -52,6 +52,7 @@ export default function App() {
   const activeRegion: ActiveRegion = 'conus';
 
   const [selectedMergedDate, setSelectedMergedDate] = useState<string>('');
+  const [mergedDay, setMergedDay] = useState<1 | 2>(1);
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
   const [view, setView] = useState<AppView>(() => viewFromHash());
@@ -67,7 +68,7 @@ export default function App() {
     15 * 1000,
     dashboardDataEnabled,
   );
-  const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate, dashboardDataEnabled);
+  const mergedD1Verification = useMergedD1Verification(activeRegion, selectedMergedDate, dashboardDataEnabled, mergedDay);
   const stormReports = useSpcStormReports(activeRegion, selectedMergedDate, dashboardDataEnabled);
   const isMerged = viewType === 'merged';
   // In merged mode the summary panels must describe the multi-cycle Day 1
@@ -77,6 +78,7 @@ export default function App() {
   // from the scrubber hour while the map shows ENH.
   const mergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
     enabled: dashboardDataEnabled && isMerged,
+    day: mergedDay,
   });
   const panelArtifactState = isMerged ? mergedArtifacts : outlookArtifacts;
   const panelSnapshot = isMerged && snapshot ? { ...snapshot, forecastHour: 0 } : snapshot;
@@ -175,6 +177,8 @@ export default function App() {
               activeRegion={activeRegion}
               selectedMergedDate={selectedMergedDate}
               setSelectedMergedDate={setSelectedMergedDate}
+              mergedDay={mergedDay}
+              setMergedDay={setMergedDay}
               viewType={viewType}
               setViewType={setViewType}
               stormReportsMode={stormReportsMode}

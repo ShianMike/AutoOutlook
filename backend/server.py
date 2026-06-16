@@ -276,33 +276,59 @@ def _available_merge_dates_list(model: str) -> list[str]:
     return available_merged_d1_dates(artifact_root, model)
 
 
+def _available_merge_d2_dates_list(model: str) -> list[str]:
+    from backend.ml.merged_outlook import available_merged_d2_dates
+
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+    return available_merged_d2_dates(artifact_root, model)
+
+
 def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> Path | None:
-    """Ensure that the merged artifacts for target_date_str are generated and return path."""
+    return _generate_or_get_merged_dir(target_date_str, model, spc_day=1)
+
+
+def _generate_or_get_merged_d2_dir(target_date_str: str | None, model: str) -> Path | None:
+    return _generate_or_get_merged_dir(target_date_str, model, spc_day=2)
+
+
+def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day: int = 1) -> Path | None:
+    """Ensure that the merged Day ``spc_day`` artifacts for target_date_str are generated."""
     from datetime import date, datetime, timezone
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
-    
+
     # 1. Resolve target date
     if not target_date_str:
-        available = _available_merge_dates_list(model)
+        available = (
+            _available_merge_dates_list(model)
+            if spc_day == 1
+            else _available_merge_d2_dates_list(model)
+        )
         if not available:
             return None
         target_date_str = available[0]
-        
+
     try:
         target_date = date.fromisoformat(target_date_str)
     except ValueError:
         return None
-        
-    merged_dir = artifact_root / f"merged_{model}_{target_date_str}"
-    
+
+    dir_suffix = "" if spc_day == 1 else "d2_"
+    merged_dir = artifact_root / f"merged_{model}_{dir_suffix}{target_date_str}"
+
+    index_name = "merged_d1_index.json" if spc_day == 1 else f"merged_d{spc_day}_index.json"
     verification_path = merged_dir / "merged_verification_summary.json"
     tile_path = merged_dir / "merged_probability_tile.json"
-    index_path = merged_dir / "merged_d1_index.json"
+    index_path = merged_dir / index_name
 
     def target_cycle_dirs() -> list[Path]:
-        from backend.ml.merged_outlook import resolve_cycle_dirs_for_merged_d1_date
+        from backend.ml.merged_outlook import (
+            resolve_cycle_dirs_for_merged_d1_date,
+            resolve_cycle_dirs_for_merged_d2_date,
+        )
 
-        return resolve_cycle_dirs_for_merged_d1_date(artifact_root, target_date, model)
+        if spc_day == 1:
+            return resolve_cycle_dirs_for_merged_d1_date(artifact_root, target_date, model)
+        return resolve_cycle_dirs_for_merged_d2_date(artifact_root, target_date, model)
 
     def cycle_time_isos(cycle_dirs: list[Path]) -> list[str]:
         values: list[str] = []
@@ -364,7 +390,7 @@ def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> P
         return merged_dir
         
     # 3. Synchronize re-generation using singleflight lock
-    lock_key = f"merge-d1-{model}-{target_date_str}"
+    lock_key = f"merge-d{spc_day}-{model}-{target_date_str}"
     lock = _singleflight_lock(lock_key)
     with lock:
         # Re-check freshness under lock in case another thread just generated it
@@ -383,10 +409,11 @@ def _generate_or_get_merged_d1_dir(target_date_str: str | None, model: str) -> P
                 cycle_dirs,
                 output_dir=merged_dir,
                 target_date=target_date,
+                spc_day=spc_day,
             )
             return merged_dir
         except Exception as exc:
-            log.exception("Dynamic D1 merge failed for date %s", target_date_str)
+            log.exception("Dynamic D%s merge failed for date %s", spc_day, target_date_str)
             return None
 
 
@@ -425,6 +452,53 @@ def merged_d1_probability_tile():
     if merged_dir is None:
         return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
     return _json_path(merged_dir / "merged_probability_tile.json")
+
+
+@app.get("/api/outlook/merged-d2-available-dates")
+def merged_d2_available_dates():
+    model = _request_model()
+    dates = _available_merge_d2_dates_list(model)
+    return _json_response({"dates": dates})
+
+
+@app.get("/api/outlook/merged-d2-verification")
+def merged_d2_verification():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_verification_summary.json")
+
+
+@app.get("/api/outlook/merged-d2-risk-polygons")
+def merged_d2_risk_polygons():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_risk_polygons.geojson")
+
+
+@app.get("/api/outlook/merged-d2-probability-tile")
+def merged_d2_probability_tile():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "merged_probability_tile.json")
+
+
+@app.get("/api/outlook/merged-d2-spc-category")
+def merged_d2_spc_category():
+    date_str = request.args.get("date")
+    model = _request_model()
+    merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
+    if merged_dir is None:
+        return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
+    return _json_path(merged_dir / "spc_day2_cat.geojson")
 
 
 def fetch_spc_daily_storm_reports(target_date: Any, session: Any = None) -> list[dict[str, Any]]:

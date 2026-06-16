@@ -746,6 +746,7 @@ export function useMergedD1Verification(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
   enabled = true,
+  day: 1 | 2 = 1,
 ): MergedD1VerificationSummary | null {
   const [data, setData] = useState<MergedD1VerificationSummary | null>(null);
 
@@ -756,9 +757,8 @@ export function useMergedD1Verification(
     }
 
     const controller = new AbortController();
-    const url = selectedDate
-      ? `/api/outlook/merged-d1-verification?date=${selectedDate}`
-      : '/api/outlook/merged-d1-verification';
+    const base = `/api/outlook/merged-d${day}-verification`;
+    const url = selectedDate ? `${base}?date=${selectedDate}` : base;
     fetchJson<MergedD1VerificationSummary>(
       url,
       controller.signal,
@@ -767,7 +767,7 @@ export function useMergedD1Verification(
       .then((result) => setData(result))
       .catch(() => setData(null));
     return () => controller.abort();
-  }, [activeRegion, selectedDate, enabled]);
+  }, [activeRegion, selectedDate, enabled, day]);
 
   return data;
 }
@@ -775,10 +775,11 @@ export function useMergedD1Verification(
 export function useMergedD1Artifacts(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; day?: 1 | 2 } = {},
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
   const enabled = options.enabled ?? true;
+  const day = options.day ?? 1;
 
   useEffect(() => {
     if (!enabled) {
@@ -793,9 +794,9 @@ export function useMergedD1Artifacts(
       try {
         const query = selectedDate ? `?date=${selectedDate}` : '';
         const [riskPolygons, mergedTile, verification] = await Promise.all([
-          fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/merged-d1-risk-polygons${query}`, controller.signal, activeRegion),
-          fetchJson<OutlookProbabilityTile>(`/api/outlook/merged-d1-probability-tile${query}`, controller.signal, activeRegion),
-          fetchJson<MergedD1VerificationSummary>(`/api/outlook/merged-d1-verification${query}`, controller.signal, activeRegion),
+          fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/merged-d${day}-risk-polygons${query}`, controller.signal, activeRegion),
+          fetchJson<OutlookProbabilityTile>(`/api/outlook/merged-d${day}-probability-tile${query}`, controller.signal, activeRegion),
+          fetchJson<MergedD1VerificationSummary>(`/api/outlook/merged-d${day}-verification${query}`, controller.signal, activeRegion),
         ]);
 
         const probabilityTiles: OutlookProbabilityTiles = {
@@ -840,7 +841,7 @@ export function useMergedD1Artifacts(
 
     load();
     return () => controller.abort();
-  }, [activeRegion, selectedDate, enabled]);
+  }, [activeRegion, selectedDate, enabled, day]);
 
   return state;
 }
