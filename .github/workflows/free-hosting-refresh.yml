@@ -332,6 +332,36 @@ jobs:
       - name: Export static API
         run: python scripts/export-static-api.py
 
+      - name: Verify static API export before deploy
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          api = Path("dist/_api")
+          health = api / "health.json"
+          index = api / "outlook" / "incremental" / "index.json"
+
+          missing = [str(path) for path in (health, index) if not path.is_file()]
+          if missing:
+              raise SystemExit(
+                  "Refusing to deploy: static API export is incomplete (the complete "
+                  f"snapshot was not produced). Missing: {missing}. Production keeps the "
+                  "last good deployment."
+              )
+
+          payload = json.loads(index.read_text(encoding="utf-8"))
+          ready = payload.get("readyForecastHours") or []
+          ready_count = len(ready) if isinstance(ready, list) else 0
+          if payload.get("status") != "complete" or ready_count < 49:
+              raise SystemExit(
+                  "Refusing to deploy: static API index is not a complete cycle "
+                  f"(status={payload.get('status')!r}, ready={ready_count}). "
+                  "Production keeps the last good deployment."
+              )
+          print(f"Static API export OK: cycle={payload.get('cycleTimeISO')} ready={ready_count}")
+          PY
+
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
