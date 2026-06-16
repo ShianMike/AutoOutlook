@@ -13,10 +13,12 @@ import numpy as np
 
 from backend.ml.merged_outlook import (
     _merge_cig_shape_collections,
+    _spc_geojson_issue_time,
     _spc_geojson_max_category_ordinal,
     available_merged_d1_dates,
     available_merged_d2_dates,
     blend_merged_outlook_with_spc,
+    fetch_archived_spc_category,
     merge_cycles_for_spc_window,
     resolve_cycle_dirs_for_merged_d1_date,
     resolve_cycle_dirs_for_merged_d2_date,
@@ -72,6 +74,64 @@ class TestArchivedSpcSelection(unittest.TestCase):
         }
 
         self.assertEqual(_spc_geojson_max_category_ordinal(geojson), 5)
+
+
+class TestArchivedSpcLatestSelection(unittest.TestCase):
+    """The archive fetch should keep SPC's latest reissue, not the most severe."""
+
+    @staticmethod
+    def _zip_bytes(geojson: dict[str, Any], product: str) -> bytes:
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(f"{product}_cat.nolyr.geojson", json.dumps(geojson))
+        return buf.getvalue()
+
+    def test_issue_time_helper_returns_latest(self) -> None:
+        geo = _make_spc_geojson()
+        geo["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-03T12:58:00Z"
+        self.assertEqual(
+            _spc_geojson_issue_time(geo),
+            datetime(2026, 6, 3, 12, 58, tzinfo=timezone.utc),
+        )
+
+    def test_selects_latest_issued_even_when_earlier_is_more_severe(self) -> None:
+        # 1200Z issuance: ENH (more severe) issued early.
+        early = _make_spc_geojson("2026-06-03T12:00:00Z", "2026-06-04T12:00:00Z", "ENH", 4)
+        early["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-03T11:55:00Z"
+        # 1300Z issuance: MRGL (less severe) issued later -> this is current thinking.
+        later = _make_spc_geojson("2026-06-03T13:00:00Z", "2026-06-04T12:00:00Z", "MRGL", 2)
+        later["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-03T12:58:00Z"
+        zips = {
+            "1200": self._zip_bytes(early, "day1otlk"),
+            "1300": self._zip_bytes(later, "day1otlk"),
+        }
+
+        class _Resp:
+            def __init__(self, status: int, content: bytes) -> None:
+                self.status_code = status
+                self.content = content
+
+        class _Session:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+
+            def get(self, url: str, timeout: int | None = None) -> "_Resp":
+                import re
+                match = re.search(r"_(\d{4})-geojson", url)
+                run_time = match.group(1) if match else ""
+                if run_time in zips:
+                    return _Resp(200, zips[run_time])
+                return _Resp(404, b"")
+
+            def close(self) -> None:
+                pass
+
+        result = fetch_archived_spc_category("2026-06-03", session=_Session(), day=1)
+        self.assertEqual(result["selectedIssueTimeUTC"], "1300")
+        # Latest issuance is MRGL (ordinal 2), not the earlier ENH (ordinal 4).
+        self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 2)
 
 
 def _make_probability_tile(

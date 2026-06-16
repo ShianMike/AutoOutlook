@@ -467,7 +467,12 @@ def fetch_archived_spc_category(
     output_dir: Path | None = None,
     day: int = 1,
 ) -> dict[str, Any]:
-    """Fetch historical SPC Day ``day`` (1 or 2) categorical GeoJSON from NOAA archives."""
+    """Fetch SPC Day ``day`` (1 or 2) categorical GeoJSON, preferring the latest reissue.
+
+    SPC reissues each outlook several times a day. This selects the most recently
+    *issued* outlook available for ``target_date`` (by ``ISSUE_ISO``), so the
+    merged outlook reflects SPC's current thinking instead of an earlier update.
+    """
     from datetime import date
     if day not in (1, 2):
         raise ValueError(f"Unsupported SPC outlook day: {day}")
@@ -485,11 +490,16 @@ def fetch_archived_spc_category(
     zip_url = None
     selected_run_time = None
     category_geojson = None
-    selected_ordinal = -1
+    # Track the issuance time of the currently-selected candidate so we always
+    # keep SPC's *latest* reissue for the day (e.g. the 1300Z D1 update or the
+    # 1730Z D2 update), rather than an older one. The run-time list is not always
+    # chronological, so ISSUE_ISO drives the choice; list order is the tiebreak.
+    selected_issue: datetime | None = None
+    selected_index = -1
     last_error = None
 
     try:
-        for run_time in run_times:
+        for index, run_time in enumerate(run_times):
             url = f"https://www.spc.noaa.gov/products/outlook/archive/{year}/{product}_{date_str}_{run_time}-geojson.zip"
             try:
                 res = session.get(url, timeout=15)
@@ -503,12 +513,26 @@ def fetch_archived_spc_category(
                         if name.endswith("_cat.nolyr.geojson") or name.endswith(f"{product}_cat.nolyr.geojson")
                     )
                     candidate_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
-                candidate_ordinal = _spc_geojson_max_category_ordinal(candidate_geojson)
-                if candidate_ordinal > selected_ordinal:
+                candidate_issue = _spc_geojson_issue_time(candidate_geojson)
+                # Prefer the latest issued outlook. Candidates that expose an
+                # ISSUE_ISO outrank those that don't; among those, the newest
+                # issue time wins; otherwise fall back to run-time list order.
+                if category_geojson is None:
+                    is_newer = True
+                elif candidate_issue is not None and selected_issue is not None:
+                    is_newer = candidate_issue > selected_issue
+                elif candidate_issue is not None and selected_issue is None:
+                    is_newer = True
+                elif candidate_issue is None and selected_issue is not None:
+                    is_newer = False
+                else:
+                    is_newer = index > selected_index
+                if is_newer:
                     zip_url = url
                     selected_run_time = run_time
                     category_geojson = candidate_geojson
-                    selected_ordinal = candidate_ordinal
+                    selected_issue = candidate_issue
+                    selected_index = index
             except Exception as exc:
                 last_error = exc
 
@@ -565,6 +589,23 @@ def _spc_geojson_max_category_ordinal(category_geojson: Mapping[str, Any]) -> in
         ),
         default=0,
     )
+
+
+def _spc_geojson_issue_time(category_geojson: Mapping[str, Any]) -> datetime | None:
+    """Latest ISSUE_ISO across the geojson's features, or ``None`` if absent.
+
+    SPC reissues each outlook several times a day; this lets the merge pick the
+    most recently issued (i.e. freshest) outlook rather than an older one.
+    """
+    latest: datetime | None = None
+    for feature in category_geojson.get("features", []):
+        if not isinstance(feature, Mapping):
+            continue
+        props = feature.get("properties", {})
+        issue = _parse_iso(props.get("ISSUE_ISO")) if isinstance(props, Mapping) else None
+        if issue is not None and (latest is None or issue > latest):
+            latest = issue
+    return latest
 
 
 def merge_cycles_for_spc_window(
