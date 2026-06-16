@@ -617,6 +617,7 @@ def merge_cycles_for_spc_window(
     window_valid: datetime | None = None,
     window_expire: datetime | None = None,
     spc_day: int = 1,
+    prefer_fresh_spc: bool = False,
 ) -> dict[str, Any]:
     """Merge per-hour category grids from multiple cycles and compare to SPC D1/D2.
 
@@ -641,6 +642,13 @@ def merge_cycles_for_spc_window(
     spc_day:
         SPC outlook day to merge against (1 or 2). Day 2 covers the F24–F48 reach
         of a 12Z HRRR cycle.
+    prefer_fresh_spc:
+        When ``True``, ignore any ``spc_day{n}_cat.geojson`` cached inside the
+        cycle directories and fetch the latest SPC issuance instead. The cycle's
+        cached SPC is frozen at pipeline time (e.g. the 06Z outlook captured by
+        the 00Z run), so live D1/D2 products must re-fetch to reflect later SPC
+        updates such as a midday SLGT upgrade. Historical/event regeneration
+        keeps the default ``False`` so it reuses the archived SPC for that date.
     """
     if spc_day not in (1, 2):
         raise ValueError(f"Unsupported SPC outlook day: {spc_day}")
@@ -671,8 +679,10 @@ def merge_cycles_for_spc_window(
         spc_geojson = None
         spc_cat_filename = f"spc_day{spc_day}_cat.geojson"
 
-        # Try to find a cached spc_day{spc_day}_cat.geojson in the cycle_dirs
-        for cycle_dir in cycle_dirs:
+        # Try to find a cached spc_day{spc_day}_cat.geojson in the cycle_dirs.
+        # Skipped for live products (prefer_fresh_spc) because the cycle's cached
+        # SPC is frozen at pipeline time and would hide later SPC reissues.
+        for cycle_dir in (cycle_dirs if not prefer_fresh_spc else []):
             cached_geojson_path = cycle_dir / spc_cat_filename
             if cached_geojson_path.exists():
                 try:

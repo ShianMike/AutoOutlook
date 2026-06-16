@@ -410,6 +410,7 @@ def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day
                 output_dir=merged_dir,
                 target_date=target_date,
                 spc_day=spc_day,
+                prefer_fresh_spc=True,
             )
             return merged_dir
         except Exception as exc:

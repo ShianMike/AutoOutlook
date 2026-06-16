@@ -134,6 +134,42 @@ class TestArchivedSpcLatestSelection(unittest.TestCase):
         self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 2)
 
 
+class TestPreferFreshSpc(unittest.TestCase):
+    """Live merges must re-fetch SPC instead of reusing the cycle's frozen cache."""
+
+    def test_prefer_fresh_spc_bypasses_cached_cycle_geojson(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_dir = _write_cycle_artifacts(
+                root, "00z", "2026-06-03T00:00:00Z", list(range(12, 37)), grid,
+            )
+            # Stale SPC captured by the cycle pipeline: MRGL.
+            cached = _make_spc_geojson("2026-06-03T12:00:00Z", "2026-06-04T12:00:00Z", "MRGL", 2)
+            (cycle_dir / "spc_day1_cat.geojson").write_text(json.dumps(cached), encoding="utf-8")
+            # SPC has since upgraded to SLGT (a later reissue).
+            fresh = _make_spc_geojson("2026-06-03T12:00:00Z", "2026-06-04T12:00:00Z", "SLGT", 3)
+
+            default_res = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(fresh),
+                output_dir=root / "out_default",
+            )
+            fresh_res = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(fresh),
+                output_dir=root / "out_fresh",
+                prefer_fresh_spc=True,
+            )
+
+            # Default reuses the cached MRGL outlook.
+            self.assertGreater(default_res["officialCategories"].get("MRGL", 0), 0)
+            self.assertEqual(default_res["officialCategories"].get("SLGT", 0), 0)
+            # prefer_fresh_spc ignores the cache and reflects the fresh SLGT.
+            self.assertGreater(fresh_res["officialCategories"].get("SLGT", 0), 0)
+            self.assertEqual(fresh_res["officialCategories"].get("MRGL", 0), 0)
+
+
 def _make_probability_tile(
     category_grid: list[list[int]] | np.ndarray,
     lat_min: float = 30.0,
