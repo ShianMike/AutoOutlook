@@ -305,6 +305,14 @@ jobs:
           restore-keys: |
             merged-d1-hrrr-00z-${{ needs.preflight.outputs.cycle_date }}-
 
+      - name: Restore merged D2 12Z cache
+        uses: actions/cache@v5
+        with:
+          path: backend/artifacts/latest_incremental_hrrr_12z
+          key: merged-d2-hrrr-12z-${{ needs.preflight.outputs.cycle_date }}-${{ github.run_id }}
+          restore-keys: |
+            merged-d2-hrrr-12z-${{ needs.preflight.outputs.cycle_date }}-
+
       - name: Finalize incremental artifacts
         run: |
           python -m backend.ml.outlook_pipeline \

@@ -95,6 +95,7 @@ DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
 DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 2)
 DEFAULT_GCS_LOCK_TTL_SECONDS = _env_int("AUTOOUTLOOK_RUN_LOCK_TTL_SECONDS", 5400)
 MERGED_D1_00Z_CACHE_MODEL = "hrrr"
+MERGED_D2_12Z_CACHE_MODEL = "hrrr"
 
 FetchHourFn = Callable[[HrrrHourRef, requests.Session], tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]] | SelectedHrrrHour]
 PredictorFn = Callable[[GriddedFeatures], dict[str, np.ndarray] | None]
@@ -1773,6 +1774,7 @@ def _publish_complete_incremental_snapshot(
     # after all referenced per-hour artifacts are present.
     _write_json(complete_dir / "index.json", index)
     _publish_merged_d1_00z_cache(output_dir, index, requested_hours)
+    _publish_merged_d2_12z_cache(output_dir, index, requested_hours)
 
 
 def _publish_merged_d1_00z_cache(
@@ -1785,6 +1787,23 @@ def _publish_merged_d1_00z_cache(
     if not _is_hrrr_00z_incremental_index(index):
         return None
     cache_dir = _merged_d1_00z_cache_dir(output_dir)
+    _copy_incremental_snapshot_to_dir(output_dir, cache_dir, index)
+    return cache_dir
+
+
+def _publish_merged_d2_12z_cache(
+    output_dir: Path,
+    index: Mapping[str, Any],
+    requested_hours: Iterable[int],
+) -> Path | None:
+    """Persist the 12Z cycle snapshot so the merged Day 2 outlook (F24-F48)
+    stays resolvable after later (18Z/00Z) cycles overwrite the complete
+    snapshot, mirroring the Day 1 00Z cache."""
+    if not _incremental_index_covers_requested_hours(index, requested_hours):
+        return None
+    if not _is_hrrr_12z_incremental_index(index):
+        return None
+    cache_dir = _merged_d2_12z_cache_dir(output_dir)
     _copy_incremental_snapshot_to_dir(output_dir, cache_dir, index)
     return cache_dir
 
@@ -1863,6 +1882,10 @@ def _publish_incremental_artifacts_to_gcs(
     merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
     if merged_d1_00z_dir.exists():
         merged_d1_00z_files = _upload_directory_to_gcs(bucket, merged_d1_00z_dir, _gcs_join(prefix, merged_d1_00z_dir.name))
+    merged_d2_12z_files = 0
+    merged_d2_12z_dir = _merged_d2_12z_cache_dir(output_dir)
+    if merged_d2_12z_dir.exists():
+        merged_d2_12z_files = _upload_directory_to_gcs(bucket, merged_d2_12z_dir, _gcs_join(prefix, merged_d2_12z_dir.name))
 
     result = {
         "enabled": True,
@@ -1872,12 +1895,13 @@ def _publish_incremental_artifacts_to_gcs(
         "completeFiles": complete_files,
         "previousFiles": previous_files,
         "mergedD1ZeroZFiles": merged_d1_00z_files,
+        "mergedD2TwelveZFiles": merged_d2_12z_files,
         "latencyMs": int((time.perf_counter() - started) * 1000),
     }
     print(
         f"[gcs publish] bucket={bucket_name} prefix={result['prefix']} "
         f"currentFiles={current_files} completeFiles={complete_files} previousFiles={previous_files} "
-        f"mergedD1ZeroZFiles={merged_d1_00z_files} "
+        f"mergedD1ZeroZFiles={merged_d1_00z_files} mergedD2TwelveZFiles={merged_d2_12z_files} "
         f"latency={result['latencyMs']}ms",
         flush=True,
     )
@@ -2015,6 +2039,8 @@ def _hydrate_incremental_artifacts_from_gcs(
     complete_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, complete_dir.name), complete_dir)
     merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
     merged_d1_00z_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, merged_d1_00z_dir.name), merged_d1_00z_dir)
+    merged_d2_12z_dir = _merged_d2_12z_cache_dir(output_dir)
+    merged_d2_12z_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, merged_d2_12z_dir.name), merged_d2_12z_dir)
     result = {
         "enabled": True,
         "bucket": bucket_name,
@@ -2022,11 +2048,13 @@ def _hydrate_incremental_artifacts_from_gcs(
         "currentFiles": current_files,
         "completeFiles": complete_files,
         "mergedD1ZeroZFiles": merged_d1_00z_files,
+        "mergedD2TwelveZFiles": merged_d2_12z_files,
         "latencyMs": int((time.perf_counter() - started) * 1000),
     }
     print(
         f"[gcs hydrate] bucket={bucket_name} prefix={result['prefix']} "
         f"currentFiles={current_files} completeFiles={complete_files} mergedD1ZeroZFiles={merged_d1_00z_files} "
+        f"mergedD2TwelveZFiles={merged_d2_12z_files} "
         f"latency={result['latencyMs']}ms",
         flush=True,
     )
@@ -2182,11 +2210,23 @@ def _merged_d1_00z_cache_dir(output_dir: Path) -> Path:
     return output_dir.with_name(f"{output_dir.name}_{MERGED_D1_00Z_CACHE_MODEL}_00z")
 
 
+def _merged_d2_12z_cache_dir(output_dir: Path) -> Path:
+    output_dir = Path(output_dir)
+    return output_dir.with_name(f"{output_dir.name}_{MERGED_D2_12Z_CACHE_MODEL}_12z")
+
+
 def _is_hrrr_00z_incremental_index(index: Mapping[str, Any]) -> bool:
     cycle_time = _parse_iso(index.get("cycleTimeISO"))
     if cycle_time is None or cycle_time.hour != 0:
         return False
     return _incremental_index_model_name(index) == MERGED_D1_00Z_CACHE_MODEL
+
+
+def _is_hrrr_12z_incremental_index(index: Mapping[str, Any]) -> bool:
+    cycle_time = _parse_iso(index.get("cycleTimeISO"))
+    if cycle_time is None or cycle_time.hour != 12:
+        return False
+    return _incremental_index_model_name(index) == MERGED_D2_12Z_CACHE_MODEL
 
 
 def _incremental_index_model_name(index: Mapping[str, Any]) -> str:

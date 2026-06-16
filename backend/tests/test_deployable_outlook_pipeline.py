@@ -63,6 +63,7 @@ from backend.ml.outlook_pipeline import (
     _cache_previous_incremental_cycle,
     _hydrate_incremental_artifacts_from_gcs,
     _merged_d1_00z_cache_dir,
+    _merged_d2_12z_cache_dir,
     _publish_complete_incremental_snapshot,
     _publish_incremental_artifacts_to_gcs,
     _publish_incremental_shard_artifacts_to_gcs,
@@ -4503,6 +4504,48 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             cache_tile_after_06z = json.loads((cache_dir / "hours" / "f00" / "probability_tile.json").read_text(encoding="utf-8"))
             self.assertEqual(cache_index_after_06z["cycleTimeISO"], "2026-06-08T00:00:00Z")
             self.assertEqual(cache_tile_after_06z["cycle"], "00z")
+
+    def test_complete_snapshot_publish_preserves_12z_cache_for_merged_d2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "latest_incremental"
+            hour_dir = output_dir / "hours" / "f00"
+            hour_dir.mkdir(parents=True)
+            index_12z = {
+                "status": "complete",
+                "readyForecastHours": [0],
+                "requestedForecastHours": [0],
+                "cycle": "HRRR 12Z 20260608",
+                "cycleTimeISO": "2026-06-08T12:00:00Z",
+                "cyclePolicy": {"model": "HRRR"},
+            }
+            (output_dir / "index.json").write_text(json.dumps(index_12z), encoding="utf-8")
+            (output_dir / "metadata.json").write_text(json.dumps(index_12z), encoding="utf-8")
+            (hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "12z"}), encoding="utf-8")
+
+            _publish_complete_incremental_snapshot(output_dir, index_12z, [0])
+
+            cache_dir = _merged_d2_12z_cache_dir(output_dir)
+            cache_index = json.loads((cache_dir / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache_index["cycleTimeISO"], "2026-06-08T12:00:00Z")
+            self.assertTrue((cache_dir / "hours" / "f00" / "probability_tile.json").exists())
+
+            # A later 18Z cycle must NOT clobber the cached 12Z snapshot used for D2.
+            index_18z = {
+                **index_12z,
+                "cycle": "HRRR 18Z 20260608",
+                "cycleTimeISO": "2026-06-08T18:00:00Z",
+            }
+            (output_dir / "index.json").write_text(json.dumps(index_18z), encoding="utf-8")
+            (output_dir / "metadata.json").write_text(json.dumps(index_18z), encoding="utf-8")
+            (hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "18z"}), encoding="utf-8")
+
+            _publish_complete_incremental_snapshot(output_dir, index_18z, [0])
+
+            cache_index_after_18z = json.loads((cache_dir / "index.json").read_text(encoding="utf-8"))
+            cache_tile_after_18z = json.loads((cache_dir / "hours" / "f00" / "probability_tile.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache_index_after_18z["cycleTimeISO"], "2026-06-08T12:00:00Z")
+            self.assertEqual(cache_tile_after_18z["cycle"], "12z")
 
     def test_gcs_incremental_publish_uses_artifact_layout_and_index_last(self) -> None:
         uploads: list[str] = []
