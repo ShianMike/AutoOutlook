@@ -34,8 +34,21 @@ from backend.ml.gridded_outlook import (
 
 SPC_ANCHORED_OUTLOOK_FLAG = "AUTOOUTLOOK_SPC_ANCHORED_OUTLOOK"
 SPC_SUPPORT_WEIGHT_FLAG = "AUTOOUTLOOK_SPC_SUPPORT_WEIGHT"
+SPC_CATEGORY_WEIGHTING_FLAG = "AUTOOUTLOOK_SPC_CATEGORY_WEIGHTING"
 DEFAULT_SPC_SUPPORT_WEIGHT = 0.50
 _MAX_CATEGORY_ORDINAL = len(SPC_RISK_LABELS) - 1
+
+# When SPC commits to an organized-severe category, trust it more in the blend.
+# These are the *minimum* per-cell support weights applied where SPC draws each
+# category; lower categories (NONE/TSTM/MRGL) keep the base support weight. The
+# effective weight is ``max(base_weight, mapped)`` so escalation only leans
+# harder toward SPC, never weaker.
+_SPC_CATEGORY_SUPPORT_WEIGHTS: dict[int, float] = {
+    3: 0.65,  # SLGT
+    4: 0.75,  # ENH
+    5: 0.85,  # MDT
+    6: 0.90,  # HIGH
+}
 
 
 def _spc_implied_hazard_probability(hazard: str, spc_category_grid: np.ndarray) -> np.ndarray:
@@ -93,6 +106,37 @@ def _spc_support_weight() -> float:
     return DEFAULT_SPC_SUPPORT_WEIGHT
 
 
+def _spc_category_weighting_enabled() -> bool:
+    """Whether to lean harder on SPC where it draws a higher category (default on).
+
+    Controlled by ``AUTOOUTLOOK_SPC_CATEGORY_WEIGHTING`` (truthy/falsey). When
+    enabled, the per-cell SPC support weight escalates for SLGT and above (see
+    :data:`_SPC_CATEGORY_SUPPORT_WEIGHTS`), so the merged outlook conforms more
+    strongly to SPC wherever SPC has committed to organized-severe risk.
+    """
+    raw = os.environ.get(SPC_CATEGORY_WEIGHTING_FLAG)
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _category_aware_weight_grid(base_weight: float, spc_grid: np.ndarray) -> np.ndarray:
+    """Per-cell SPC support weight that escalates with the SPC category.
+
+    Cells where SPC draws SLGT+ get at least the category's mapped weight; all
+    other cells keep ``base_weight``. Escalation only raises the weight, so a
+    higher base (e.g. full anchoring) is preserved.
+    """
+    weights = np.full(spc_grid.shape, float(base_weight), dtype=float)
+    for category, category_weight in _SPC_CATEGORY_SUPPORT_WEIGHTS.items():
+        weights = np.where(
+            spc_grid == category,
+            max(float(base_weight), float(category_weight)),
+            weights,
+        )
+    return weights
+
+
 def blend_merged_outlook_with_spc(
     lats: np.ndarray,
     lons: np.ndarray,
@@ -101,6 +145,7 @@ def blend_merged_outlook_with_spc(
     spc_geojson: Mapping[str, Any],
     weight: float = DEFAULT_SPC_SUPPORT_WEIGHT,
     mode: str = "blend",
+    category_weighting: bool = True,
 ) -> dict[str, Any]:
     """Back the HRRR/XGBoost outlook with the official SPC categorical outlook.
 
@@ -115,6 +160,12 @@ def blend_merged_outlook_with_spc(
     fully to SPC, and ``weight=0.5`` produces a 50/50 blend. HRRR hazard
     probabilities are blended toward the SPC-category-implied level by the same
     weight.
+
+    When ``category_weighting`` is set (default), the per-cell weight escalates
+    where SPC draws a higher category (SLGT and above, see
+    :data:`_SPC_CATEGORY_SUPPORT_WEIGHTS`), so the outlook leans harder on SPC
+    wherever it has committed to organized-severe risk while staying balanced at
+    lower categories.
 
     ``"ceiling"`` (used by the hourly scrubber): SPC is treated as a per-day
     envelope rather than a symmetric target. The HRRR category is capped at the
@@ -155,21 +206,29 @@ def blend_merged_outlook_with_spc(
             for hazard, values in hrrr_probabilities.items()
         }
         hazards_blended = False
+        support_weight_max = None
     else:
+        # Per-cell support weight: escalate toward SPC where it draws a higher
+        # category (SLGT+), otherwise use the flat base weight.
+        if category_weighting:
+            weight_grid = _category_aware_weight_grid(weight, spc_grid)
+        else:
+            weight_grid = np.full(spc_grid.shape, float(weight), dtype=float)
         blended_grid = np.rint(
-            (1.0 - weight) * hrrr_grid.astype(float) + weight * spc_grid.astype(float)
+            (1.0 - weight_grid) * hrrr_grid.astype(float) + weight_grid * spc_grid.astype(float)
         )
         blended_grid = np.clip(blended_grid, 0, _MAX_CATEGORY_ORDINAL).astype(np.int16)
         # Blend each HRRR hazard probability toward the SPC-category-implied level
-        # for that hazard by the same weight.
+        # for that hazard by the same per-cell weight.
         blended_probabilities = {}
         for hazard, values in hrrr_probabilities.items():
             arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
             spc_target = _spc_implied_hazard_probability(hazard, spc_grid)
             blended_probabilities[hazard] = np.clip(
-                (1.0 - weight) * arr + weight * spc_target, 0.0, 1.0
+                (1.0 - weight_grid) * arr + weight_grid * spc_target, 0.0, 1.0
             )
         hazards_blended = True
+        support_weight_max = float(np.max(weight_grid))
 
     ceiling = apply_category_probability_ceiling(blended_probabilities, blended_grid)
 
@@ -177,6 +236,8 @@ def blend_merged_outlook_with_spc(
         "spcSupportApplied": True,
         "spcSupportMode": normalized_mode,
         "spcSupportWeight": weight if normalized_mode == "blend" else None,
+        "spcCategoryWeighting": bool(category_weighting and normalized_mode == "blend"),
+        "spcSupportWeightMax": support_weight_max,
         "fullyAnchored": normalized_mode == "blend" and weight >= 1.0,
         "hazardProbabilitiesBlended": hazards_blended,
         "spcCategoryCells": int(np.sum(spc_grid > 0)),
@@ -857,6 +918,7 @@ def merge_cycles_for_spc_window(
                 merged_probs,
                 spc_geojson,
                 weight=spc_support_weight,
+                category_weighting=_spc_category_weighting_enabled(),
             )
             merged_grid = blended["category_grid"]
             merged_probs = blended["probabilities"]

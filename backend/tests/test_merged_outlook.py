@@ -879,10 +879,41 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             self.assertAlmostEqual(support.get("spcSupportWeight"), 0.50)
             pred = result.get("predictedCategories", {})
             # Outside the SPC box: 0.5*ENH(4) + 0.5*NONE(0) = 2.0 -> MRGL, so the
-            # broad ENH is pulled down to MRGL and MRGL dominates. Inside the SPC
-            # SLGT box: 0.5*4 + 0.5*3 = 3.5 -> ENH (round-half-to-even -> 4).
+            # broad ENH is pulled down to MRGL. Inside the SPC SLGT box, category
+            # weighting leans harder on SPC (weight 0.65): 0.35*4 + 0.65*3 = 3.35
+            # -> SLGT, so the box conforms to SPC rather than staying ENH.
             self.assertGreater(pred.get("MRGL", 0), 0)
+            self.assertGreater(pred.get("SLGT", 0), 0)
+            self.assertEqual(pred.get("ENH", 0), 0)
             self.assertGreater(pred.get("MRGL", 0), pred.get("ENH", 0))
+
+    def test_category_weighting_leans_harder_on_spc_at_slgt(self) -> None:
+        # HRRR says ENH(4) over a domain SPC only draws SLGT(3) on.
+        lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
+        lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
+        hrrr_grid = np.full((3, 3), 4, dtype=np.int16)  # ENH everywhere
+        hrrr_probs = {h: np.zeros((3, 3)) for h in ("tornado", "hail", "wind", "thunder")}
+        spc_geojson = _make_spc_geojson(
+            label="SLGT",
+            dn=3,
+            polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
+        )
+
+        # Flat 50/50: 0.5*4 + 0.5*3 = 3.5 -> ENH (stays at 4).
+        flat = blend_merged_outlook_with_spc(
+            lats, lons, hrrr_grid, hrrr_probs, spc_geojson, weight=0.5, category_weighting=False,
+        )
+        self.assertEqual(int(np.max(flat["category_grid"])), 4)
+        self.assertFalse(flat["report"]["spcCategoryWeighting"])
+
+        # Category weighting: SLGT cells get weight 0.65 -> 0.35*4 + 0.65*3 = 3.35
+        # -> SLGT (3), conforming to SPC instead of holding ENH.
+        aware = blend_merged_outlook_with_spc(
+            lats, lons, hrrr_grid, hrrr_probs, spc_geojson, weight=0.5, category_weighting=True,
+        )
+        self.assertEqual(int(np.max(aware["category_grid"])), 3)
+        self.assertTrue(aware["report"]["spcCategoryWeighting"])
+        self.assertAlmostEqual(aware["report"]["spcSupportWeightMax"], 0.65)
 
     def test_spc_support_blends_hazard_probabilities_toward_spc(self) -> None:
         # SPC draws SLGT over the whole 3x3 domain; HRRR has zero hazard
