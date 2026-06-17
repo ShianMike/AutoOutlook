@@ -270,18 +270,18 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
 def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
     # 1. Get available merged D2 dates list (12Z cycles reaching f48).
     dates = helpers._available_merge_d2_dates_list(model="hrrr")
+
+    # 2. Create target dir and always (re)write the dates list, even when empty,
+    #    so a now-stale D2 day is cleared from production instead of lingering.
+    merged_d2_out_dir = output_dir / "outlook" / "merged-d2"
+    merged_d2_out_dir.mkdir(parents=True, exist_ok=True)
+    write_json(merged_d2_out_dir / "available-dates.json", {"dates": dates})
+
     if not dates:
         print("No available merged D2 dates found for static export.")
         return
 
     print(f"Exporting merged D2 archives for dates: {dates}")
-
-    # 2. Create target directory
-    merged_d2_out_dir = output_dir / "outlook" / "merged-d2"
-    merged_d2_out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 3. Write available dates list
-    write_json(merged_d2_out_dir / "available-dates.json", {"dates": dates})
 
     latest_date_dir = None
 
