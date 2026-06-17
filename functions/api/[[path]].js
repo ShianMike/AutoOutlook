@@ -36,6 +36,26 @@ function resolveStaticPath(pathname, region, model = null, date = null) {
   if (pathname === '/api/outlook/merged-d2-available-dates') {
     return `${prefix}/outlook/merged-d2/available-dates.json`;
   }
+  if (pathname === '/api/outlook/enh-plus-archive-available-dates') {
+    return `${prefix}/outlook/enh-plus-archive/available-dates.json`;
+  }
+
+  // Auto ENH+ risk archive (accumulated ENH+ days with refreshed storm reports)
+  const ENH_PLUS_ARCHIVE_FILES = {
+    '/api/outlook/enh-plus-archive-verification': 'verification.json',
+    '/api/outlook/enh-plus-archive-risk-polygons': 'risk-polygons.geojson',
+    '/api/outlook/enh-plus-archive-hazard-shapes': 'hazard-probability-shapes.geojson',
+    '/api/outlook/enh-plus-archive-probability-tile': 'probability-tile.json',
+    '/api/outlook/enh-plus-archive-spc-category': 'spc-day1-category.geojson',
+    '/api/outlook/enh-plus-archive-storm-reports': 'storm-reports.json',
+  };
+  if (Object.prototype.hasOwnProperty.call(ENH_PLUS_ARCHIVE_FILES, pathname)) {
+    const filename = ENH_PLUS_ARCHIVE_FILES[pathname];
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return `${prefix}/outlook/enh-plus-archive/${date}/${filename}`;
+    }
+    return null;
+  }
 
   // Merged D1 endpoints
   const isMergedD1Verification = pathname === '/api/outlook/merged-d1-verification';

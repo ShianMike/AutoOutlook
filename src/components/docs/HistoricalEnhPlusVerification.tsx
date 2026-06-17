@@ -15,7 +15,7 @@ import type {
   OutlookProbabilityTiles,
 } from '../../types/outlookArtifacts';
 import OutlookMapPanel from '../OutlookMapPanel';
-import type { OutlookArtifactState } from '../../hooks/useOutlookArtifacts';
+import { useEnhPlusArchiveEvents, type OutlookArtifactState } from '../../hooks/useOutlookArtifacts';
 import {
   HISTORICAL_ENH_PLUS_EVENTS,
   type HistoricalEnhPlusEvent,
@@ -46,16 +46,31 @@ const EMPTY_INGREDIENTS: Ingredients = {
 };
 
 export default function HistoricalEnhPlusVerification() {
-  const eventDates = useMemo(
-    () => HISTORICAL_ENH_PLUS_EVENTS.map((event) => event.eventDate),
-    [],
-  );
-  const [selectedDate, setSelectedDate] = useState(eventDates[0] ?? '');
+  const { events: liveEvents } = useEnhPlusArchiveEvents('conus', true);
+  const allEvents = useMemo(() => {
+    // Live auto-archived ENH+ days first (newest first), then the curated
+    // historical catalog, de-duplicated by event date (live wins).
+    const seen = new Set<string>();
+    const merged: HistoricalEnhPlusEvent[] = [];
+    for (const event of [...liveEvents].sort((a, b) => b.eventDate.localeCompare(a.eventDate))) {
+      if (seen.has(event.eventDate)) continue;
+      seen.add(event.eventDate);
+      merged.push(event);
+    }
+    for (const event of HISTORICAL_ENH_PLUS_EVENTS) {
+      if (seen.has(event.eventDate)) continue;
+      seen.add(event.eventDate);
+      merged.push(event);
+    }
+    return merged;
+  }, [liveEvents]);
+
+  const eventDates = useMemo(() => allEvents.map((event) => event.eventDate), [allEvents]);
+  const [selectedDate, setSelectedDate] = useState('');
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('all');
 
-  const event = HISTORICAL_ENH_PLUS_EVENTS.find((item) => item.eventDate === selectedDate)
-    ?? HISTORICAL_ENH_PLUS_EVENTS[0];
+  const event = allEvents.find((item) => item.eventDate === selectedDate) ?? allEvents[0];
 
   const snapshot = useMemo(() => buildSnapshot(event), [event]);
   const bundle = useMemo(() => buildBundle(event, snapshot), [event, snapshot]);

@@ -332,6 +332,72 @@ def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) ->
         print(f"Default fallback merged D2 set to latest date: {dates[0]}")
 
 
+def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> None:
+    """Accumulate ENH+ (Enhanced risk or higher) days into a persistent archive.
+
+    For each currently-available merged D1 day, if the AutoOutlook or SPC
+    categorical reaches ENH+, the day's artifacts and (re-fetched) storm reports
+    are added/refreshed in ``backend/artifacts/enh_plus_archive`` -- a directory
+    persisted across deploys via an Actions cache -- and the accumulated archive
+    is exported under ``outlook/enh-plus-archive/``.
+    """
+    from datetime import date as _date
+
+    from backend.ml.enh_plus_archive import archive_available_dates, update_archive_for_date
+
+    archive_dir = artifact_root / "enh_plus_archive"
+
+    # 1. Refresh/accumulate from the current merged D1 days.
+    for date_str in helpers._available_merge_dates_list(model="hrrr"):
+        try:
+            merged_dir = helpers._generate_or_get_merged_d1_dir(date_str, model="hrrr")
+            if merged_dir is None or not merged_dir.exists():
+                continue
+            entry = update_archive_for_date(archive_dir, merged_dir, _date.fromisoformat(date_str))
+            if entry is not None:
+                print(f"ENH+ archive: {date_str} -> {entry['maxCategory']} ({entry['reportCounts']['total']} reports)")
+        except Exception as exc:
+            print(f"Warning: ENH+ archive update failed for {date_str}: {exc}")
+
+    # 2. Export the accumulated archive tree.
+    dates = archive_available_dates(archive_dir)
+    out_dir = output_dir / "outlook" / "enh-plus-archive"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    index = read_json(archive_dir / "index.json") or {"dates": []}
+    write_json(out_dir / "available-dates.json", index)
+
+    if not dates:
+        print("ENH+ archive: no ENH+ days accumulated yet.")
+        return
+
+    geojson_names = (
+        "verification.json",
+        "risk-polygons.geojson",
+        "hazard-probability-shapes.geojson",
+        "spc-day1-category.geojson",
+        "storm-reports.json",
+    )
+    for date_str in dates:
+        src = archive_dir / date_str
+        dst = out_dir / date_str
+        for name in geojson_names:
+            copy_if_exists(src / name, dst / name)
+        # Lightweight probability tile (drop heavy grids; keep the vector shapes).
+        tile_path = src / "probability-tile.json"
+        if tile_path.exists():
+            try:
+                tile = json.loads(tile_path.read_text(encoding="utf-8"))
+                if isinstance(tile, dict):
+                    tile["categoryOrdinal"] = []
+                    tile["categoryLabel"] = []
+                    tile["probabilities"] = {}
+                    write_json(dst / "probability-tile.json", tile)
+            except Exception as exc:
+                print(f"Warning: failed to make lightweight ENH+ tile for {date_str}: {exc}")
+
+    print(f"ENH+ archive: exported {len(dates)} day(s) -> {out_dir}")
+
+
 def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir: Path) -> None:
     artifact_dir = artifact_dir.resolve()
     legacy_artifact_dir = legacy_artifact_dir.resolve()
@@ -391,6 +457,9 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
 
     # Export merged D2 outlook archives (12Z cycle F24-F48)
     export_merged_d2_archives(output_dir, artifact_dir.parent, helpers)
+
+    # Accumulate + export the auto ENH+ risk archive (persisted across deploys)
+    export_enh_plus_archive(output_dir, artifact_dir.parent, helpers)
 
     print(json.dumps({
         "outputDir": str(output_dir),

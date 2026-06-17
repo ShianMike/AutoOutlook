@@ -313,6 +313,17 @@ jobs:
           restore-keys: |
             merged-d2-hrrr-12z-${{ needs.preflight.outputs.cycle_date }}-
 
+      - name: Restore ENH+ risk archive
+        uses: actions/cache@v5
+        with:
+          # Persist the accumulating ENH+ archive across deploys. The run-id keyed
+          # entry is immutable; restore-keys pull the most recent prior archive so
+          # past ENH+ days remain and their storm reports keep updating.
+          path: backend/artifacts/enh_plus_archive
+          key: enh-plus-risk-archive-${{ github.run_id }}
+          restore-keys: |
+            enh-plus-risk-archive-
+
       - name: Finalize incremental artifacts
         run: |
           python -m backend.ml.outlook_pipeline \

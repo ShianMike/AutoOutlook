@@ -9,11 +9,14 @@ import type {
   OutlookProbabilityHour,
   OutlookProbabilityTile,
   OutlookProbabilityTiles,
+  OutlookProbabilityShapeFeatureCollection,
+  SpcCategoryFeatureCollection,
   SpcVerificationSummary,
   MergedD1VerificationSummary,
   SpcStormReport,
   SpcStormReportsResponse,
 } from '../types/outlookArtifacts';
+import type { HistoricalEnhPlusEvent } from '../data/historicalEnhPlusVerification';
 import { apiUrl } from '../utils/apiBase';
 
 export type ArtifactStatus = 'loading' | 'ready' | 'missing' | 'error' | 'pending' | 'failed';
@@ -950,4 +953,120 @@ export function useSpcStormReports(
   }, [activeRegion, selectedDate, enabled]);
 
   return reports;
+}
+
+
+interface EnhPlusArchiveIndexEntry {
+  date: string;
+  maxCategory?: string;
+  autoMaxCategory?: string;
+  spcMaxCategory?: string;
+  reportCounts?: { tornado: number; hail: number; wind: number; total: number };
+  windowStartISO?: string;
+  windowEndISO?: string;
+  updatedAtISO?: string;
+}
+
+const ENH_PLUS_EMPTY_FC = { type: 'FeatureCollection', features: [] };
+
+function enhPlusCycleIso(windowStartISO: string | undefined): string {
+  if (!windowStartISO) return '';
+  const parsed = new Date(windowStartISO);
+  if (Number.isNaN(parsed.getTime())) return windowStartISO;
+  parsed.setUTCHours(0, 0, 0, 0);
+  return parsed.toISOString().replace('.000Z', 'Z');
+}
+
+function enhPlusLabel(dateStr: string, spcLabel: string | undefined): string {
+  const parsed = new Date(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return dateStr;
+  const month = parsed.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const suffix = spcLabel === 'MDT' || spcLabel === 'MOD'
+    ? ' (Moderate)'
+    : spcLabel === 'HIGH'
+      ? ' (High)'
+      : '';
+  return `${month} ${parsed.getUTCDate()}, ${parsed.getUTCFullYear()}${suffix}`;
+}
+
+/**
+ * Live, auto-accumulating ENH+ risk archive. Returns events shaped like the
+ * static historical catalog so the verification view can render them the same
+ * way. Storm reports refresh on the backend as the convective day plays out.
+ */
+export function useEnhPlusArchiveEvents(
+  activeRegion: ActiveRegion = 'conus',
+  enabled = true,
+): { events: HistoricalEnhPlusEvent[]; status: ArtifactStatus } {
+  const [events, setEvents] = useState<HistoricalEnhPlusEvent[]>([]);
+  const [status, setStatus] = useState<ArtifactStatus>('loading');
+
+  useEffect(() => {
+    if (!enabled) {
+      setEvents([]);
+      setStatus('missing');
+      return undefined;
+    }
+    const controller = new AbortController();
+
+    const load = async () => {
+      setStatus('loading');
+      try {
+        const index = await fetchJson<{ dates?: EnhPlusArchiveIndexEntry[] }>(
+          '/api/outlook/enh-plus-archive-available-dates',
+          controller.signal,
+          activeRegion,
+        );
+        const entries = Array.isArray(index.dates) ? index.dates : [];
+        const built = await Promise.all(
+          entries.map(async (entry) => {
+            const query = `?date=${entry.date}`;
+            const [verification, riskPolygons, hazardShapes, tile, spcDay1, reports] = await Promise.all([
+              fetchJson<MergedD1VerificationSummary>(`/api/outlook/enh-plus-archive-verification${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/enh-plus-archive-risk-polygons${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<OutlookProbabilityShapeFeatureCollection>(`/api/outlook/enh-plus-archive-hazard-shapes${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<OutlookProbabilityTile>(`/api/outlook/enh-plus-archive-probability-tile${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<SpcCategoryFeatureCollection>(`/api/outlook/enh-plus-archive-spc-category${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<{ reports?: SpcStormReport[] }>(`/api/outlook/enh-plus-archive-storm-reports${query}`, controller.signal, activeRegion).catch(() => null),
+            ]);
+            if (!verification || !riskPolygons) return null;
+            const event: HistoricalEnhPlusEvent = {
+              id: `enh-plus-archive-${entry.date}`,
+              label: enhPlusLabel(entry.date, entry.spcMaxCategory),
+              eventDate: entry.date,
+              cycleTimeISO: enhPlusCycleIso(entry.windowStartISO),
+              eventWindowStartISO: entry.windowStartISO ?? `${entry.date}T12:00:00Z`,
+              eventWindowEndISO: entry.windowEndISO ?? '',
+              forecastHours: [],
+              maxSpcCategory: entry.spcMaxCategory || entry.maxCategory || 'ENH',
+              gridStride: (verification as { gridStride?: number | null }).gridStride ?? null,
+              tileStride: tile?.stride ?? null,
+              tileShape: tile?.shape ?? [],
+              sourceArtifactDir: 'live-enh-plus-archive',
+              summary: verification as unknown as Record<string, unknown>,
+              riskPolygons,
+              hazardProbabilityShapes: (hazardShapes ?? ENH_PLUS_EMPTY_FC) as unknown as OutlookProbabilityShapeFeatureCollection,
+              spcDay1: (spcDay1 ?? ENH_PLUS_EMPTY_FC) as unknown as SpcCategoryFeatureCollection,
+              spcHazardProbabilityShapes: ENH_PLUS_EMPTY_FC as unknown as OutlookProbabilityShapeFeatureCollection,
+              stormReports: reports?.reports ?? [],
+            };
+            return event;
+          }),
+        );
+        if (controller.signal.aborted) return;
+        const valid = built.filter((item): item is HistoricalEnhPlusEvent => item !== null);
+        setEvents(valid);
+        setStatus(valid.length ? 'ready' : 'missing');
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setEvents([]);
+        setStatus('error');
+      }
+    };
+
+    load();
+    return () => controller.abort();
+  }, [activeRegion, enabled]);
+
+  return { events, status };
 }

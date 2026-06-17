@@ -505,6 +505,106 @@ def merged_d2_spc_category():
     return _json_path(merged_dir / "spc_day2_cat.geojson")
 
 
+def _enh_plus_archive_dir() -> Path:
+    return PROJECT_ROOT / "backend" / "artifacts" / "enh_plus_archive"
+
+
+def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int = 600) -> None:
+    """Accumulate/refresh ENH+ days from the current merged D1 outlooks (throttled)."""
+    from datetime import date as _date, datetime, timezone
+
+    from backend.ml.enh_plus_archive import update_archive_for_date
+
+    archive_dir = _enh_plus_archive_dir()
+    index_path = archive_dir / "index.json"
+    try:
+        if index_path.exists():
+            idx = json.loads(index_path.read_text(encoding="utf-8"))
+            gen = idx.get("generatedAtISO")
+            if gen:
+                gen_dt = datetime.fromisoformat(gen.replace("Z", "+00:00")).astimezone(timezone.utc)
+                if (datetime.now(timezone.utc) - gen_dt).total_seconds() < min_interval_seconds:
+                    return
+    except Exception:
+        pass
+
+    for date_str in _available_merge_dates_list(model):
+        try:
+            merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
+            if merged_dir is None:
+                continue
+            update_archive_for_date(archive_dir, merged_dir, _date.fromisoformat(date_str))
+        except Exception:
+            log.exception("ENH+ archive refresh failed for %s", date_str)
+
+    # Touch an empty index so the throttle holds even when no ENH+ days exist yet.
+    if not index_path.exists():
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        index_path.write_text(json.dumps({"dates": [], "generatedAtISO": now_iso}), encoding="utf-8")
+
+
+@app.get("/api/outlook/enh-plus-archive-available-dates")
+def enh_plus_archive_available_dates():
+    model = _request_model()
+    try:
+        _refresh_enh_plus_archive(model)
+    except Exception:
+        log.exception("ENH+ archive refresh error")
+    index_path = _enh_plus_archive_dir() / "index.json"
+    if not index_path.exists():
+        return _json_response({"dates": []})
+    return _json_path(index_path)
+
+
+_ENH_PLUS_ARCHIVE_FILES = {
+    "verification": "verification.json",
+    "risk-polygons": "risk-polygons.geojson",
+    "hazard-shapes": "hazard-probability-shapes.geojson",
+    "probability-tile": "probability-tile.json",
+    "spc-category": "spc-day1-category.geojson",
+    "storm-reports": "storm-reports.json",
+}
+
+
+def _enh_plus_archive_file_response(file_key: str):
+    date_str = request.args.get("date")
+    if not date_str:
+        return _json_error({"error": "date query parameter is required", "code": "missing_date"}, 400)
+    filename = _ENH_PLUS_ARCHIVE_FILES[file_key]
+    return _json_path(_enh_plus_archive_dir() / date_str / filename)
+
+
+@app.get("/api/outlook/enh-plus-archive-verification")
+def enh_plus_archive_verification():
+    return _enh_plus_archive_file_response("verification")
+
+
+@app.get("/api/outlook/enh-plus-archive-risk-polygons")
+def enh_plus_archive_risk_polygons():
+    return _enh_plus_archive_file_response("risk-polygons")
+
+
+@app.get("/api/outlook/enh-plus-archive-hazard-shapes")
+def enh_plus_archive_hazard_shapes():
+    return _enh_plus_archive_file_response("hazard-shapes")
+
+
+@app.get("/api/outlook/enh-plus-archive-probability-tile")
+def enh_plus_archive_probability_tile():
+    return _enh_plus_archive_file_response("probability-tile")
+
+
+@app.get("/api/outlook/enh-plus-archive-spc-category")
+def enh_plus_archive_spc_category():
+    return _enh_plus_archive_file_response("spc-category")
+
+
+@app.get("/api/outlook/enh-plus-archive-storm-reports")
+def enh_plus_archive_storm_reports():
+    return _enh_plus_archive_file_response("storm-reports")
+
+
 def fetch_spc_daily_storm_reports(target_date: Any, session: Any = None) -> list[dict[str, Any]]:
     from datetime import date
     import requests
