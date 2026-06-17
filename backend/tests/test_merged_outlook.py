@@ -1091,7 +1091,7 @@ class TestMergedD2DateSelection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grid = np.ones((5, 5), dtype=int)
-            # 12Z cycle reaching f48 qualifies for its date's D2.
+            # 12Z cycle reaching f48 anchors a D2 outlook for the *next* day.
             _write_cycle_artifacts(
                 root, "20260603_12z", "2026-06-03T12:00:00Z",
                 [0, 6, 12, 18, 24, 30, 36, 42, 48], grid,
@@ -1107,16 +1107,34 @@ class TestMergedD2DateSelection(unittest.TestCase):
                 [0, 6, 12, 18, 24, 30], grid,
             )
 
-            dates = available_merged_d2_dates(root, "hrrr")
-            self.assertEqual(dates, ["2026-06-03"])
+            # "now" is during 2026-06-03, so the Jun-03 12Z cycle's Day 2
+            # (forecasting 2026-06-04) is still a future outlook.
+            now = datetime(2026, 6, 3, 18, tzinfo=timezone.utc)
+            # D2 is labelled by the day it forecasts (anchor + 1 = 2026-06-04).
+            dates = available_merged_d2_dates(root, "hrrr", now=now)
+            self.assertEqual(dates, ["2026-06-04"])
 
-            dirs = resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 3), "hrrr")
+            dirs = resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 4), "hrrr", now=now)
             self.assertEqual([d.name for d in dirs], ["20260603_12z"])
 
+            # The anchor date itself is not a valid D2 forecast day.
             self.assertEqual(
-                resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 2), "hrrr"),
+                resolve_cycle_dirs_for_merged_d2_date(root, date(2026, 6, 3), "hrrr", now=now),
                 [],
             )
+
+    def test_d2_dropped_once_its_window_becomes_today(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            _write_cycle_artifacts(
+                root, "20260603_12z", "2026-06-03T12:00:00Z",
+                [0, 6, 12, 18, 24, 30, 36, 42, 48], grid,
+            )
+            # Once "now" is 2026-06-04, the Jun-03 cycle's Day 2 window (Jun-04)
+            # has become today's Day 1, so it is no longer offered as Day 2.
+            now = datetime(2026, 6, 4, 6, tzinfo=timezone.utc)
+            self.assertEqual(available_merged_d2_dates(root, "hrrr", now=now), [])
 
 
 class TestMergeCyclesForD2Window(unittest.TestCase):

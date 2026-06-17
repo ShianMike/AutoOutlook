@@ -462,16 +462,29 @@ def available_merged_d2_dates(
     model: str = "hrrr",
     *,
     day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+    now: datetime | None = None,
 ) -> list[str]:
-    """Return anchor dates whose 12Z cycle can produce a merged Day 2 outlook."""
+    """Return the convective days a merged Day 2 outlook can forecast.
+
+    A Day 2 outlook is keyed by the day it *forecasts* (the 12Z anchor cycle's
+    date + 1), not the anchor cycle date, so it lines up with D1's labelling and
+    SPC's Day 2 convention. Stale anchors whose forecast day is no longer in the
+    future (it has become today's Day 1) are dropped.
+    """
     if day_count <= 0:
         return []
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
     candidates = _merged_d2_cycle_candidates(artifact_root, model)
     dates: list[str] = []
-    for cycle_date in sorted({cycle_time.date() for cycle_time, _path, _index in candidates}, reverse=True):
-        if _preferred_merged_d2_cycle_for_date(candidates, cycle_date) is None:
+    for anchor_date in sorted({cycle_time.date() for cycle_time, _path, _index in candidates}, reverse=True):
+        if _preferred_merged_d2_cycle_for_date(candidates, anchor_date) is None:
             continue
-        dates.append(cycle_date.isoformat())
+        forecast_day = anchor_date + timedelta(days=1)
+        if forecast_day <= today:
+            # The anchor's Day 2 window has elapsed into today's Day 1 -> stale.
+            continue
+        dates.append(forecast_day.isoformat())
         if len(dates) >= day_count:
             break
     return dates
@@ -483,14 +496,20 @@ def resolve_cycle_dirs_for_merged_d2_date(
     model: str = "hrrr",
     *,
     day_count: int = MERGED_D1_AVAILABLE_DAY_COUNT,
+    now: datetime | None = None,
 ) -> list[Path]:
-    """Resolve the 12Z anchor run used by the public merged-D2 date selector."""
-    allowed = set(available_merged_d2_dates(artifact_root, model, day_count=day_count))
+    """Resolve the 12Z anchor run for the merged Day 2 outlook forecasting ``target_date``.
+
+    ``target_date`` is the forecast convective day; the anchor 12Z cycle is the
+    day before.
+    """
+    allowed = set(available_merged_d2_dates(artifact_root, model, day_count=day_count, now=now))
     if target_date.isoformat() not in allowed:
         return []
+    anchor_date = target_date - timedelta(days=1)
     selected = _preferred_merged_d2_cycle_for_date(
         _merged_d2_cycle_candidates(artifact_root, model),
-        target_date,
+        anchor_date,
     )
     if selected is None:
         return []

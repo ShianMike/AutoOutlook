@@ -293,7 +293,7 @@ def _generate_or_get_merged_d2_dir(target_date_str: str | None, model: str) -> P
 
 def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day: int = 1) -> Path | None:
     """Ensure that the merged Day ``spc_day`` artifacts for target_date_str are generated."""
-    from datetime import date, datetime, timezone
+    from datetime import date, datetime, timedelta, timezone
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
 
     # 1. Resolve target date
@@ -404,11 +404,14 @@ def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day
             return None
             
         try:
-            # Run merge and write to target directory
+            # Run merge and write to target directory. For D2 the public date is
+            # the forecast convective day; the merge anchors to the prior day's
+            # 12Z cycle (its SPC issuance date), so pass anchor = date - 1.
+            merge_target_date = target_date if spc_day == 1 else (target_date - timedelta(days=1))
             merge_cycles_for_spc_window(
                 cycle_dirs,
                 output_dir=merged_dir,
-                target_date=target_date,
+                target_date=merge_target_date,
                 spc_day=spc_day,
                 prefer_fresh_spc=True,
             )
