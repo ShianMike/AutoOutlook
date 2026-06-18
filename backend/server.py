@@ -703,8 +703,18 @@ def spc_storm_reports():
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
     merged_dir = artifact_root / f"merged_{model}_{date_str}"
     cache_path = merged_dir / "storm_reports.json"
-    
-    if cache_path.exists():
+
+    # Only trust the cached reports once the 12Z–12Z convective day is fully
+    # over. While the day is still in progress (or in the future), SPC keeps
+    # publishing new reports, so we must re-fetch to avoid serving a stale
+    # snapshot.
+    from datetime import datetime, timedelta, timezone
+    window_end = datetime(
+        target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=timezone.utc
+    ) + timedelta(days=1)
+    day_complete = datetime.now(timezone.utc) >= window_end
+
+    if day_complete and cache_path.exists():
         return _json_path(cache_path)
         
     try:

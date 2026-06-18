@@ -15,7 +15,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +200,27 @@ def validate_full_index(index: dict[str, Any]) -> None:
         )
 
 
+def _in_progress_merge_date(dates: list[str]) -> str | None:
+    """Return the merged-D1 date whose 12Z–12Z convective window currently
+    contains "now" (UTC). SPC storm reports accumulate over this window, so the
+    default (no-date) storm-reports fallback should target this day rather than
+    the newest cycle date — which, before 12Z, is a convective day that has not
+    started yet and therefore has an empty/non-updating SPC report file.
+    Returns ``None`` when no listed date is in progress (e.g. all are complete).
+    """
+    now = datetime.now(timezone.utc)
+    for date_str in dates:
+        try:
+            day = date.fromisoformat(date_str)
+        except ValueError:
+            continue
+        start = datetime(day.year, day.month, day.day, 12, 0, 0, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        if start <= now < end:
+            return date_str
+    return None
+
+
 def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
     # 1. Get available merge dates list
     dates = helpers._available_merge_dates_list(model="hrrr")
@@ -217,6 +238,7 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
     write_json(merged_d1_out_dir / "available-dates.json", {"dates": dates})
     
     latest_date_dir = None
+    date_dirs: dict[str, Path] = {}
     
     for date_str in dates:
         merged_dir = helpers._generate_or_get_merged_d1_dir(date_str, model="hrrr")
@@ -227,6 +249,7 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         # Target output folder for this date
         date_out_dir = merged_d1_out_dir / date_str
         date_out_dir.mkdir(parents=True, exist_ok=True)
+        date_dirs[date_str] = date_out_dir
         
         # Copy small files
         copy_if_exists(merged_dir / "merged_verification_summary.json", date_out_dir / "verification.json")
@@ -263,8 +286,20 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         copy_if_exists(latest_date_dir / "risk-polygons.geojson", merged_d1_out_dir / "risk-polygons.geojson")
         copy_if_exists(latest_date_dir / "hazard-probability-shapes.geojson", merged_d1_out_dir / "hazard-probability-shapes.geojson")
         copy_if_exists(latest_date_dir / "probability-tile.json", merged_d1_out_dir / "probability-tile.json")
-        copy_if_exists(latest_date_dir / "storm-reports.json", merged_d1_out_dir / "storm-reports.json")
         print(f"Default fallback merged D1 set to latest date: {dates[0]}")
+
+        # Storm reports accumulate over the 12Z–12Z convective day, so the
+        # default (no-date) reports should track the in-progress day rather than
+        # the newest cycle date (whose window may not have started yet and thus
+        # has empty/non-updating SPC reports). Fall back to the latest date when
+        # no listed day is currently in progress.
+        report_default_date = _in_progress_merge_date(dates)
+        report_dir = date_dirs.get(report_default_date or "", latest_date_dir)
+        copy_if_exists(report_dir / "storm-reports.json", merged_d1_out_dir / "storm-reports.json")
+        print(
+            "Default storm reports set to in-progress day: "
+            f"{report_default_date or dates[0]}"
+        )
 
 
 def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
