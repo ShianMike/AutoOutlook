@@ -134,6 +134,77 @@ class TestArchivedSpcLatestSelection(unittest.TestCase):
         # Latest issuance is MRGL (ordinal 2), not the earlier ENH (ordinal 4).
         self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 2)
 
+    def test_day1_blend_excludes_post_16z_reissue(self) -> None:
+        # 1300Z issuance: SLGT (the latest issuance before the 16Z blend cutoff).
+        morning = _make_spc_geojson("2026-06-17T12:00:00Z", "2026-06-18T12:00:00Z", "SLGT", 3)
+        morning["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T13:00:00Z"
+        # 1630Z reissue: upgraded to MDT, but issued after 16Z -> must be ignored.
+        afternoon = _make_spc_geojson("2026-06-17T16:30:00Z", "2026-06-18T12:00:00Z", "MDT", 5)
+        afternoon["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T16:30:00Z"
+        zips = {
+            "1300": self._zip_bytes(morning, "day1otlk"),
+            "1630": self._zip_bytes(afternoon, "day1otlk"),
+        }
+
+        class _Resp:
+            def __init__(self, status: int, content: bytes) -> None:
+                self.status_code = status
+                self.content = content
+
+        class _Session:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+                self.requested_run_times: list[str] = []
+
+            def get(self, url: str, timeout: int | None = None) -> "_Resp":
+                import re
+                match = re.search(r"_(\d{4})-geojson", url)
+                run_time = match.group(1) if match else ""
+                self.requested_run_times.append(run_time)
+                if run_time in zips:
+                    return _Resp(200, zips[run_time])
+                return _Resp(404, b"")
+
+        session = _Session()
+        result = fetch_archived_spc_category("2026-06-17", session=session, day=1)
+        # The 1630Z reissue is never even requested (filtered out by run time).
+        self.assertNotIn("1630", session.requested_run_times)
+        self.assertEqual(result["selectedIssueTimeUTC"], "1300")
+        # Blend uses the pre-16Z SLGT, not the post-16Z MDT upgrade.
+        self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 3)
+
+    def test_day2_still_uses_latest_reissue(self) -> None:
+        # Day 2 must be unaffected by the Day 1 cutoff: latest issuance wins.
+        early = _make_spc_geojson("2026-06-18T06:00:00Z", "2026-06-19T12:00:00Z", "SLGT", 3)
+        early["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T06:00:00Z"
+        late = _make_spc_geojson("2026-06-18T17:30:00Z", "2026-06-19T12:00:00Z", "ENH", 4)
+        late["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T17:30:00Z"
+        zips = {
+            "0600": self._zip_bytes(early, "day2otlk"),
+            "1730": self._zip_bytes(late, "day2otlk"),
+        }
+
+        class _Resp:
+            def __init__(self, status: int, content: bytes) -> None:
+                self.status_code = status
+                self.content = content
+
+        class _Session:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+
+            def get(self, url: str, timeout: int | None = None) -> "_Resp":
+                import re
+                match = re.search(r"_(\d{4})-geojson", url)
+                run_time = match.group(1) if match else ""
+                if run_time in zips:
+                    return _Resp(200, zips[run_time])
+                return _Resp(404, b"")
+
+        result = fetch_archived_spc_category("2026-06-17", session=_Session(), day=2)
+        self.assertEqual(result["selectedIssueTimeUTC"], "1730")
+        self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 4)
+
 
 class TestPreferFreshSpc(unittest.TestCase):
     """Live merges must re-fetch SPC instead of reusing the cycle's frozen cache."""
