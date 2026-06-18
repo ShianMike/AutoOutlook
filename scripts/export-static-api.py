@@ -367,6 +367,40 @@ def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) ->
         print(f"Default fallback merged D2 set to latest date: {dates[0]}")
 
 
+def _refresh_recent_archived_reports(archive_dir, merged_dates, refresh_fn) -> None:
+    """Re-fetch storm reports for archived ENH+ days still within report accrual.
+
+    Covers days that already left the rolling merged-D1 window (so step 1 no
+    longer touches them) but whose 12Z-12Z convective day closed recently enough
+    that SPC may still be adding reports. Days already handled by the merged-day
+    loop are skipped to avoid a duplicate fetch.
+    """
+    from datetime import date as _date, datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+
+    from backend.ml.enh_plus_archive import archive_available_dates
+    from backend.ml.historical_event_verification import event_window_for_date
+
+    # Preliminary storm reports keep trickling in for a few days after the event.
+    accrual_grace = _timedelta(days=3)
+    now = _datetime.now(_timezone.utc)
+    for date_str in archive_available_dates(archive_dir):
+        if date_str in merged_dates:
+            continue
+        try:
+            event_date = _date.fromisoformat(date_str)
+            window = event_window_for_date(event_date)
+            if window.end_time < now - accrual_grace:
+                continue  # Convective day fully elapsed; reports are final.
+            entry = refresh_fn(archive_dir, event_date)
+            if entry is not None:
+                print(
+                    f"ENH+ archive (report refresh): {date_str} -> "
+                    f"{entry['reportCounts']['total']} reports"
+                )
+        except Exception as exc:
+            print(f"Warning: ENH+ archive report refresh failed for {date_str}: {exc}")
+
+
 def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> None:
     """Accumulate ENH+ (Enhanced risk or higher) days into a persistent archive.
 
@@ -378,12 +412,18 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
     """
     from datetime import date as _date
 
-    from backend.ml.enh_plus_archive import archive_available_dates, update_archive_for_date
+    from backend.ml.enh_plus_archive import (
+        archive_available_dates,
+        refresh_reports_for_archived_date,
+        update_archive_for_date,
+    )
 
     archive_dir = artifact_root / "enh_plus_archive"
 
     # 1. Refresh/accumulate from the current merged D1 days.
+    merged_dates: list[str] = []
     for date_str in helpers._available_merge_dates_list(model="hrrr"):
+        merged_dates.append(date_str)
         try:
             merged_dir = helpers._generate_or_get_merged_d1_dir(date_str, model="hrrr")
             if merged_dir is None or not merged_dir.exists():
@@ -393,6 +433,13 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
                 print(f"ENH+ archive: {date_str} -> {entry['maxCategory']} ({entry['reportCounts']['total']} reports)")
         except Exception as exc:
             print(f"Warning: ENH+ archive update failed for {date_str}: {exc}")
+
+    # 1b. Keep already-archived ENH+ days refreshing after they leave the rolling
+    # 2-day merged-D1 window. SPC storm reports keep accruing for a few days after
+    # the 12Z-12Z convective day, but step 1 only ever revisits the newest cycles,
+    # so without this a day freezes the moment newer cycles push it out of view.
+    # Storm reports need only the date, so no merged artifacts are required here.
+    _refresh_recent_archived_reports(archive_dir, set(merged_dates), refresh_reports_for_archived_date)
 
     # 2. Export the accumulated archive tree.
     dates = archive_available_dates(archive_dir)

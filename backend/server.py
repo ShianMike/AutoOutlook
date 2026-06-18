@@ -511,9 +511,14 @@ def _enh_plus_archive_dir() -> Path:
 
 def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int = 600) -> None:
     """Accumulate/refresh ENH+ days from the current merged D1 outlooks (throttled)."""
-    from datetime import date as _date, datetime, timezone
+    from datetime import date as _date, datetime, timedelta, timezone
 
-    from backend.ml.enh_plus_archive import update_archive_for_date
+    from backend.ml.enh_plus_archive import (
+        archive_available_dates,
+        refresh_reports_for_archived_date,
+        update_archive_for_date,
+    )
+    from backend.ml.historical_event_verification import event_window_for_date
 
     archive_dir = _enh_plus_archive_dir()
     index_path = archive_dir / "index.json"
@@ -528,7 +533,9 @@ def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int 
     except Exception:
         pass
 
+    merged_dates: set[str] = set()
     for date_str in _available_merge_dates_list(model):
+        merged_dates.add(date_str)
         try:
             merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
             if merged_dir is None:
@@ -536,6 +543,21 @@ def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int 
             update_archive_for_date(archive_dir, merged_dir, _date.fromisoformat(date_str))
         except Exception:
             log.exception("ENH+ archive refresh failed for %s", date_str)
+
+    # Keep already-archived ENH+ days refreshing after they leave the rolling
+    # 2-day merged window, while SPC may still be adding reports (storm reports
+    # need only the date, so no merged artifacts are required).
+    now = datetime.now(timezone.utc)
+    for date_str in archive_available_dates(archive_dir):
+        if date_str in merged_dates:
+            continue
+        try:
+            event_date = _date.fromisoformat(date_str)
+            if event_window_for_date(event_date).end_time < now - timedelta(days=3):
+                continue
+            refresh_reports_for_archived_date(archive_dir, event_date)
+        except Exception:
+            log.exception("ENH+ archive report refresh failed for %s", date_str)
 
     # Touch an empty index so the throttle holds even when no ENH+ days exist yet.
     if not index_path.exists():

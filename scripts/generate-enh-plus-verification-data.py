@@ -54,6 +54,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--artifact-root", type=Path, default=ARTIFACT_ROOT)
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH)
+    parser.add_argument(
+        "--reports-only",
+        action="store_true",
+        help=(
+            "Update only the storm reports + counts for catalog entries that "
+            "already exist in the output module, leaving every HRRR-derived field "
+            "untouched. Skips artifact/model validation and the merged-outlook "
+            "rebuild, so report counts can be refreshed without regenerating HRRR "
+            "(e.g. after a model version bump invalidates the cached events)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -66,6 +77,9 @@ def main() -> None:
         if args.event_date
         else list(DEFAULT_ENH_PLUS_EVENT_DATES)
     )
+    if args.reports_only:
+        rebake_reports_in_place(output_path, event_dates, artifact_root)
+        return
     expected_model = read_json(MODEL_METADATA_PATH)
     events = [
         build_event_payload(event_date, artifact_root, expected_model)
@@ -149,6 +163,95 @@ def build_event_payload(
         "spcHazardProbabilityShapes": spc_hazards,
         "stormReports": [frontend_report(report) for report in filtered_reports],
     }
+
+
+def rebake_reports_in_place(
+    output_path: Path,
+    event_dates: list[date],
+    artifact_root: Path,
+) -> None:
+    """Refresh only ``stormReports``/``spcReportCounts`` for existing catalog entries.
+
+    Parses the events already baked into the TypeScript module, replaces the
+    storm reports (and their counts) for the requested dates from freshly
+    fetched SPC data, and writes the module back. Every HRRR-derived field and
+    every event that is not requested is preserved untouched, so this never
+    triggers the model-version validation or the merged-outlook rebuild.
+    """
+    events = read_existing_events(output_path)
+    by_date = {str(event.get("eventDate")): event for event in events}
+
+    updated = 0
+    missing: list[str] = []
+    for event_date in event_dates:
+        key = event_date.isoformat()
+        entry = by_date.get(key)
+        if entry is None:
+            missing.append(key)
+            continue
+        window = event_window_for_date(event_date)
+        reports = load_reports_for_rebake(event_date, artifact_root)
+        filtered = filter_spc_reports_for_event_window(reports, window)
+        counts = report_counts(filtered)
+        entry["stormReports"] = [frontend_report(report) for report in filtered]
+        if isinstance(entry.get("summary"), dict):
+            entry["summary"]["spcReportCounts"] = counts
+        updated += 1
+        print(f"[reports rebaked] {key} -> {counts['total']} reports", flush=True)
+
+    if not updated:
+        raise SystemExit(
+            "No existing catalog entries matched the requested dates; nothing to "
+            "rebake. Run a full generate (without --reports-only) to add them first."
+        )
+
+    write_typescript(output_path, events)
+    if missing:
+        print(
+            f"Note: {len(missing)} date(s) not present in the catalog were skipped: "
+            + ", ".join(missing)
+        )
+    print(
+        f"Updated storm reports for {updated} event(s) in "
+        f"{output_path.relative_to(PROJECT_ROOT)}."
+    )
+
+
+def read_existing_events(output_path: Path) -> list[dict[str, Any]]:
+    """Parse the JSON event array out of the generated TypeScript module."""
+    if not output_path.exists():
+        raise SystemExit(
+            f"{output_path} does not exist; run a full generate before --reports-only."
+        )
+    text = output_path.read_text(encoding="utf-8")
+    start_marker = "const RAW_HISTORICAL_ENH_PLUS_EVENTS = "
+    end_marker = ";\n\nexport const HISTORICAL_ENH_PLUS_EVENTS"
+    start = text.find(start_marker)
+    if start == -1:
+        raise SystemExit(f"Could not locate catalog data in {output_path}.")
+    json_start = start + len(start_marker)
+    end = text.find(end_marker, json_start)
+    if end == -1:
+        raise SystemExit(f"Could not locate end of catalog data in {output_path}.")
+    try:
+        events = json.loads(text[json_start:end])
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Failed to parse catalog data in {output_path}: {exc}") from exc
+    if not isinstance(events, list):
+        raise SystemExit(f"Catalog data in {output_path} is not a JSON array.")
+    return events
+
+
+def load_reports_for_rebake(event_date: date, artifact_root: Path) -> list[Mapping[str, Any]]:
+    """Prefer locally fetched storm reports; fall back to a fresh SPC fetch."""
+    for name in (event_slug(event_date), f"{event_slug(event_date)}_complete"):
+        reports_path = artifact_root / name / "spc_storm_reports.json"
+        if reports_path.exists():
+            payload = read_json(reports_path)
+            reports = payload.get("reports")
+            if isinstance(reports, list):
+                return reports
+    return fetch_spc_daily_storm_reports(event_date)
 
 
 def generate_event_merge(

@@ -46,6 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--range-workers", type=int, default=6)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--reports-only",
+        action="store_true",
+        help=(
+            "Only refresh SPC Day 1 category + storm reports; skip the expensive "
+            "HRRR artifact (re)generation. Use to unfreeze report counts without "
+            "waiting on a full f12-f36 rebuild (e.g. after a model version bump)."
+        ),
+    )
+    parser.add_argument(
         "--keep-cache",
         action="store_true",
         help="Keep selected HRRR decode cache. Default avoids the large historical cache.",
@@ -77,6 +86,7 @@ def main() -> None:
                 force=args.force,
                 keep_cache=args.keep_cache,
                 omit_hgt500=args.omit_hgt500,
+                reports_only=args.reports_only,
             )
         except Exception as exc:
             failures.append(f"{event_date.isoformat()}: {exc}")
@@ -95,11 +105,32 @@ def fetch_event(
     force: bool,
     keep_cache: bool,
     omit_hgt500: bool,
+    reports_only: bool = False,
 ) -> Path:
     window = event_window_for_date(event_date)
     output_dir = artifact_root / event_slug(event_date)
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_model = read_json(MODEL_METADATA_PATH)
+
+    # Refresh the SPC inputs first, before any HRRR work. Storm reports must keep
+    # updating even when the HRRR artifacts are stale, incomplete, or slow to
+    # regenerate -- e.g. after a model version bump invalidates every cached
+    # event and the full f12-f36 rebuild is what makes a run time out. Fetching
+    # reports up front means a regen that later fails (or never runs) no longer
+    # freezes the report counts for this event.
+    spc_payload = fetch_archived_spc_day1_category(event_date, output_dir=output_dir)
+    spc_label, _ = max_spc_category(spc_payload["categoryGeojson"])
+    reports = fetch_spc_daily_storm_reports(event_date)
+    write_json(output_dir / "spc_storm_reports.json", {"reports": reports})
+    print(
+        f"[reports refreshed] {event_date.isoformat()} spc={spc_label} "
+        f"reports={len(reports)}",
+        flush=True,
+    )
+
+    if reports_only:
+        return output_dir
+
     model_is_current = event_artifacts_use_model(output_dir, expected_model)
 
     if force or not event_artifacts_complete(output_dir, window.forecast_hours, expected_model):
@@ -142,10 +173,6 @@ def fetch_event(
             f"model {expected_model.get('version')}"
         )
 
-    spc_payload = fetch_archived_spc_day1_category(event_date, output_dir=output_dir)
-    spc_label, _ = max_spc_category(spc_payload["categoryGeojson"])
-    reports = fetch_spc_daily_storm_reports(event_date)
-    write_json(output_dir / "spc_storm_reports.json", {"reports": reports})
     print(
         f"[event ready] {event_date.isoformat()} spc={spc_label} "
         f"hours={len(window.forecast_hours)} reports={len(reports)}",

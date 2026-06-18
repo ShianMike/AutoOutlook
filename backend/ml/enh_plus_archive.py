@@ -162,6 +162,55 @@ def archive_available_dates(archive_dir: Path) -> list[str]:
     return [str(item.get("date")) for item in dates if isinstance(item, Mapping) and item.get("date")]
 
 
+def refresh_reports_for_archived_date(
+    archive_dir: Path,
+    event_date: date,
+    *,
+    report_fetch_fn: ReportFetchFn | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any] | None:
+    """Re-fetch storm reports for an ENH+ day already present in the archive.
+
+    Unlike :func:`update_archive_for_date`, this needs no live merged D1
+    artifacts -- it only rewrites ``storm-reports.json`` for a day that is
+    already archived, and refreshes that day's report counts in the index. This
+    keeps past ENH+ days accruing reports after they fall out of the rolling
+    merged-D1 availability window, where :func:`update_archive_for_date` would
+    no longer reach them. Returns the updated index entry, or ``None`` if the
+    date is not archived. On a fetch error the previously archived reports are
+    preserved (via :func:`_refresh_reports`).
+    """
+    archive_dir = Path(archive_dir)
+    date_dir = archive_dir / event_date.isoformat()
+    if not date_dir.is_dir():
+        return None
+
+    index = _read_json(archive_dir / "index.json")
+    entry: dict[str, Any] | None = None
+    if isinstance(index, dict) and isinstance(index.get("dates"), list):
+        for item in index["dates"]:
+            if isinstance(item, Mapping) and item.get("date") == event_date.isoformat():
+                entry = dict(item)
+                break
+    if entry is None:
+        return None
+
+    window = event_window_for_date(event_date)
+    reports = _refresh_reports(date_dir, event_date, window, report_fetch_fn, session)
+    counts = report_counts(reports)
+    _write_json(
+        date_dir / "storm-reports.json",
+        {"reports": reports, "counts": counts, "updatedAtISO": _now_iso()},
+    )
+
+    entry["reportCounts"] = counts
+    entry["windowStartISO"] = window.start_iso
+    entry["windowEndISO"] = window.end_iso
+    entry["updatedAtISO"] = _now_iso()
+    _upsert_index_entry(archive_dir, entry)
+    return entry
+
+
 def _refresh_reports(
     date_dir: Path,
     event_date: date,
