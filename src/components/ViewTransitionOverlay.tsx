@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 
+import { OVERLAY_DISPLAY_MS } from './landing/landingMotionConfig';
+import { useReducedMotion } from './landing/useReducedMotion';
+
 // Brutalist boot-style overlay shown during view changes (landing / dashboard / docs).
 // Mounted from `App.tsx` keyed on the active view, so the overlay remounts and
 // re-runs its enter/hold/exit cycle on every navigation.
@@ -103,10 +106,12 @@ const TONE_CLASSES: Record<AccentTone, { fg: string; bg: string; ring: string; b
   },
 };
 
-// Total visible duration of the overlay before unmount.
-const TOTAL_MS = 2500;
-// When the exit fade should start.
-const EXIT_AT_MS = 2100;
+// Total visible duration of the overlay before unmount. `OVERLAY_DISPLAY_MS`
+// (600ms) is the single source of truth shared with the rest of the landing
+// motion system; the exit fade starts early enough that the `overlay-out`
+// keyframe finishes right as the overlay unmounts.
+const EXIT_ANIM_MS = 280; // matches the `overlay-out` keyframe duration in tailwind.config.ts
+const EXIT_AT_MS = Math.max(0, OVERLAY_DISPLAY_MS - EXIT_ANIM_MS);
 
 interface ViewTransitionOverlayProps {
   view: TransitionView;
@@ -118,23 +123,55 @@ interface ViewTransitionOverlayProps {
 export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOverlayProps) {
   const [active, setActive] = useState(true);
   const [exiting, setExiting] = useState(false);
+  const [pct, setPct] = useState(0);
+  const reducedMotion = useReducedMotion();
 
   useEffect(() => {
     setActive(true);
     setExiting(false);
     const exitTimer = window.setTimeout(() => setExiting(true), EXIT_AT_MS);
-    const doneTimer = window.setTimeout(() => setActive(false), TOTAL_MS);
+    const doneTimer = window.setTimeout(() => setActive(false), OVERLAY_DISPLAY_MS);
     return () => {
       window.clearTimeout(exitTimer);
       window.clearTimeout(doneTimer);
     };
   }, [cycle]);
 
+  // Drive the load bar + percentage with requestAnimationFrame so the fill and
+  // the counter stay perfectly in sync and reliably complete within the visible
+  // window (before the exit fade at EXIT_AT_MS). Eased with easeOutCubic for a
+  // fast-then-settle feel. Under reduced motion it snaps to 100% immediately.
+  useEffect(() => {
+    if (reducedMotion) {
+      setPct(100);
+      return undefined;
+    }
+    setPct(0);
+    const fillMs = Math.max(300, EXIT_AT_MS - 120);
+    let raf = 0;
+    let start = 0;
+    const step = (t: number) => {
+      if (!start) start = t;
+      const p = Math.min(1, (t - start) / fillMs);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setPct(eased * 100);
+      if (p < 1) raf = window.requestAnimationFrame(step);
+    };
+    raf = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(raf);
+  }, [cycle, reducedMotion]);
+
   const meta = VIEW_META[view];
   const tone = TONE_CLASSES[meta.tone];
   const utc = useUtcStamp();
 
   const lines = useMemo(() => meta.lines, [meta.lines]);
+
+  // Under reduced motion the overlay still presents its destination state, but
+  // any continuously-looping decorative motion (radar sweep, pulsing dots,
+  // blinking caret, the animated load fill) is suppressed. `loop` drops a
+  // looping animation class when motion is reduced. (Req 9.3)
+  const loop = (className: string) => (reducedMotion ? '' : className);
 
   if (!active) return null;
 
@@ -153,7 +190,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
       <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
         <div className="relative h-[140vmax] w-[140vmax] opacity-[0.07]">
           <div
-            className="absolute inset-0 animate-radar-sweep"
+            className={`absolute inset-0 ${loop('animate-radar-sweep')}`}
             style={{
               background:
                 'conic-gradient(from 0deg, rgba(245,184,0,0) 0deg, rgba(245,184,0,0.55) 18deg, rgba(245,184,0,0) 24deg)',
@@ -190,7 +227,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
         <div className="flex items-center justify-between border-b-[3px] border-paper/30 bg-ink px-4 py-2">
           <div className="flex items-center gap-2">
             <span
-              className={`inline-block h-2 w-2 animate-pulse-dot rounded-full ${tone.bg}`}
+              className={`inline-block h-2 w-2 ${loop('animate-pulse-dot')} rounded-full ${tone.bg}`}
               aria-hidden
             />
             <span className="font-mono text-[10px] uppercase tracking-[0.35em] text-paper/70">
@@ -222,15 +259,15 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
         <div className="flex flex-col gap-3 border-b-[3px] border-paper/15 px-4 py-4">
           <h2 className="font-display text-3xl font-extrabold uppercase leading-[0.9] tracking-tight">
             {meta.title}
-            <span className={`ml-1 inline-block w-2 ${tone.bg} animate-blink`} style={{ height: '0.85em', verticalAlign: '-0.05em' }} aria-hidden />
+            <span className={`ml-1 inline-block w-2 ${tone.bg} ${loop('animate-blink')}`} style={{ height: '0.85em', verticalAlign: '-0.05em' }} aria-hidden />
           </h2>
 
           <ul className="mt-1 flex flex-col gap-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-paper/80">
             {lines.map((line, idx) => (
               <li
                 key={`${cycle}-${idx}`}
-                className="animate-boot-line opacity-0"
-                style={{ animationDelay: `${110 + idx * 300}ms` }}
+                className={reducedMotion ? 'opacity-100' : 'animate-boot-line opacity-0'}
+                style={reducedMotion ? undefined : { animationDelay: `${100 + idx * 200}ms` }}
               >
                 {line}
               </li>
@@ -238,14 +275,17 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
           </ul>
         </div>
 
-        {/* Progress bar */}
+        {/* Progress bar — rAF-driven fill + live percentage. */}
         <div className="border-b-[3px] border-paper/15 px-4 py-3">
           <div className="mb-1.5 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.3em] text-paper/50">
             <span>► LOAD STREAM</span>
-            <span>FETCH · DECODE · MOUNT</span>
+            <span className={`${tone.fg} tabular-nums`}>{String(Math.round(pct)).padStart(3, '0')}%</span>
           </div>
           <div className="relative h-3 w-full border-[2px] border-paper bg-paper/10">
-            <div className={`absolute inset-y-0 left-0 ${tone.bar} animate-load-bar`} style={{ width: '0%' }}>
+            <div
+              className={`absolute inset-y-0 left-0 ${tone.bar}`}
+              style={{ width: `${pct}%` }}
+            >
               <div
                 className="absolute inset-0 opacity-50"
                 style={{
@@ -254,6 +294,10 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
                 }}
                 aria-hidden
               />
+              {/* Bright leading edge that rides the fill. */}
+              {!reducedMotion && pct > 0 && pct < 100 && (
+                <span className="absolute inset-y-0 right-0 w-[3px] bg-paper" aria-hidden />
+              )}
             </div>
             {/* Tick marks above the bar */}
             <div className="absolute -top-1 left-0 right-0 flex justify-between" aria-hidden>
@@ -270,7 +314,7 @@ export default function ViewTransitionOverlay({ view, cycle }: ViewTransitionOve
         {/* Bottom strip */}
         <div className="flex items-center justify-between bg-ink px-4 py-2 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/55">
           <span className="inline-flex items-center gap-2">
-            <span className={`inline-block h-1.5 w-1.5 animate-pulse-dot ${tone.bg}`} aria-hidden />
+            <span className={`inline-block h-1.5 w-1.5 ${loop('animate-pulse-dot')} ${tone.bg}`} aria-hidden />
             STAND BY
           </span>
           <span>v1.2 · STREAM OK</span>

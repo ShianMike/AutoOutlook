@@ -225,7 +225,7 @@ export const RISK_META: Record<
   TSTM: { label: 'General Thunder', ord: 0, tw: 'bg-risk-tstm text-ink', chipText: 'TSTM' },
   MRGL: { label: 'Marginal',        ord: 1, tw: 'bg-risk-mrgl text-ink', chipText: 'MRGL' },
   SLGT: { label: 'Slight',          ord: 2, tw: 'bg-risk-slgt text-ink', chipText: 'SLGT' },
-  ENH:  { label: 'Enhanced',        ord: 3, tw: 'bg-risk-enh text-paper', chipText: 'ENH'  },
+  ENH:  { label: 'Enhanced',        ord: 3, tw: 'bg-risk-enh text-ink', chipText: 'ENH'  },
   MOD:  { label: 'Moderate',        ord: 4, tw: 'bg-risk-mod text-paper', chipText: 'MOD'  },
   HIGH: { label: 'High',            ord: 5, tw: 'bg-risk-high text-paper', chipText: 'HIGH' },
 };

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { useAutoForecast } from './hooks/useAutoForecast';
 import { useForecastHour } from './hooks/useForecastHour';
@@ -22,22 +22,9 @@ import DocumentationPage from './components/docs/DocumentationPage';
 import LandingPage from './components/landing/LandingPage';
 import ChangelogPage from './components/changelog/ChangelogPage';
 import ViewTransitionOverlay from './components/ViewTransitionOverlay';
+import { DASHBOARD_ANCHORS, NAVIGATION_UNRESOLVED_EVENT } from './utils/navigateView';
 
 type AppView = 'landing' | 'dashboard' | 'docs' | 'changelog';
-
-const DASHBOARD_ANCHORS = new Set([
-  'dashboard',
-  'time-scrubber',
-  'outlook-map',
-  'primary-outlook',
-  'hazards',
-  'ingredients',
-  'timeline',
-  'discussion',
-  'readiness',
-  'verification',
-  'system-status',
-]);
 
 function viewFromHash(): AppView {
   if (typeof window === 'undefined') return 'landing';
@@ -56,6 +43,20 @@ export default function App() {
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
   const [view, setView] = useState<AppView>(() => viewFromHash());
+  // Monotonically increasing navigation counter. Bumped on every active-view
+  // change so the transition overlay remounts (and replays) even when the
+  // destination view is the same as the current one (re-navigation). Rapid
+  // successive view changes all funnel through the single `view`/`cycle` pair,
+  // so only one overlay — for the most recently requested destination — is ever
+  // mounted at a time (Req 9.1, 9.5).
+  const [cycle, setCycle] = useState(0);
+
+  // Transient, non-blocking indication shown when a navigation request cannot be
+  // resolved to a known destination view. The active view/cycle is left
+  // untouched (so no overlay mounts for the unresolved destination); we only
+  // surface a `role="status"` notice that the view change did not complete
+  // (Req 9.6). The `nonce` lets repeated failures re-arm the auto-dismiss timer.
+  const [navNotice, setNavNotice] = useState<{ message: string; nonce: number } | null>(null);
 
   const dashboardDataEnabled = view === 'dashboard';
   const auto = useAutoForecast(activeRegion, dashboardDataEnabled);
@@ -93,6 +94,42 @@ export default function App() {
     return () => window.removeEventListener('hashchange', sync);
   }, []);
 
+  // Surface a non-blocking notice when a navigation request fails to resolve to
+  // a known destination view. The current view is retained (we do not call
+  // setView/setCycle), so no transition overlay is mounted for the unresolved
+  // destination (Req 9.6).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onUnresolved = () =>
+      setNavNotice((prev) => ({
+        message: 'View change did not complete',
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+    window.addEventListener(NAVIGATION_UNRESOLVED_EVENT, onUnresolved);
+    return () => window.removeEventListener(NAVIGATION_UNRESOLVED_EVENT, onUnresolved);
+  }, []);
+
+  // Auto-dismiss the transient navigation notice. Re-arms whenever a new failure
+  // bumps the nonce so consecutive failures keep the message visible briefly.
+  useEffect(() => {
+    if (!navNotice) return;
+    const timer = window.setTimeout(() => setNavNotice(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [navNotice?.nonce]);
+
+  // Bump the navigation cycle whenever the resolved view actually changes.
+  // Intermediate requests in a rapid sequence collapse into the single `view`
+  // state, so this coalesces them into one overlay for the latest destination.
+  // The first effect run (initial mount) leaves `cycle` at 0 so the overlay
+  // does not double-mount on load.
+  const prevViewRef = useRef(view);
+  useEffect(() => {
+    if (prevViewRef.current !== view) {
+      prevViewRef.current = view;
+      setCycle((c) => c + 1);
+    }
+  }, [view]);
+
   // After a view change, scroll to the hash target (or the top of the page).
   // Same-view hash changes are handled natively by the browser.
   useEffect(() => {
@@ -113,11 +150,25 @@ export default function App() {
     return () => window.cancelAnimationFrame(raf);
   }, [view]);
 
+  // Non-blocking, accessible indication that a navigation request did not
+  // resolve. Rendered alongside whichever view is currently active so the user
+  // sees the failure without the active view changing (Req 9.6).
+  const navNoticeEl = navNotice ? (
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 border-[3px] border-ink bg-signal-amber px-4 py-2 font-mono text-[11px] uppercase tracking-[0.2em] text-ink shadow-retro"
+    >
+      {navNotice.message}
+    </div>
+  ) : null;
+
   if (view === 'landing') {
     return (
       <>
         <LandingPage />
-        <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+        <ViewTransitionOverlay key={`tx-${view}-${cycle}`} view={view} cycle={cycle} />
+        {navNoticeEl}
       </>
     );
   }
@@ -126,7 +177,8 @@ export default function App() {
     return (
       <>
         <ChangelogPage />
-        <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+        <ViewTransitionOverlay key={`tx-${view}-${cycle}`} view={view} cycle={cycle} />
+        {navNoticeEl}
       </>
     );
   }
@@ -266,7 +318,8 @@ export default function App() {
         </footer>
       </div>
     </div>
-    <ViewTransitionOverlay key={`tx-${view}`} view={view} cycle={0} />
+    <ViewTransitionOverlay key={`tx-${view}-${cycle}`} view={view} cycle={cycle} />
+    {navNoticeEl}
     </>
   );
 }

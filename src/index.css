@@ -24,10 +24,6 @@
     background: #111111;
     color: #f5f1e8;
   }
-  *:focus-visible {
-    outline: 3px solid #111111;
-    outline-offset: 3px;
-  }
 }
 
 @layer components {
@@ -751,11 +747,11 @@
 
 @keyframes landingHeatPulse {
   0%, 100% {
-    filter: brightness(0.92) saturate(0.96);
+    opacity: 0.9;
     transform: scale(1);
   }
   45% {
-    filter: brightness(1.18) saturate(1.12);
+    opacity: 1;
     transform: scale(1.04);
   }
 }
@@ -771,10 +767,10 @@
 
 @keyframes landingRampPulse {
   0%, 100% {
-    filter: saturate(0.96) brightness(0.98);
+    opacity: 0.88;
   }
   50% {
-    filter: saturate(1.18) brightness(1.05);
+    opacity: 1;
   }
 }
 
@@ -945,5 +941,100 @@
   /* Make the load-bar appear filled when motion is reduced. */
   .animate-load-bar {
     width: 100% !important;
+  }
+}
+
+/*
+ * Focus indicator (Requirement 5.2): the visible focus ring must meet a
+ * contrast ratio of at least 3:1 against its adjacent background. The ink
+ * outline alone satisfies this on light (paper) surfaces but is effectively
+ * invisible on the dark `bg-ink` surfaces used by the pipeline section, the
+ * telemetry / final-CTA cards, and the footer.
+ *
+ * The ink outline (contrasts >=3:1 on paper, 16.6:1) is paired with a paper
+ * ring (contrasts >=3:1 on ink, 16.6:1) so the indicator is always visible
+ * regardless of the surface it lands on. Both rings use brutalist hard edges
+ * (zero blur). This rule is intentionally left UNLAYERED so the paper ring is
+ * not overridden by the component-layer box-shadows on `.retro-*` controls
+ * (e.g. `shadow-retro-sm`) while they are focused.
+ */
+*:focus-visible {
+  outline: 3px solid #111111;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px #f5f1e8;
+}
+
+/*
+ * Mobile hit targets (Requirement 6.5 / task 11.2): at the mobile
+ * Viewport_Class (width < 640px, the complement of Tailwind's `sm` breakpoint)
+ * every landing-page Interactive_Control must present a touch target of at
+ * least 44 x 44 CSS px. These rules are scoped to the mobile media query only,
+ * so the denser desktop/tablet presentation (compact mono nav links, tight
+ * button padding) is preserved above the breakpoint.
+ *
+ * Two control families are covered:
+ *   1. `.retro-button` CTAs (nav "Launch Dashboard", hero/final-CTA/sponsor
+ *      buttons) — already padded but compact variants (e.g. the nav button at
+ *      text-[11px]/py-2) can fall under 44px, so a hard floor is applied.
+ *   2. Anchor links inside the landmark regions — the brand/home link, the
+ *      primary `<nav aria-label="Primary">` links, and the footer
+ *      `<nav aria-label="Footer">` links — which are otherwise small inline
+ *      mono text. They are laid out as centered inline-flex boxes so the label
+ *      stays visually unchanged while the activatable area meets 44 x 44.
+ */
+@media (max-width: 639.98px) {
+  .landing-page .retro-button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .landing-page header.landing-nav a,
+  .landing-page nav[aria-label='Primary'] a,
+  .landing-page nav[aria-label='Footer'] a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Rotating gradient outline (SPC QC console)
+   ---------------------------------------------------------------------------
+   A conic-gradient ring that slowly rotates around the dark QC card so its
+   edge reads distinctly against the page instead of merging into a flat block.
+   Uses an animated @property angle (no element rotation -> no clipping), with a
+   solid color fallback for browsers without @property support, and respects
+   prefers-reduced-motion. */
+@property --qc-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes qcBorderSpin {
+  to {
+    --qc-angle: 360deg;
+  }
+}
+.qc-glow-border {
+  position: relative;
+  padding: 3px; /* visible ring thickness — even on all sides, never clipped */
+  background-color: #16c1ff; /* fallback ring if conic-gradient is unsupported */
+  background-image: conic-gradient(
+    from var(--qc-angle),
+    #9ad62a,
+    #16c1ff,
+    #f7b500,
+    #ff8c00,
+    #ef3b2c,
+    #7a0177,
+    #9ad62a
+  );
+  animation: qcBorderSpin 6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .qc-glow-border {
+    animation: none;
   }
 }

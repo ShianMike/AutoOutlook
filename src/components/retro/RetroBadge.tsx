@@ -12,7 +12,7 @@ const toneClasses: Record<NonNullable<RetroBadgeProps['tone']>, string> = {
   ink: 'bg-ink text-paper',
   lime: 'bg-signal-lime text-ink',
   amber: 'bg-signal-amber text-ink',
-  red: 'bg-signal-red text-paper',
+  red: 'bg-signal-red text-ink',
   cyan: 'bg-signal-cyan text-ink',
   orange: 'bg-signal-orange text-ink',
 };
