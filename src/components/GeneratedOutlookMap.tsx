@@ -18,6 +18,7 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import { apiUrl } from '../utils/apiBase';
+import { zoomRegionProjectionConfig, type MapZoomRegion } from '../utils/mapZoomRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -35,6 +36,7 @@ interface GeneratedOutlookMapProps {
   stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
   stormReports?: SpcStormReport[];
   spcDay1Override?: SpcCategoryFeatureCollection | null;
+  zoomRegion?: MapZoomRegion;
 }
 
 function generatedModelLabel(activeRegion: ActiveRegion, _artifacts: OutlookArtifacts | null): string {
@@ -291,6 +293,7 @@ export default function GeneratedOutlookMap({
   stormReportsMode = 'none',
   stormReports = [],
   spcDay1Override = null,
+  zoomRegion = 'conus',
 }: GeneratedOutlookMapProps) {
   const [spcDay1, setSpcDay1] = useState<SpcCategoryFeatureCollection | null>(null);
   const [spcStatus, setSpcStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
@@ -299,12 +302,7 @@ export default function GeneratedOutlookMap({
   const geoUrl = STATES_URL;
   const usClipId = `us-land-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const projection = 'geoAlbers';
-  const projectionConfig = {
-    rotate: [96, 0, 0] as [number, number, number],
-    center: [0, 38] as [number, number],
-    parallels: [29.5, 45.5] as [number, number],
-    scale: 1000,
-  };
+  const projectionConfig = zoomRegionProjectionConfig(zoomRegion);
   const selectedForecastHour = snapshot?.forecastHour;
   const spcVerification = artifacts?.metadata?.spcVerification ?? null;
   const showAutoLayer = effectiveComparisonMode === 'auto' || effectiveComparisonMode === 'overlay';
@@ -453,7 +451,7 @@ export default function GeneratedOutlookMap({
         </div>
       </header>
 
-      <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
+      <div className="outlook-export-map-frame aspect-[3/2] xl:aspect-[16/9] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
           projection={projection}
           width={900}

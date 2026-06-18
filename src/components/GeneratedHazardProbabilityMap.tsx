@@ -19,6 +19,7 @@ import { HAZARD_CONFIGS, getHazardConfig } from '../utils/hazardProbabilityBands
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
+import { zoomRegionProjectionConfig, type MapZoomRegion } from '../utils/mapZoomRegions';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 
 const STATES_URL = '/us-states-10m.json';
@@ -37,6 +38,7 @@ interface GeneratedHazardProbabilityMapProps {
   comparisonMode?: SpcComparisonMode;
   spcHazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection | null;
   cigOverlayEnabled?: boolean;
+  zoomRegion?: MapZoomRegion;
 }
 
 export function hasGeneratedHazardTile(
@@ -60,17 +62,13 @@ export default function GeneratedHazardProbabilityMap({
   comparisonMode = 'auto',
   spcHazardProbabilityShapes = null,
   cigOverlayEnabled = false,
+  zoomRegion = 'conus',
 }: GeneratedHazardProbabilityMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
   const usClipId = `us-land-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const projection = 'geoAlbers';
-  const projectionConfig = {
-    rotate: [96, 0, 0] as [number, number, number],
-    center: [0, 38] as [number, number],
-    parallels: [29.5, 45.5] as [number, number],
-    scale: 1000,
-  };
+  const projectionConfig = zoomRegionProjectionConfig(zoomRegion);
 
   const forecastHour = snapshot?.forecastHour;
   const tile = useMemo(() => getArtifactHourTile(artifacts, forecastHour), [artifacts, forecastHour]);
@@ -212,7 +210,7 @@ export default function GeneratedHazardProbabilityMap({
           </span>
         </div>
       </header>
-      <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
+      <div className="outlook-export-map-frame aspect-[3/2] xl:aspect-[16/9] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
           projection={projection}
           width={900}

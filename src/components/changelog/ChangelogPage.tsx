@@ -84,10 +84,57 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.2.3',
+    codename: 'Outlook Map Controls & Region Zoom',
+    date: '2026-06-18',
+    status: 'CURRENT',
+    summary:
+      'This patch redesigns the outlook map control deck, adds a CONUS region zoom selector, gives the map panels more height with a slightly tighter default framing, and reworks the animated GIF export dialog. The GIF export is now restricted to the hourly scrubber, since a multi-cycle merged outlook has no hourly sequence to animate.',
+    highlights: [
+      'Region zoom selector: A new Zoom Region control recenters and zooms the maps into CONUS or one of eight regional presets (Northeast, Southeast, Midwest / Ohio Valley, Southern Plains, Northern Plains, Southwest, Northwest, California / West). The choice applies to the categorical, hazard, and rule-fallback maps and carries through to PNG and GIF export.',
+      'Redesigned control deck: The flat row of look-alike dropdowns is reorganized into labeled fields with mini captions, with binary choices (Type, View, Outlook Day, SPC backing) converted to segmented toggles, dividers between clusters, and Export pinned to the right.',
+      'Taller map panels with a closer view: Each map panel is taller (3:2, widening to 16:9) and the default projection is zoomed in slightly so the focus region fills more of the frame. The fixed export canvas was raised to match.',
+      'Reworked GIF export dialog: A live summary shows frame count, loop duration, delay, and the F-hour range; Frame Delay and Quality are now full-width segmented switches; and the primary button reflects the frame count.',
+      'GIF export hidden in Merged Outlook: GIF animation only applies to the hourly scrubber, so the option is removed from the Export menu in merged mode and the dialog closes automatically if the view is switched while open.',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'CONUS region zoom selector',
+        body: 'Added a shared map zoom-region configuration and a Zoom Region control in the outlook map deck. Each preset maps to a geoAlbers center and scale, threaded into the categorical, hazard-probability, and rule-fallback maps so the selected region recenters and zooms every panel, including exports.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Redesigned outlook map control deck',
+        body: 'Rebuilt the control bar with reusable labeled fields, a shared dropdown style, and segmented toggles for Type, View, Outlook Day, and SPC backing. Controls are grouped into clusters separated by dividers, aligned to a single baseline, and the Export control is pinned to the far right.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Taller map panels and closer default framing',
+        body: 'Increased the map panel aspect ratio (3:2, widening to 16:9 on large screens) and raised the default projection scale so the focus region fills more of the frame. The fixed PNG/GIF export canvas height was increased to keep export framing consistent with the on-screen panels.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Reworked animated GIF export dialog',
+        body: 'The GIF dialog now shows a live summary (frame count, loop duration, frame delay, and the start/end F-hour range), presents Frame Delay and Quality as full-width segmented switches, places the summary and actions on one row, and labels the generate button with the frame count.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'GIF export limited to the hourly scrubber',
+        body: 'GIF animation steps through hourly forecast stops, which a merged multi-cycle outlook does not have. The Save GIF Animation option is now removed from the Export menu in Merged Outlook mode, opening the dialog is guarded, and the dialog auto-closes if the view switches to merged while it is open.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.2.3',
+        body: 'Recorded the map control redesign, region zoom, and GIF export rule as the v1.2.3 patch release, bumped package metadata and the app/landing/changelog footers, and moved v1.2.2 to stable in the in-app changelog.',
+      },
+    ],
+  },
+  {
     version: 'v1.2.2',
     codename: 'Merged Outlook Summary Consistency',
     date: '2026-06-13',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This patch makes the Primary Outlook banner, Hazard Probability Board, and Automated Forecast Discussion describe the merged multi-cycle Day 1 outlook when Merged Outlook is selected, instead of continuing to read the forecast hour chosen on the hourly scrubber. The merged panels now take their category, per-hazard probabilities, focus region, and headline from the merged Day 1 artifact — the same surface the map draws — and the Discussion gains a dedicated merged narrative.',
     highlights: [
@@ -1441,7 +1488,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.2.2
+          AutoOutlook · Automated Convective Risk Intelligence · v1.2.3
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

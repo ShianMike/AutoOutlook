@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { toPng } from 'html-to-image';
 import type { ForecastBundle, HourSnapshot, ActiveRegion } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
@@ -19,6 +19,7 @@ import type {
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { recordCanvasesToGif } from '../utils/gifRecorder';
 import type { OutlookHazardKey } from '../utils/hazardProbabilityBands';
+import { MAP_ZOOM_REGIONS, MAP_ZOOM_REGION_ORDER, type MapZoomRegion } from '../utils/mapZoomRegions';
 import { apiUrl } from '../utils/apiBase';
 
 interface OutlookMapPanelProps {
@@ -62,7 +63,7 @@ const GIF_DELAY_OPTIONS = [300, 500, 600, 800, 1200];
 const GIF_CAPTURE_TIMEOUT_MS = 8000;
 const GIF_CAPTURE_POLL_MS = 150;
 const EXPORT_CAPTURE_CSS_WIDTH = 2000;
-const EXPORT_CAPTURE_CSS_HEIGHT = 1125;
+const EXPORT_CAPTURE_CSS_HEIGHT = 1320;
 const EXPORT_PIXEL_RATIO = 2;
 const EXPORT_BACKGROUND_COLOR = '#f5f0e6';
 const EXPORT_FIXED_LAYOUT_CSS = `
@@ -155,6 +156,10 @@ const GIF_QUALITY_CONFIG: Record<GifQualityPreset, { label: string; encoderQuali
   medium: { label: 'Medium', encoderQuality: 12 },
   large: { label: 'Large', encoderQuality: 8 },
 };
+
+// Shared styling for the control-deck selects so every dropdown is identical.
+const CONTROL_SELECT_CLASS =
+  'retro-select h-8 w-full bg-paper border-[2px] border-ink pl-2.5 pr-7 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none transition-colors hover:bg-signal-amber focus-visible:bg-signal-amber disabled:cursor-not-allowed disabled:bg-paper-dark/30 disabled:text-ink/45';
 
 function fmtCoord(lat: number, lon: number): string {
   const ns = lat >= 0 ? 'N' : 'S';
@@ -291,6 +296,7 @@ export default function OutlookMapPanel({
   const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>(initialSpcComparisonMode);
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
+  const [zoomRegion, setZoomRegion] = useState<MapZoomRegion>('conus');
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingGif, setIsExportingGif] = useState(false);
   const [gifDialogOpen, setGifDialogOpen] = useState(false);
@@ -396,6 +402,13 @@ export default function OutlookMapPanel({
   const gifAbortRef = useRef<AbortController | null>(null);
   const forecastStops = bundle?.hours ?? [];
   const isAnyExporting = isExporting || isExportingGif;
+  // Derived GIF range summary (kept order-agnostic so start/end can be either way).
+  const gifFrameStart = Math.min(gifStartIndex, gifEndIndex);
+  const gifFrameEnd = Math.max(gifStartIndex, gifEndIndex);
+  const gifFrameCount = forecastStops.length === 0 ? 0 : gifFrameEnd - gifFrameStart + 1;
+  const gifLoopSeconds = (gifFrameCount * gifDelayMs) / 1000;
+  const gifStartStop = forecastStops[gifFrameStart];
+  const gifEndStop = forecastStops[gifFrameEnd];
   const artifactMetadata = effectiveMetadata;
   const latestCandidate = artifactMetadata?.latestExtendedCandidate ?? undefined;
   const staleArtifacts = isNewerCycle(latestCandidate?.cycleTimeISO, artifactMetadata?.cycleTimeISO);
@@ -475,8 +488,16 @@ export default function OutlookMapPanel({
     setGifEndIndex((index) => Math.max(0, Math.min(index, forecastStops.length - 1)));
   }, [forecastStops.length]);
 
+  // GIF animation only applies to the hourly scrubber — close the dialog if the
+  // user switches to the merged outlook while it is open.
+  useEffect(() => {
+    if (viewType === 'merged' && gifDialogOpen) {
+      setGifDialogOpen(false);
+    }
+  }, [viewType, gifDialogOpen]);
+
   const openGifDialog = () => {
-    if (!snapshot || forecastStops.length === 0 || isAnyExporting) return;
+    if (!snapshot || forecastStops.length === 0 || isAnyExporting || viewType === 'merged') return;
     const safeIndex = Math.max(0, Math.min(selectedIndex, forecastStops.length - 1));
     setGifStartIndex(safeIndex);
     setGifEndIndex(Math.min(forecastStops.length - 1, safeIndex + 6));
@@ -729,6 +750,7 @@ export default function OutlookMapPanel({
               stormReportsMode={mapStormReportsMode}
               stormReports={mapStormReports}
               spcDay1Override={effectiveSpcOverride}
+              zoomRegion={zoomRegion}
             />
           </div>
         ) : (
@@ -749,6 +771,7 @@ export default function OutlookMapPanel({
                     hazard="thunder"
                     title="Thunderstorm Outlook"
                     artifacts={effectiveArtifactState.artifacts}
+                    zoomRegion={zoomRegion}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
@@ -762,6 +785,7 @@ export default function OutlookMapPanel({
                     hazard="hail"
                     title="Hail Outlook"
                     artifacts={effectiveArtifactState.artifacts}
+                    zoomRegion={zoomRegion}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
@@ -775,6 +799,7 @@ export default function OutlookMapPanel({
                     hazard="wind"
                     title="Damaging Wind Outlook"
                     artifacts={effectiveArtifactState.artifacts}
+                    zoomRegion={zoomRegion}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
@@ -788,6 +813,7 @@ export default function OutlookMapPanel({
                     hazard="tornado"
                     title="Tornado Outlook"
                     artifacts={effectiveArtifactState.artifacts}
+                    zoomRegion={zoomRegion}
                     status={effectiveArtifactState.status}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
@@ -818,6 +844,7 @@ export default function OutlookMapPanel({
                   comparisonMode={spcComparisonMode}
                   spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
                   cigOverlayEnabled={viewType === 'merged'}
+                  zoomRegion={zoomRegion}
                 />
               )
             ) : useRuleHazardFallback ? (
@@ -828,6 +855,7 @@ export default function OutlookMapPanel({
                     hazard="thunder"
                     title="Thunderstorm Outlook"
                     sourceLabel="Rule fallback"
+                    zoomRegion={zoomRegion}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
@@ -837,6 +865,7 @@ export default function OutlookMapPanel({
                     hazard="hail"
                     title="Hail Outlook"
                     sourceLabel="Rule fallback"
+                    zoomRegion={zoomRegion}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
@@ -846,6 +875,7 @@ export default function OutlookMapPanel({
                     hazard="wind"
                     title="Damaging Wind Outlook"
                     sourceLabel="Rule fallback"
+                    zoomRegion={zoomRegion}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
@@ -855,6 +885,7 @@ export default function OutlookMapPanel({
                     hazard="tornado"
                     title="Tornado Outlook"
                     sourceLabel="Rule fallback"
+                    zoomRegion={zoomRegion}
                     activeRegion={activeRegion}
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
@@ -877,6 +908,7 @@ export default function OutlookMapPanel({
                   activeRegion={activeRegion}
                   stormReportsMode={mapStormReportsMode}
                   stormReports={mapStormReports}
+                  zoomRegion={zoomRegion}
                 />
               )
             ) : (
@@ -899,113 +931,100 @@ export default function OutlookMapPanel({
 
       {/* Unified Control Bar Row (Moved below the map) */}
       <div className="mt-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-2.5">
-          {/* Dropdown 1: Forecast Type */}
-          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-              Type
-            </label>
-            <select
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-3 p-3">
+          {/* Forecast type */}
+          <ControlField label="Type">
+            <SegmentedControl
+              ariaLabel="Forecast type"
               value={mode}
-              onChange={(e) => setMode(e.target.value as 'levels' | 'hazards')}
               disabled={isAnyExporting}
-              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
-            >
-              <option value="levels">Risk Levels</option>
-              <option value="hazards">Hazard Probs</option>
-            </select>
-          </div>
+              onChange={(value) => setMode(value)}
+              options={[
+                { value: 'levels', label: 'Risk Levels' },
+                { value: 'hazards', label: 'Hazard Probs' },
+              ]}
+            />
+          </ControlField>
 
-          {/* Dropdown: View Mode (Hourly vs Merged Outlook) */}
-          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-              View
-            </label>
-            <select
+          {/* View mode */}
+          <ControlField label="View">
+            <SegmentedControl
+              ariaLabel="View mode"
               value={viewType}
-              onChange={(e) => setViewType(e.target.value as 'hourly' | 'merged')}
               disabled={isAnyExporting}
-              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+              onChange={(value) => setViewType(value)}
+              options={[
+                { value: 'hourly', label: 'Hourly' },
+                { value: 'merged', label: 'Merged' },
+              ]}
+            />
+          </ControlField>
+
+          {/* Map zoom region */}
+          <ControlField label="Zoom Region" className="w-44">
+            <select
+              value={zoomRegion}
+              onChange={(e) => setZoomRegion(e.target.value as MapZoomRegion)}
+              disabled={isAnyExporting}
+              title="Choose which part of CONUS to zoom the map into"
+              className={CONTROL_SELECT_CLASS}
             >
-              <option value="hourly">Hourly Scrubber</option>
-              <option value="merged">Merged Outlook</option>
+              {MAP_ZOOM_REGION_ORDER.map((region) => (
+                <option key={region} value={region}>
+                  {MAP_ZOOM_REGIONS[region].label}
+                </option>
+              ))}
             </select>
-          </div>
+          </ControlField>
 
-          {/* Toggle: SPC backing for the hourly scrubber */}
+          <ControlDivider />
+
+          {/* SPC backing for the hourly scrubber */}
           {viewType === 'hourly' && (
-            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                SPC
-              </label>
-              <button
-                type="button"
-                onClick={() => setHourlySpcBacked((value) => !value)}
-                aria-pressed={hourlySpcBacked}
+            <ControlField label="SPC Backing" className="animate-fadeIn">
+              <SegmentedControl
+                ariaLabel="SPC backing"
+                value={hourlySpcBacked ? 'spc' : 'hrrr'}
                 disabled={isAnyExporting}
-                title={hourlySpcBacked
-                  ? 'SPC-backed: this hour is capped by the SPC Day 1/Day 2 envelope'
-                  : 'Show the raw HRRR/XGBoost hour (no SPC backing)'}
-                className={[
-                  'retro-button min-h-8 px-3 py-1.5 text-[11px] leading-none',
-                  isAnyExporting ? 'cursor-not-allowed opacity-50' : '',
-                  hourlySpcBacked
-                    ? 'bg-signal-amber text-ink translate-x-[2px] translate-y-[2px] shadow-[1px_1px_0_0_#111111] hover:bg-signal-amber hover:text-ink'
-                    : 'bg-paper text-ink hover:bg-signal-amber hover:text-ink',
-                ].join(' ')}
-              >
-                {hourlySpcBacked ? 'SPC-Backed' : 'HRRR Only'}
-              </button>
-            </div>
+                onChange={(value) => setHourlySpcBacked(value === 'spc')}
+                options={[
+                  { value: 'hrrr', label: 'HRRR Only', title: 'Show the raw HRRR/XGBoost hour (no SPC backing)' },
+                  { value: 'spc', label: 'SPC-Backed', title: 'SPC-backed: this hour is capped by the SPC Day 1/Day 2 envelope' },
+                ]}
+              />
+            </ControlField>
           )}
 
-          {/* Toggle: Outlook Day (D1 / D2) */}
+          {/* Outlook day (D1 / D2) */}
           {viewType === 'merged' && setMergedDay && (
-            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                Day
-              </label>
-              <div className="flex border-[2px] border-ink shadow-retro-sm">
-                {([1, 2] as const).map((day) => (
-                  <button
-                    key={day}
-                    type="button"
-                    onClick={() => {
-                      if (day === mergedDay) return;
-                      // Reset the date so the new day's available list picks its newest.
-                      setSelectedMergedDate('');
-                      setMergedDay(day);
-                    }}
-                    disabled={isAnyExporting}
-                    className={[
-                      'px-2 py-1 font-mono text-[11px] font-bold uppercase tracking-wider transition-colors outline-none',
-                      day === mergedDay
-                        ? 'bg-ink text-signal-lime'
-                        : 'bg-paper text-ink hover:bg-signal-amber',
-                      day === 1 ? 'border-r-[2px] border-ink' : '',
-                    ].join(' ')}
-                    title={day === 1
-                      ? 'Day 1 convective outlook (12Z–12Z today)'
-                      : 'Day 2 convective outlook (12Z tomorrow – 12Z next day, from the 12Z cycle F24–F48)'}
-                  >
-                    {`D${day}`}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <ControlField label="Outlook Day" className="animate-fadeIn">
+              <SegmentedControl
+                ariaLabel="Outlook day"
+                value={`d${mergedDay}` as 'd1' | 'd2'}
+                disabled={isAnyExporting}
+                onChange={(value) => {
+                  const day = value === 'd1' ? 1 : 2;
+                  if (day === mergedDay) return;
+                  // Reset the date so the new day's available list picks its newest.
+                  setSelectedMergedDate('');
+                  setMergedDay(day);
+                }}
+                options={[
+                  { value: 'd1', label: 'D1', title: 'Day 1 convective outlook (12Z–12Z today)' },
+                  { value: 'd2', label: 'D2', title: 'Day 2 convective outlook (12Z tomorrow – 12Z next day, from the 12Z cycle F24–F48)' },
+                ]}
+              />
+            </ControlField>
           )}
 
-          {/* Dropdown: Merged Date (Conditional) */}
+          {/* Anchor date (merged) */}
           {viewType === 'merged' && availableMergedDates.length > 0 && (
-            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                Date
-              </label>
+            <ControlField label="Anchor Date" className="w-36 animate-fadeIn">
               <select
                 value={selectedMergedDate}
                 onChange={(e) => setSelectedMergedDate(e.target.value)}
                 disabled={isAnyExporting}
-                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+                className={CONTROL_SELECT_CLASS}
               >
                 {availableMergedDates.map((dateStr) => {
                   const d = new Date(dateStr + 'T12:00:00Z');
@@ -1022,44 +1041,36 @@ export default function OutlookMapPanel({
                   );
                 })}
               </select>
-            </div>
+            </ControlField>
           )}
 
-          {/* Dropdown: Verified Reports (Conditional) */}
+          {/* Verified reports (merged) */}
           {viewType === 'merged' && setStormReportsMode && (
-            <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 animate-fadeIn md:flex-nowrap">
-              <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-                <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                  Reports
-                </label>
-                <select
-                  value={reportsPendingForSelectedDate ? 'none' : stormReportsMode}
-                  onChange={(e) => setStormReportsMode(e.target.value as StormReportsMode)}
-                  disabled={isAnyExporting || reportsPendingForSelectedDate}
-                  className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors disabled:cursor-not-allowed disabled:bg-paper-dark/30 disabled:text-ink/45"
-                >
-                  <option value="none">No Reports</option>
-                  <option value="all">All Reports</option>
-                  <option value="tornado">Tornadoes</option>
-                  <option value="hail">Hail</option>
-                  <option value="wind">Wind</option>
-                </select>
-              </div>
+            <ControlField label="Verified Reports" className="w-40 animate-fadeIn">
+              <select
+                value={reportsPendingForSelectedDate ? 'none' : stormReportsMode}
+                onChange={(e) => setStormReportsMode(e.target.value as StormReportsMode)}
+                disabled={isAnyExporting || reportsPendingForSelectedDate}
+                className={CONTROL_SELECT_CLASS}
+              >
+                <option value="none">No Reports</option>
+                <option value="all">All Reports</option>
+                <option value="tornado">Tornadoes</option>
+                <option value="hail">Hail</option>
+                <option value="wind">Wind</option>
+              </select>
               <span className={[
-                'basis-full truncate font-mono text-[9px] font-bold uppercase tracking-wider md:basis-auto md:max-w-[11rem]',
-                reportsPendingForSelectedDate ? 'text-signal-red' : 'text-ink/55',
+                'truncate font-mono text-[8px] font-bold uppercase tracking-wider',
+                reportsPendingForSelectedDate ? 'text-signal-red' : 'text-ink/45',
               ].join(' ')}>
                 {reportStatusLabel}
               </span>
-            </div>
+            </ControlField>
           )}
 
-          {/* Dropdown 2: Hazard View (Conditional) */}
+          {/* Hazard view (hazard mode) */}
           {mode === 'hazards' && (
-            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                Hazard
-              </label>
+            <ControlField label="Hazard" className="w-40 animate-fadeIn">
               <select
                 value={hazardLayout === 'all' ? 'all' : selectedHazard}
                 onChange={(e) => {
@@ -1072,7 +1083,7 @@ export default function OutlookMapPanel({
                   }
                 }}
                 disabled={isAnyExporting}
-                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+                className={CONTROL_SELECT_CLASS}
               >
                 <option value="all">All 4 Grid</option>
                 <option value="thunder">Thunderstorm</option>
@@ -1080,50 +1091,50 @@ export default function OutlookMapPanel({
                 <option value="wind">Damaging Wind</option>
                 <option value="tornado">Tornado</option>
               </select>
-            </div>
+            </ControlField>
           )}
 
           {(mode === 'levels' || (mode === 'hazards' && spcHazardProbabilityShapesOverride?.features?.length)) && (
-            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap animate-fadeIn" data-spc-comparison-control="true">
-              <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-                SPC Compare
-              </label>
+            <ControlField label="SPC Compare" className="w-44 animate-fadeIn" >
               <select
                 value={spcComparisonMode}
                 onChange={(e) => setSpcComparisonMode(e.target.value as SpcComparisonMode)}
                 disabled={isAnyExporting}
-                className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
+                data-spc-comparison-control="true"
+                className={CONTROL_SELECT_CLASS}
               >
                 <option value="auto">AutoOutlook Only</option>
                 <option value="spc">{viewType === 'merged' ? `SPC Day ${mergedDay} Only` : 'SPC Day 1 Only'}</option>
                 <option value="overlay">Overlay Compare</option>
               </select>
-            </div>
+            </ControlField>
           )}
 
-          {/* Dropdown 3: Exporter Options */}
-          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-            <label className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-ink/80">
-              Export
-            </label>
-            <select
-              value=""
-              onChange={(e) => {
-                const val = e.target.value;
-                if (val === 'png') {
-                  saveCurrentMap();
-                } else if (val === 'gif') {
-                  openGifDialog();
-                }
-                e.target.value = ""; // Reset
-              }}
-              disabled={!snapshot || isAnyExporting}
-              className="retro-select bg-paper border-[2px] border-ink px-2 py-1 font-mono text-[11px] font-bold text-ink uppercase tracking-wider shadow-retro-sm cursor-pointer outline-none hover:bg-signal-amber transition-colors"
-            >
-              <option value="" disabled hidden>Choose Export...</option>
-              <option value="png">Save PNG Image</option>
-              <option value="gif" disabled={forecastStops.length === 0}>Save GIF Animation</option>
-            </select>
+          {/* Export — pinned to the far right */}
+          <div className="ml-auto flex items-start gap-3">
+            <ControlDivider />
+            <ControlField label="Export" className="w-40">
+              <select
+                value=""
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'png') {
+                    saveCurrentMap();
+                  } else if (val === 'gif') {
+                    openGifDialog();
+                  }
+                  e.target.value = ""; // Reset
+                }}
+                disabled={!snapshot || isAnyExporting}
+                className={CONTROL_SELECT_CLASS}
+              >
+                <option value="" disabled hidden>Choose Export...</option>
+                <option value="png">Save PNG Image</option>
+                {viewType !== 'merged' && (
+                  <option value="gif" disabled={forecastStops.length === 0}>Save GIF Animation</option>
+                )}
+              </select>
+            </ControlField>
           </div>
         </div>
 
@@ -1145,22 +1156,29 @@ export default function OutlookMapPanel({
           </div>
         )}
         {gifDialogOpen && (
-          <div className="border-t-[3px] border-ink bg-paper p-3">
-            <div className="flex items-center justify-between border-b-[2px] border-ink pb-1.5 mb-3">
-              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
-                Animated GIF export · {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
+          <div className="border-t-[3px] border-ink bg-paper p-4">
+            <div className="mb-3 flex items-center justify-between border-b-[2px] border-ink pb-2">
+              <div className="flex items-center gap-2">
+                <span className="border-[2px] border-ink bg-ink px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-signal-lime">
+                  GIF
+                </span>
+                <span className="font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-ink/65">
+                  Animated Export · {mode === 'levels' ? 'Risk Levels' : 'Hazard Probabilities'}
+                </span>
               </div>
               <button
                 type="button"
                 onClick={() => setGifDialogOpen(false)}
+                aria-label="Close GIF export"
                 className="border-[2px] border-ink bg-paper hover:bg-signal-red hover:text-paper px-1.5 py-0.5 font-mono text-[9px] font-bold leading-none shadow-retro-sm transition-colors cursor-pointer select-none"
               >
                 ✕
               </button>
             </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Start valid
+
+            {/* Frame range */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <ControlField label="Start Frame (valid)">
                 <select
                   value={gifStartIndex}
                   onChange={(event) => {
@@ -1168,7 +1186,7 @@ export default function OutlookMapPanel({
                     setGifStartIndex(next);
                     setGifEndIndex((index) => Math.max(index, next));
                   }}
-                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                  className={CONTROL_SELECT_CLASS}
                 >
                   {forecastStops.map((stop, index) => (
                     <option key={`gif-start-${stop.forecastHour}-${stop.validTimeISO}`} value={index}>
@@ -1176,13 +1194,12 @@ export default function OutlookMapPanel({
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                End valid
+              </ControlField>
+              <ControlField label="End Frame (valid)">
                 <select
                   value={gifEndIndex}
                   onChange={(event) => setGifEndIndex(Number(event.target.value))}
-                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
+                  className={CONTROL_SELECT_CLASS}
                 >
                   {forecastStops.map((stop, index) => (
                     <option key={`gif-end-${stop.forecastHour}-${stop.validTimeISO}`} value={index} disabled={index < gifStartIndex}>
@@ -1190,47 +1207,67 @@ export default function OutlookMapPanel({
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Frame delay
-                <select
-                  value={gifDelayMs}
-                  onChange={(event) => setGifDelayMs(Number(event.target.value))}
-                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
-                >
-                  {GIF_DELAY_OPTIONS.map((delayMs) => (
-                    <option key={delayMs} value={delayMs}>{delayMs} ms</option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 font-mono text-[9px] font-bold uppercase tracking-widest text-ink/65">
-                Quality
-                <select
-                  value={gifQuality}
-                  onChange={(event) => setGifQuality(event.target.value as GifQualityPreset)}
-                  className="retro-select border-[2px] border-ink bg-paper px-2 py-1 font-mono text-[11px] font-bold text-ink cursor-pointer hover:bg-signal-amber transition-colors outline-none shadow-retro-sm"
-                >
-                  {(Object.keys(GIF_QUALITY_CONFIG) as GifQualityPreset[]).map((quality) => (
-                    <option key={quality} value={quality}>{GIF_QUALITY_CONFIG[quality].label}</option>
-                  ))}
-                </select>
-              </label>
+              </ControlField>
             </div>
-            <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setGifDialogOpen(false)}
-                className="retro-button bg-paper px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-paper"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={saveCurrentMapAsGif}
-                className="retro-button bg-signal-amber px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-signal-amber"
-              >
-                Generate GIF
-              </button>
+
+            {/* Playback + quality as segmented switches */}
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <ControlField label="Frame Delay">
+                <SegmentedControl
+                  ariaLabel="Frame delay"
+                  fill
+                  value={String(gifDelayMs)}
+                  onChange={(value) => setGifDelayMs(Number(value))}
+                  options={GIF_DELAY_OPTIONS.map((delayMs) => ({
+                    value: String(delayMs),
+                    label: `${delayMs}`,
+                    title: `${delayMs} ms between frames`,
+                  }))}
+                />
+              </ControlField>
+              <ControlField label="Quality / File Size">
+                <SegmentedControl
+                  ariaLabel="Quality"
+                  fill
+                  value={gifQuality}
+                  onChange={(value) => setGifQuality(value)}
+                  options={(Object.keys(GIF_QUALITY_CONFIG) as GifQualityPreset[]).map((quality) => ({
+                    value: quality,
+                    label: GIF_QUALITY_CONFIG[quality].label,
+                  }))}
+                />
+              </ControlField>
+            </div>
+
+            {/* Live summary + actions on one row */}
+            <div className="mt-3 flex flex-wrap items-stretch gap-3">
+              <div className="flex flex-1 flex-wrap items-center gap-x-5 gap-y-1 border-[2px] border-ink bg-paper-dark/20 px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-wider text-ink/70">
+                <span>Frames <span className="text-ink">{gifFrameCount}</span></span>
+                <span>Loop <span className="text-ink">{gifLoopSeconds.toFixed(1)}s</span></span>
+                <span className="hidden sm:inline">Delay <span className="text-ink">{gifDelayMs}ms</span></span>
+                {gifStartStop && gifEndStop && (
+                  <span className="ml-auto normal-case tracking-normal text-ink/55">
+                    F{String(gifStartStop.forecastHour).padStart(3, '0')} → F{String(gifEndStop.forecastHour).padStart(3, '0')}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setGifDialogOpen(false)}
+                  className="retro-button bg-paper px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-paper"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveCurrentMapAsGif}
+                  disabled={gifFrameCount === 0}
+                  className="retro-button bg-signal-amber px-3 py-1.5 text-[12px] leading-none text-ink hover:bg-signal-amber disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Generate GIF · {gifFrameCount} {gifFrameCount === 1 ? 'frame' : 'frames'}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1339,3 +1376,80 @@ function SubModeButton({
   );
 }
 
+
+// A labeled control cell: a tiny uppercase caption stacked above its control.
+function ControlField({
+  label,
+  children,
+  className = '',
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={['flex min-w-0 flex-col gap-1', className].join(' ')}>
+      <span className="font-mono text-[8px] font-bold uppercase leading-none tracking-[0.22em] text-ink/45 whitespace-nowrap">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+// Thin vertical rule used to separate clusters of controls (hidden once wrapped).
+function ControlDivider() {
+  return <span aria-hidden className="mt-[13px] hidden h-8 w-px self-start bg-ink/15 xl:block" />;
+}
+
+// A retro segmented switch — replaces binary dropdowns with a cleaner toggle.
+function SegmentedControl<T extends string>({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  ariaLabel,
+  fill = false,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string; title?: string }>;
+  onChange: (value: T) => void;
+  disabled?: boolean;
+  ariaLabel?: string;
+  fill?: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className={[
+        'flex h-8 border-[2px] border-ink shadow-retro-sm',
+        fill ? 'w-full' : 'w-fit',
+        disabled ? 'opacity-50' : '',
+      ].join(' ')}
+    >
+      {options.map((opt, index) => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            title={opt.title}
+            aria-pressed={active}
+            disabled={disabled}
+            onClick={() => onChange(opt.value)}
+            className={[
+              'whitespace-nowrap px-3 font-mono text-[11px] font-bold uppercase tracking-wider outline-none transition-colors',
+              fill ? 'flex-1' : '',
+              disabled ? 'cursor-not-allowed' : 'cursor-pointer',
+              active ? 'bg-ink text-signal-lime' : 'bg-paper text-ink hover:bg-signal-amber',
+              index > 0 ? 'border-l-[2px] border-ink' : '',
+            ].join(' ')}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}

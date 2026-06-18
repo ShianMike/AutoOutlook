@@ -15,6 +15,7 @@ import { map500mbLines } from '../utils/upperAirLines';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
 import { buildHazards } from '../utils/hazardEngine';
 import { displayOutlookAreas } from '../utils/outlookAreaMotion';
+import { zoomRegionProjectionConfig, type MapZoomRegion } from '../utils/mapZoomRegions';
 
 const STATES_URL = '/us-states-10m.json';
 
@@ -26,6 +27,7 @@ interface HazardOutlookMapProps {
   activeRegion?: ActiveRegion;
   stormReportsMode?: 'none' | 'all' | 'tornado' | 'hail' | 'wind';
   stormReports?: SpcStormReport[];
+  zoomRegion?: MapZoomRegion;
 }
 
 interface UpperAirFeature {
@@ -67,16 +69,12 @@ export default function HazardOutlookMap({
   activeRegion = 'conus',
   stormReportsMode = 'none',
   stormReports = [],
+  zoomRegion = 'conus',
 }: HazardOutlookMapProps) {
   void activeRegion;
   const geoUrl = STATES_URL;
   const projection = 'geoAlbers';
-  const projectionConfig = {
-    rotate: [96, 0, 0] as [number, number, number],
-    center: [0, 38] as [number, number],
-    parallels: [29.5, 45.5] as [number, number],
-    scale: 1000,
-  };
+  const projectionConfig = zoomRegionProjectionConfig(zoomRegion);
 
   const cfg = getHazardConfig(hazard);
   const contourHour = snapshot?.forecastHour ?? 0;
@@ -243,7 +241,7 @@ export default function HazardOutlookMap({
           <span>PEAK {peakPct}</span>
         </div>
       </header>
-      <div className="outlook-export-map-frame aspect-[16/9] xl:aspect-[2/1] relative overflow-hidden bg-[#fbfbf8]">
+      <div className="outlook-export-map-frame aspect-[3/2] xl:aspect-[16/9] relative overflow-hidden bg-[#fbfbf8]">
         <ComposableMap
           // NB: we use plain `geoAlbers` (not `geoAlbersUsa`) because the
           // composite projection prepends a full-canvas clip rectangle to
