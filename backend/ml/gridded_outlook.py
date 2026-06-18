@@ -1489,6 +1489,211 @@ def _spc_cig_categories_enabled() -> bool:
     return os.environ.get(SPC_CIG_CATEGORY_FEATURE_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# ── Convective setup summary (storm modes + regional regimes) ────────
+# Plain-language labels for the internal storm-mode classifier and the
+# geography-bound regional regime detectors. These power the merged-outlook
+# forecast discussion's "why this risk" narrative. Detection here runs
+# independently of AUTOOUTLOOK_REGIONAL_REGIMES: describing the convective
+# setup is intentionally decoupled from whether the regime multipliers nudge
+# the hazard probabilities.
+CONVECTIVE_SETUP_STORM_MODE_LABELS: dict[str, str] = {
+    "discrete_supercell": "discrete supercells",
+    "mixed_mode": "mixed storm modes",
+    "qlcs": "a QLCS / line of storms",
+    "mcs": "an organized MCS",
+    "pulse": "pulse / multicell storms",
+    "elevated": "elevated convection",
+    "high_based": "high-based storms",
+    "landspout": "non-supercell (landspout) tornado potential",
+    "tropical": "tropical mini-supercells",
+    "cold_core": "cold-core convection",
+}
+
+CONVECTIVE_SETUP_REGIME_LABELS: dict[str, str] = {
+    # Plains
+    "dryline": "a dryline",
+    "triple_point": "a triple point",
+    "warm_front": "a warm front",
+    "conditional_discrete": "conditional discrete supercells",
+    "linear_forcing": "linear / cold-front forcing",
+    "eml_cap_regime": "an EML capping inversion",
+    "large_hail_setup": "a large-hail supercell setup",
+    # Dixie Alley / Southeast
+    "hslc": "a high-shear / low-CAPE (HSLC) setup",
+    "warm_sector_discrete": "warm-sector discrete supercells ahead of a QLCS",
+    "embedded_qlcs": "embedded QLCS rotation",
+    "sea_breeze_pulse": "sea-breeze pulse storms",
+    "sea_breeze_supercell": "sea-breeze supercells",
+    # Northern Plains / Midwest / High Plains
+    "midwest_stabilized": "prior-convection stabilization",
+    "midwest_boundary_enhanced": "boundary-enhanced low-level rotation",
+    "high_plains_high_based": "high-based High Plains storms",
+    "steep_lapse_rate_landspout": "steep-lapse-rate landspout potential",
+    "northern_elevated_hail": "elevated hail-producing storms",
+    "northern_nocturnal_mcs": "a nocturnal MCS wind threat",
+    # Northeast / West / Desert Southwest
+    "ne_low_cape_high_shear": "a low-CAPE / high-shear setup",
+    "ne_cad_stable": "a cold-air-damming stable wedge",
+    "ne_wedge_front": "a wedge-front boundary",
+    "dsw_dry_microburst": "dry microburst / outflow potential",
+    "dsw_monsoon_suppressed": "moisture-rich but weakly-sheared monsoon storms",
+    "pnw_cold_core": "cold-core low-topped convection",
+}
+
+_CONVECTIVE_SETUP_RISK_FLOOR = SPC_RISK_LABELS.index("MRGL")
+
+
+def summarize_convective_setup(
+    features: GriddedFeatures,
+    lats: np.ndarray | None,
+    lons: np.ndarray | None,
+    category_grid: np.ndarray,
+    *,
+    min_coverage: float = 0.04,
+    risk_floor_ordinal: int = _CONVECTIVE_SETUP_RISK_FLOOR,
+) -> dict[str, Any]:
+    """Diagnose dominant storm modes and regional regimes over the risk area.
+
+    Runs the storm-mode classifier and the geography-bound regime detectors
+    regardless of ``AUTOOUTLOOK_REGIONAL_REGIMES`` so the merged forecast
+    discussion can describe the convective setup even when the regime
+    multipliers are not applied to the hazard probabilities.
+
+    "Coverage" for each mode/regime is the fraction of risk-area cells (category
+    ``>= risk_floor_ordinal``, default MRGL) in which the detector mask is
+    active. Entries below ``min_coverage`` are dropped and the rest are returned
+    ranked by coverage. Returns a well-formed empty summary when there is no
+    qualifying risk area or no coordinates.
+    """
+    shape = features.shape
+    category = np.asarray(category_grid, dtype=np.int16).reshape(shape)
+    risk_mask = category >= int(risk_floor_ordinal)
+    risk_cells = int(np.count_nonzero(risk_mask))
+    summary: dict[str, Any] = {
+        "stormModes": [],
+        "regimes": [],
+        "riskCells": risk_cells,
+        "riskFloor": SPC_RISK_LABELS[int(risk_floor_ordinal)],
+    }
+    if risk_cells == 0 or lats is None or lons is None:
+        return summary
+
+    lat_grid, lon_grid = _lat_lon_grid(lats, lons, shape)
+    raw = features.raw
+
+    modes = _classify_storm_modes(
+        sbcape=raw["sbcape"],
+        mucape=raw["mucape"],
+        mlcape=raw["mlcape"],
+        cin=raw["cin"],
+        dewpoint=raw["sfcDewpointF"],
+        lcl=raw["lclM"],
+        srh01=raw["srh01"],
+        srh03=raw["srh03"],
+        shear=raw["shear06Kt"],
+        storm_rel=raw["stormRelWindKt"],
+        hgt500=raw["hgt500"],
+        pwat=raw["pwatIn"],
+    )
+    plains = _detect_plains_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=raw["sbcape"],
+        mucape=raw["mucape"],
+        mlcape=raw["mlcape"],
+        cin=raw["cin"],
+        dewpoint=raw["sfcDewpointF"],
+        t2m_f=raw["sfcTempF"],
+        u10=raw["u10"],
+        v10=raw["v10"],
+        srh01=raw["srh01"],
+        srh03=raw["srh03"],
+        shear=raw["shear06Kt"],
+    )
+    dixie_se = _detect_dixie_se_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=raw["sbcape"],
+        mucape=raw["mucape"],
+        mlcape=raw["mlcape"],
+        cin=raw["cin"],
+        dewpoint=raw["sfcDewpointF"],
+        t2m_f=raw["sfcTempF"],
+        u10=raw["u10"],
+        v10=raw["v10"],
+        srh01=raw["srh01"],
+        srh03=raw["srh03"],
+        shear=raw["shear06Kt"],
+        storm_modes=modes,
+    )
+    northern = _detect_northern_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=raw["sbcape"],
+        mucape=raw["mucape"],
+        mlcape=raw["mlcape"],
+        cin=raw["cin"],
+        dewpoint=raw["sfcDewpointF"],
+        lcl=raw["lclM"],
+        t2m_f=raw["sfcTempF"],
+        pwat=raw["pwatIn"],
+        u10=raw["u10"],
+        srh01=raw["srh01"],
+        srh03=raw["srh03"],
+        shear=raw["shear06Kt"],
+        storm_modes=modes,
+        forecast_hour=raw["forecastHour"],
+    )
+    new_regions = _detect_northeast_west_southwest_regimes(
+        lats=lat_grid,
+        lons=lon_grid,
+        sbcape=raw["sbcape"],
+        mucape=raw["mucape"],
+        mlcape=raw["mlcape"],
+        cin=raw["cin"],
+        dewpoint=raw["sfcDewpointF"],
+        lcl=raw["lclM"],
+        t2m_f=raw["sfcTempF"],
+        pwat=raw["pwatIn"],
+        u10=raw["u10"],
+        v10=raw["v10"],
+        srh01=raw["srh01"],
+        srh03=raw["srh03"],
+        shear=raw["shear06Kt"],
+        hgt500=raw["hgt500"],
+        storm_modes=modes,
+    )
+
+    regime_masks: dict[str, np.ndarray] = {}
+    for group in (plains, dixie_se, northern, new_regions):
+        for key, mask in group.items():
+            if key in CONVECTIVE_SETUP_REGIME_LABELS:
+                regime_masks[key] = mask
+
+    def _rank(masks: Mapping[str, np.ndarray], labels: Mapping[str, str]) -> list[dict[str, Any]]:
+        ranked: list[dict[str, Any]] = []
+        for key, mask in masks.items():
+            arr = np.asarray(mask, dtype=bool).reshape(shape)
+            active = int(np.count_nonzero(arr & risk_mask))
+            if active == 0:
+                continue
+            coverage = active / risk_cells
+            if coverage < min_coverage:
+                continue
+            ranked.append({
+                "key": key,
+                "label": labels[key],
+                "coverage": round(float(coverage), 4),
+                "cells": active,
+            })
+        ranked.sort(key=lambda item: item["coverage"], reverse=True)
+        return ranked
+
+    summary["stormModes"] = _rank(modes, CONVECTIVE_SETUP_STORM_MODE_LABELS)
+    summary["regimes"] = _rank(regime_masks, CONVECTIVE_SETUP_REGIME_LABELS)
+    return summary
+
+
 def _regional_regime_logic_enabled() -> bool:
     """Whether geography-bound regional regime heuristics modulate the outlook.
 

@@ -89,15 +89,21 @@ const RELEASES: VersionRelease[] = [
     date: '2026-06-18',
     status: 'CURRENT',
     summary:
-      'This patch redesigns the outlook map control deck, adds a CONUS region zoom selector, gives the map panels more height with a slightly tighter default framing, and reworks the animated GIF export dialog. The GIF export is now restricted to the hourly scrubber, since a multi-cycle merged outlook has no hourly sequence to animate.',
+      'This patch redesigns the outlook map control deck, adds a CONUS region zoom selector, gives the map panels more height with a slightly tighter default framing, and reworks the animated GIF export dialog. The GIF export is now restricted to the hourly scrubber, since a multi-cycle merged outlook has no hourly sequence to animate. It also adds a convective-setup ("why this risk") narrative to the merged Forecast Discussion, diagnosed from the HRRR ingredient fields.',
     highlights: [
       'Region zoom selector: A new Zoom Region control recenters and zooms the maps into CONUS or one of eight regional presets (Northeast, Southeast, Midwest / Ohio Valley, Southern Plains, Northern Plains, Southwest, Northwest, California / West). The choice applies to the categorical, hazard, and rule-fallback maps and carries through to PNG and GIF export.',
       'Redesigned control deck: The flat row of look-alike dropdowns is reorganized into labeled fields with mini captions, with binary choices (Type, View, Outlook Day, SPC backing) converted to segmented toggles, dividers between clusters, and Export pinned to the right.',
       'Taller map panels with a closer view: Each map panel is taller (3:2, widening to 16:9) and the default projection is zoomed in slightly so the focus region fills more of the frame. The fixed export canvas was raised to match.',
       'Reworked GIF export dialog: A live summary shows frame count, loop duration, delay, and the F-hour range; Frame Delay and Quality are now full-width segmented switches; and the primary button reflects the frame count.',
       'GIF export hidden in Merged Outlook: GIF animation only applies to the hourly scrubber, so the option is removed from the Export menu in merged mode and the dialog closes automatically if the view is switched while open.',
+      'Merged convective-setup narrative: The merged Forecast Discussion gains a CONVECTIVE SETUP section that names the dominant storm modes (discrete supercells, QLCS, MCS, pulse, elevated, high-based, landspout, and more) and the mesoscale regimes focusing them (dryline, triple point, warm front, HSLC, EML cap, sea-breeze, CAD wedge, and others), diagnosed from the HRRR ingredient fields across the contributing cycles. Its closing hazard emphasis is gated by the same per-hazard probabilities the Hazard Probability Board shows, so it never overstates the threat.',
     ],
     changes: [
+      {
+        kind: 'NEW',
+        title: 'Merged convective-setup discussion ("why this risk")',
+        body: 'The gridded outlook now diagnoses the dominant storm modes and geography-bound mesoscale regimes over the risk area for every forecast hour — independent of the regional-regime probability multipliers, which stay off by default — and the merged outlook aggregates them across the contributing cycles by risk-area coverage. The merged Forecast Discussion adds a CONVECTIVE SETUP section that leads with the dominant storm mode and its coverage, summarizes secondary modes and the focusing regimes (dryline, triple point, warm front, HSLC, EML cap, sea-breeze, CAD wedge, dry microburst, and others), and closes with a probability-gated hazard emphasis kept consistent with the Hazard Probability Board so it cannot overstate the threat.',
+      },
       {
         kind: 'NEW',
         title: 'CONUS region zoom selector',

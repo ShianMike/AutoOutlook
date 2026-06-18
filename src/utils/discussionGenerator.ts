@@ -594,7 +594,279 @@ function mergedSynopsis(snap: HourSnapshot): string {
   return `...SYNOPSIS...\n${parts.join(' ')}`;
 }
 
-function mergedTechnicalDiscussion(snap: HourSnapshot): string {
+interface SetupPhrase {
+  noun: string;
+  clause: string;
+}
+
+// Storm-mode phrasing keyed by the stable mask key emitted by the backend
+// (gridded_outlook.summarize_convective_setup). Keying off `key` rather than
+// the artifact's `label` lets the discussion wording evolve without
+// regenerating artifacts.
+const SETUP_MODE_PHRASES: Record<string, SetupPhrase> = {
+  discrete_supercell: {
+    noun: 'discrete supercells',
+    clause: 'favored where strong deep-layer shear overlaps ample buoyancy, keeping updrafts rotating and well separated — the storm mode most capable of producing significant tornadoes and very large hail',
+  },
+  mixed_mode: {
+    noun: 'a mix of supercells and storm clusters',
+    clause: 'as intermediate shear and instability let some cells remain discrete while others congeal, spreading the threat across hail, damaging wind, and isolated tornadoes',
+  },
+  qlcs: {
+    noun: 'a quasi-linear convective system (a squall line)',
+    clause: 'where storms organize into a forward-moving line under strong low-level shear, favoring a broad damaging-wind threat with brief, fast spin-up tornadoes along the leading edge',
+  },
+  mcs: {
+    noun: 'an organized mesoscale convective system',
+    clause: 'sustained by deep moisture and a steady shear-and-helicity profile, capable of maintaining a long-lived complex with a corridor of damaging wind and locally heavy rainfall',
+  },
+  pulse: {
+    noun: 'pulse and multicell storms',
+    clause: 'in a high-instability, weak-shear regime where individual cells are short lived, so the threat is dominated by brief downburst winds and marginally severe hail',
+  },
+  elevated: {
+    noun: 'elevated convection',
+    clause: 'rooted above a stable surface layer, which limits the tornado threat but can still loft large hail from strong updrafts feeding on instability aloft',
+  },
+  high_based: {
+    noun: 'high-based storms',
+    clause: 'with cloud bases well off the ground and a deep sub-cloud layer, favoring strong, dry-air-driven outflow winds while keeping the tornado threat low',
+  },
+  landspout: {
+    noun: 'non-supercell (landspout) tornadoes',
+    clause: 'spun up from boundary-anchored vertical vorticity beneath rapidly developing updrafts in a weakly sheared but strongly unstable, low-cloud-base environment',
+  },
+  tropical: {
+    noun: 'tropical mini-supercells',
+    clause: 'small, fast-rotating cells within a very moist, modest-CAPE but strongly sheared tropical air mass that can produce brief tornadoes and gusty winds',
+  },
+  cold_core: {
+    noun: 'cold-core, low-topped convection',
+    clause: 'beneath an upper-level low where steep low-level lapse rates and low cloud bases support small but efficiently rotating storms capable of brief tornadoes',
+  },
+};
+
+// Regional-regime / focusing-mechanism phrasing keyed by backend mask key.
+const SETUP_REGIME_PHRASES: Record<string, SetupPhrase> = {
+  dryline: {
+    noun: 'a dryline',
+    clause: 'whose sharp moisture gradient acts as a focusing boundary for afternoon initiation, with the most intense, discrete development favored along and just east of the line',
+  },
+  triple_point: {
+    noun: 'a surface triple point',
+    clause: 'where the dryline and a warm front intersect to locally maximize low-level convergence and storm-relative helicity, often the focus for the highest tornado potential',
+  },
+  warm_front: {
+    noun: 'a warm front',
+    clause: 'along which backed surface winds and enhanced low-level shear raise the conditional tornado threat for storms that can root in the warm, moist inflow',
+  },
+  conditional_discrete: {
+    noun: 'a conditional discrete-supercell setup',
+    clause: 'where a capping inversion may hold initiation in check, but any storm that breaks the cap can quickly mature into a long-lived, high-impact supercell',
+  },
+  linear_forcing: {
+    noun: 'strong linear forcing along a cold front',
+    clause: 'which tends to organize storms into a line and shift the dominant hazard toward damaging wind, with embedded rotation still possible',
+  },
+  eml_cap_regime: {
+    noun: 'an elevated mixed layer (EML) capping inversion',
+    clause: 'where steep mid-level lapse rates beneath warm capping air both suppress widespread initiation and, where storms do erupt, support explosive updrafts and very large hail',
+  },
+  large_hail_setup: {
+    noun: 'a large-hail parameter space',
+    clause: 'in which the combination of extreme instability and strong deep-layer shear maximizes hailstone growth within long-lived updrafts',
+  },
+  hslc: {
+    noun: 'a high-shear, low-CAPE (HSLC) regime',
+    clause: 'where limited instability is offset by strong shear and helicity — a notoriously high-impact, hard-to-warn pattern for fast tornadoes and wind, particularly in the cool season and overnight',
+  },
+  warm_sector_discrete: {
+    noun: 'warm-sector discrete cells ahead of the line',
+    clause: 'open warm-sector storms with rich moisture and strong turning winds that carry the most concentrated tornado threat before the main line arrives',
+  },
+  embedded_qlcs: {
+    noun: 'embedded circulations within the line',
+    clause: 'where strong low-level shear supports brief, fast-moving spin-up tornadoes amid the broader damaging-wind threat',
+  },
+  sea_breeze_pulse: {
+    noun: 'sea-breeze and outflow-boundary pulse storms',
+    clause: 'boundary-focused but weakly sheared, so the threat is mainly brief downburst winds, frequent lightning, and locally heavy rain',
+  },
+  sea_breeze_supercell: {
+    noun: 'sea-breeze boundary supercells',
+    clause: 'where active boundaries beneath stronger background shear can organize a few rotating cells with hail and an isolated tornado threat',
+  },
+  midwest_stabilized: {
+    noun: 'an air mass worked over by earlier convection',
+    clause: 'where lingering stabilization and cloud debris cut surface-based instability, lowering the tornado threat unless the boundary layer recovers',
+  },
+  midwest_boundary_enhanced: {
+    noun: 'a boundary-enhanced low-level shear corridor',
+    clause: 'where an outflow or warm-frontal boundary locally backs the winds and boosts helicity, raising the tornado potential for storms that interact with it',
+  },
+  high_plains_high_based: {
+    noun: 'high-based High Plains storms',
+    clause: 'where very high cloud bases and a deep, dry sub-cloud layer favor strong outflow winds and hail over a meaningful tornado threat',
+  },
+  steep_lapse_rate_landspout: {
+    noun: 'a steep-lapse-rate landspout environment',
+    clause: 'where strong surface heating and boundary convergence under weak shear can spin up non-supercell tornadoes beneath developing updrafts',
+  },
+  northern_elevated_hail: {
+    noun: 'elevated, hail-producing storms',
+    clause: 'feeding on instability above a stable surface layer within strong deep-layer shear, favoring large hail',
+  },
+  northern_nocturnal_mcs: {
+    noun: 'a nocturnal mesoscale convective system',
+    clause: 'an after-dark complex sustained by a strengthening low-level jet, carrying a corridor of damaging wind and heavy rain',
+  },
+  ne_low_cape_high_shear: {
+    noun: 'a low-CAPE, high-shear Northeast regime',
+    clause: 'where marginal instability paired with strong shear supports fast, organized cells with a brief tornado and damaging-wind threat',
+  },
+  ne_cad_stable: {
+    noun: 'a cold-air-damming (CAD) stable wedge',
+    clause: 'where a shallow, cool, stable surface layer suppresses surface-based storms and tilts any severe threat toward elevated hail',
+  },
+  ne_wedge_front: {
+    noun: 'a wedge-front boundary',
+    clause: 'where the leading edge of the damming wedge sharpens low-level shear and can locally focus stronger, rotating storms where surface-based inflow survives',
+  },
+  dsw_dry_microburst: {
+    noun: 'a dry-microburst environment',
+    clause: 'where very high cloud bases over a deep dry layer favor strong, localized downburst winds and blowing dust with little tornado threat',
+  },
+  dsw_monsoon_suppressed: {
+    noun: 'a moisture-laden but weakly sheared monsoon pattern',
+    clause: 'where deep tropical moisture supports heavy rain and flash-flooding concerns, but weak flow keeps organized severe storms limited',
+  },
+  pnw_cold_core: {
+    noun: 'cold-core, low-topped convection beneath an upper low',
+    clause: 'where small, efficiently rotating storms in a cool, low-cloud-base environment can produce brief tornadoes and small hail',
+  },
+};
+
+// Hazard tendencies per storm mode are described inline in the mode clauses
+// above. The closing hazard-implication sentence is driven by the resolved
+// hazard probabilities (see mergedConvectiveSetup) so it stays consistent with
+// the Hazard Probability Board rather than overstating mode-implied threats.
+
+function setupProminence(coverage: number): string {
+  if (coverage >= 0.6) return 'the dominant convective mode';
+  if (coverage >= 0.35) return 'the primary convective mode';
+  if (coverage >= 0.15) return 'a prominent secondary mode';
+  return 'a localized but notable mode';
+}
+
+function setupCoverageQualifier(coverage: number): string {
+  if (coverage >= 0.6) return 'across most of the risk area';
+  if (coverage >= 0.35) return 'across a large part of the risk area';
+  if (coverage >= 0.15) return 'across portions of the risk area';
+  return 'in localized parts of the risk area';
+}
+
+// Probability-gated hazard phrasing so the closing sentence matches the
+// resolved Hazard Probability Board values instead of overstating
+// mode-implied threats. `sig` marks a significant-severe (10%+) signal.
+function setupHazardPhrase(hazard: HazardKey, probability: number, sig: boolean): string {
+  if (hazard === 'tornado') {
+    if (sig) return 'a tornado threat that includes the potential for strong (EF2+) tornadoes';
+    if (probability >= 0.05) return 'a risk for a few organized tornadoes';
+    return 'a threat for brief, generally weak tornadoes';
+  }
+  if (hazard === 'hail') {
+    if (sig) return 'very large, significant hail';
+    if (probability >= 0.15) return 'large, severe hail';
+    return 'isolated severe hail';
+  }
+  if (hazard === 'wind') {
+    if (sig) return 'a widespread and locally significant damaging-wind threat';
+    if (probability >= 0.15) return 'damaging straight-line winds';
+    return 'localized damaging wind gusts';
+  }
+  // flood
+  if (probability >= 0.15) return 'locally heavy rainfall with flash-flooding potential';
+  return 'isolated heavy rainfall';
+}
+
+function mergedConvectiveSetup(snap: HourSnapshot, ctx: DiscussionContext): string {
+  const setup = ctx.artifacts?.probabilityTiles?.hours?.[0]?.tile?.convectiveSetup;
+  if (!setup) return '';
+  const modes = (setup.stormModes ?? []).filter((e) => e.coverage >= 0.05).slice(0, 4);
+  const regimes = (setup.regimes ?? []).filter((e) => e.coverage >= 0.05).slice(0, 4);
+  if (modes.length === 0 && regimes.length === 0) return '';
+
+  const sentences: string[] = [];
+
+  if (modes.length > 0) {
+    const lead = modes[0];
+    const leadPhrase = SETUP_MODE_PHRASES[lead.key];
+    const leadNoun = leadPhrase?.noun ?? lead.label;
+    const leadPct = r(lead.coverage * 100);
+    sentences.push(
+      `Ingredient-based storm-mode diagnosis aggregated across the contributing model cycles identifies ${leadNoun} as ${setupProminence(lead.coverage)} ${setupCoverageQualifier(lead.coverage)} (active over roughly ${leadPct}% of the risk-area grid cells)${leadPhrase?.clause ? `, ${leadPhrase.clause}` : ''}.`,
+    );
+
+    const secondary = modes.slice(1);
+    if (secondary.length > 0) {
+      const secondaryClauses = secondary.map((m) => {
+        const phrase = SETUP_MODE_PHRASES[m.key];
+        const noun = phrase?.noun ?? m.label;
+        const pct = r(m.coverage * 100);
+        return `${noun} (about ${pct}% of cells${phrase?.clause ? `; ${phrase.clause}` : ''})`;
+      });
+      sentences.push(`Secondary contributions come from ${secondaryClauses.join('; ')}.`);
+    }
+  }
+
+  if (regimes.length > 0) {
+    const leadRegime = regimes[0];
+    const leadRegimePhrase = SETUP_REGIME_PHRASES[leadRegime.key];
+    const leadRegimeNoun = leadRegimePhrase?.noun ?? leadRegime.label;
+    sentences.push(
+      `The primary mesoscale focus over the period is ${leadRegimeNoun}${leadRegimePhrase?.clause ? `, ${leadRegimePhrase.clause}` : ''}.`,
+    );
+    const otherRegimes = regimes.slice(1);
+    if (otherRegimes.length > 0) {
+      const otherRegimeClauses = otherRegimes.map((rg) => {
+        const phrase = SETUP_REGIME_PHRASES[rg.key];
+        const noun = phrase?.noun ?? rg.label;
+        return `${noun}${phrase?.clause ? ` (${phrase.clause})` : ''}`;
+      });
+      sentences.push(`Additional focusing mechanisms in play include ${otherRegimeClauses.join('; ')}.`);
+    }
+  }
+
+  const hazardPhrases: string[] = [];
+  const hazardKeys: HazardKey[] = ['tornado', 'hail', 'wind', 'flood'];
+  for (const k of hazardKeys) {
+    const resolved = resolveHazardEstimate(k, snap, ctx.artifacts, ctx.artifactStatus);
+    if (resolved.artifactUnavailable) continue;
+    const probability = resolved.probability;
+    const minShow = k === 'tornado' ? 0.02 : 0.05;
+    if (!Number.isFinite(probability) || probability < minShow) continue;
+    const sig = resolved.isArtifact
+      ? (k !== 'flood' && probability >= 0.10)
+      : Boolean(snap.hazards[k]?.significantSevere);
+    hazardPhrases.push(setupHazardPhrase(k, probability, sig));
+  }
+  if (hazardPhrases.length > 0) {
+    const joined = hazardPhrases.length > 1
+      ? `${hazardPhrases.slice(0, -1).join(', ')}, and ${hazardPhrases[hazardPhrases.length - 1]}`
+      : hazardPhrases[0];
+    sentences.push(
+      `Consistent with these storm-scale and mesoscale signals, the resulting hazard emphasis is on ${joined} where storms are able to realize their potential; the realized mix will still hinge on how cleanly storms initiate, whether they remain discrete or congeal into clusters and lines, and how long the favorable environment persists.`,
+    );
+  }
+
+  sentences.push(
+    'These setup signals are diagnosed automatically from the HRRR ingredient fields aggregated over the contributing model cycles; they characterize the favored convective pattern and its hazard tendencies and are intended to add meteorological context, not to replace an official storm-mode or storm-scale forecast.',
+  );
+
+  return `...CONVECTIVE SETUP...\n${sentences.join(' ')}`;
+}
+
+function mergedTechnicalDiscussion(snap: HourSnapshot, ctx: DiscussionContext): string {
   const ing = snap.ingredients;
   const parts: string[] = [];
 
@@ -629,7 +901,15 @@ function mergedTechnicalDiscussion(snap: HourSnapshot): string {
     parts.push('Little capping is in place, so storms should initiate readily where moisture is sufficient.');
   }
 
-  parts.push(stormModeDiscussion(ing.stormMode, ing, snap));
+  // Storm-mode evolution. When the merged artifact carries diagnosed storm
+  // modes (rendered in the dedicated CONVECTIVE SETUP section), skip the
+  // coarse rule-engine storm-mode line to avoid a contradictory description.
+  const hasDiagnosedModes = Boolean(
+    ctx.artifacts?.probabilityTiles?.hours?.[0]?.tile?.convectiveSetup?.stormModes?.length,
+  );
+  if (!hasDiagnosedModes) {
+    parts.push(stormModeDiscussion(ing.stormMode, ing, snap));
+  }
   parts.push(hazardScenario(snap));
 
   return `...DISCUSSION...\n${parts.join(' ')}`;
@@ -682,7 +962,8 @@ export function generateDiscussion(
     const mergedSections = [
       mergedSummaryLine(snap, ctx),
       mergedSynopsis(snap),
-      mergedTechnicalDiscussion(snap),
+      mergedConvectiveSetup(snap, ctx),
+      mergedTechnicalDiscussion(snap, ctx),
       buildMergedHazardSection(snap, ctx),
       mergedUncertainty(snap),
     ].filter(Boolean);

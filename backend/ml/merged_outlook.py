@@ -836,6 +836,7 @@ def merge_cycles_for_spc_window(
             "thunder": [],
         }
         cig_feature_collections: list[Mapping[str, Any]] = []
+        convective_setups: list[Mapping[str, Any]] = []
         contributing_hours: list[dict[str, Any]] = []
         merged_cycles: list[str] = []
         merged_cycle_time_isos: list[str] = []
@@ -894,6 +895,9 @@ def merge_cycles_for_spc_window(
                 cig_shapes = tile.get("cigShapes")
                 if isinstance(cig_shapes, Mapping):
                     cig_feature_collections.append(cig_shapes)
+                convective_setup = tile.get("convectiveSetup")
+                if isinstance(convective_setup, Mapping):
+                    convective_setups.append(convective_setup)
 
                 contributing_hours.append({
                     "cycle": cycle_label,
@@ -970,6 +974,7 @@ def merge_cycles_for_spc_window(
             cig_feature_collections,
             valid_time_str,
         )
+        merged_convective_setup = _aggregate_convective_setup(convective_setups)
 
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
         summary["mergedCycles"] = merged_cycles
@@ -987,6 +992,7 @@ def merge_cycles_for_spc_window(
         summary["generatedAtISO"] = _now_iso()
         summary["latencyMs"] = int((time.perf_counter() - started) * 1000)
         summary["tileStride"] = source_tile_stride
+        summary["convectiveSetup"] = merged_convective_setup
 
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -1015,6 +1021,7 @@ def merge_cycles_for_spc_window(
                 "riskShapes": merged_risk_polygons,
                 "hazardProbabilityShapes": merged_hazard_shapes,
                 "cigShapes": merged_cig_shapes,
+                "convectiveSetup": merged_convective_setup,
             }
             _write_json(output_dir / "merged_probability_tile.json", merged_probability_tile)
 
@@ -1052,6 +1059,66 @@ def merge_cycles_for_spc_window(
     finally:
         if own_session:
             session.close()
+
+
+def _aggregate_convective_setup(per_hour: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-hour convective-setup summaries across the merged window.
+
+    Each contributing hour reports the storm modes / regional regimes active over
+    its own risk area, with per-entry active ``cells`` and the hour's total
+    ``riskCells``. We sum active cells per mode/regime and divide by the summed
+    risk-area cells across all contributing hours, yielding a window-wide
+    "how prevalent through the period" coverage. Entries are returned ranked by
+    coverage so the discussion can lead with the dominant setup.
+    """
+    total_risk_cells = 0
+    hours_with_risk = 0
+    storm_cells: dict[str, int] = {}
+    storm_labels: dict[str, str] = {}
+    regime_cells: dict[str, int] = {}
+    regime_labels: dict[str, str] = {}
+
+    for summary in per_hour:
+        if not isinstance(summary, Mapping):
+            continue
+        risk_cells = int(summary.get("riskCells") or 0)
+        if risk_cells <= 0:
+            continue
+        total_risk_cells += risk_cells
+        hours_with_risk += 1
+        for entry in summary.get("stormModes") or []:
+            key = entry.get("key")
+            if not key:
+                continue
+            storm_cells[key] = storm_cells.get(key, 0) + int(entry.get("cells") or 0)
+            storm_labels[key] = entry.get("label", key)
+        for entry in summary.get("regimes") or []:
+            key = entry.get("key")
+            if not key:
+                continue
+            regime_cells[key] = regime_cells.get(key, 0) + int(entry.get("cells") or 0)
+            regime_labels[key] = entry.get("label", key)
+
+    def _rank(cells: dict[str, int], labels: dict[str, str]) -> list[dict[str, Any]]:
+        ranked = [
+            {
+                "key": key,
+                "label": labels[key],
+                "coverage": round(count / total_risk_cells, 4) if total_risk_cells else 0.0,
+                "cells": count,
+            }
+            for key, count in cells.items()
+            if count > 0
+        ]
+        ranked.sort(key=lambda item: item["coverage"], reverse=True)
+        return ranked
+
+    return {
+        "stormModes": _rank(storm_cells, storm_labels),
+        "regimes": _rank(regime_cells, regime_labels),
+        "hoursWithRisk": hours_with_risk,
+        "riskCells": total_risk_cells,
+    }
 
 
 def _tile_grid_payload(tile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -225,6 +225,23 @@ export interface OutlookArtifactMetadata {
   pendingForecastHours?: number[];
 }
 
+export interface OutlookConvectiveSetupEntry {
+  key: string;
+  label: string;
+  coverage: number;
+  cells: number;
+}
+
+export interface OutlookConvectiveSetup {
+  stormModes: OutlookConvectiveSetupEntry[];
+  regimes: OutlookConvectiveSetupEntry[];
+  riskCells: number;
+  /** Present on merged/aggregated summaries. */
+  hoursWithRisk?: number;
+  /** Present on per-hour summaries. */
+  riskFloor?: ArtifactRiskCategory;
+}
+
 export interface OutlookProbabilityTile {
   forecastHour: number;
   validTimeISO: string;
@@ -243,6 +260,7 @@ export interface OutlookProbabilityTile {
   riskShapes?: OutlookArtifactFeatureCollection;
   hazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection;
   cigShapes?: OutlookCigShapeFeatureCollection;
+  convectiveSetup?: OutlookConvectiveSetup;
 }
 
 export interface OutlookProbabilityHour {

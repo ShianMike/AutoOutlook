@@ -53,6 +53,7 @@ from backend.ml.gridded_outlook import (
     predict_hazard_grids,
     probability_tile,
     risk_polygons_from_grid,
+    summarize_convective_setup,
 )
 from backend.ml.inference import model_status
 from backend.ml.spc_verification import compare_prediction_to_spc, fetch_current_spc_day1_category
@@ -1134,6 +1135,12 @@ def _build_hour_artifact(
     tile["riskShapes"] = polygons
     tile["hazardProbabilityShapes"] = hazard_shapes
     tile["cigShapes"] = cig_shapes
+    tile["convectiveSetup"] = summarize_convective_setup(
+        features,
+        fetched.lats,
+        fetched.lons,
+        post_result.category_grid,
+    )
     upper_air_overlay = _upper_air_overlay_from_fetched(cycle, forecast_hour, fetched, valid_time_iso)
     region = _region_from_max_risk_grid(
         fetched.lats,
