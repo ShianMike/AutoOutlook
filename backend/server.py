@@ -684,6 +684,13 @@ def fetch_spc_daily_storm_reports(target_date: Any, session: Any = None) -> list
     return reports
 
 
+# Storm-report cache freshness. SPC accumulates reports for a convective day for
+# a day or two, so recent dates refetch after this TTL while older finalized
+# dates are served from cache indefinitely. ``?refresh=1`` always bypasses it.
+STORM_REPORTS_CACHE_TTL_SECONDS = 1800
+STORM_REPORTS_FINALIZED_AFTER_DAYS = 2
+
+
 @app.get("/api/outlook/spc-storm-reports")
 def spc_storm_reports():
     date_str = request.args.get("date")
@@ -703,22 +710,53 @@ def spc_storm_reports():
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
     merged_dir = artifact_root / f"merged_{model}_{date_str}"
     cache_path = merged_dir / "storm_reports.json"
-    
-    if cache_path.exists():
-        return _json_path(cache_path)
-        
+
+    force_refresh = (request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes", "on"}
+    now = datetime.now(timezone.utc)
+    days_old = (now.date() - target_date).days
+
+    # SPC keeps adding reports to a convective day for a day or two, so the cache
+    # is only authoritative for older (finalized) dates. Recent dates use a short
+    # TTL so the live API refreshes on its own, and ``?refresh=1`` always bypasses
+    # the cache to force a refetch of the latest SPC reports.
+    if cache_path.exists() and not force_refresh:
+        if days_old > STORM_REPORTS_FINALIZED_AFTER_DAYS:
+            return _json_path(cache_path)
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            cached = None
+        if isinstance(cached, dict):
+            fetched_iso = cached.get("fetchedAtISO")
+            fetched_dt = None
+            if fetched_iso:
+                try:
+                    fetched_dt = datetime.fromisoformat(fetched_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+                except ValueError:
+                    fetched_dt = None
+            if fetched_dt is None:
+                fetched_dt = datetime.fromtimestamp(cache_path.stat().st_mtime, timezone.utc)
+            if (now - fetched_dt) < timedelta(seconds=STORM_REPORTS_CACHE_TTL_SECONDS):
+                return _json_response(cached)
+
     try:
         import requests
         session = requests.Session()
         reports = fetch_spc_daily_storm_reports(target_date, session)
-        
+
+        payload = {
+            "reports": reports,
+            "fetchedAtISO": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
         if merged_dir.exists():
-            import json
-            cache_path.write_text(json.dumps({"reports": reports}), encoding="utf-8")
-            
-        return _json_response({"reports": reports})
-    except Exception as exc:
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        return _json_response(payload)
+    except Exception:
         log.exception("Failed to fetch storm reports for date %s", date_str)
+        # Prefer the last good cache over dropping reports on a transient failure.
+        if cache_path.exists():
+            return _json_path(cache_path)
         return _json_response({"reports": []})
 
 
