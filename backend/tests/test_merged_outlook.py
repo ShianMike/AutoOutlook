@@ -13,6 +13,7 @@ import numpy as np
 
 from backend.ml.merged_outlook import (
     _merge_cig_shape_collections,
+    _aggregate_convective_setup,
     _spc_geojson_issue_time,
     _spc_geojson_max_category_ordinal,
     available_merged_d1_dates,
@@ -177,13 +178,14 @@ def _make_probability_tile(
     lon_min: float = -105.0,
     lon_max: float = -85.0,
     stride: int = 2,
+    convective_setup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     grid = np.asarray(category_grid, dtype=int)
     rows, cols = grid.shape
     lats = np.linspace(lat_min, lat_max, rows)
     lons = np.linspace(lon_min, lon_max, cols)
     lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
-    return {
+    tile = {
         "stride": stride,
         "categoryOrdinal": grid.tolist(),
         "lats": lat_grid.tolist(),
@@ -194,6 +196,9 @@ def _make_probability_tile(
             "wind": np.zeros_like(grid, dtype=float).tolist(),
         },
     }
+    if convective_setup is not None:
+        tile["convectiveSetup"] = convective_setup
+    return tile
 
 
 def _write_cycle_artifacts(
@@ -204,6 +209,7 @@ def _write_cycle_artifacts(
     grid: list[list[int]] | np.ndarray,
     status: str = "complete",
     tile_stride: int = 2,
+    convective_setup: dict[str, Any] | None = None,
 ) -> Path:
     cycle_dir = root / cycle_name
     cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +224,7 @@ def _write_cycle_artifacts(
     for hour in ready_hours:
         hour_dir = cycle_dir / "hours" / f"f{hour:02d}"
         hour_dir.mkdir(parents=True, exist_ok=True)
-        tile = _make_probability_tile(grid, stride=tile_stride)
+        tile = _make_probability_tile(grid, stride=tile_stride, convective_setup=convective_setup)
         (hour_dir / "probability_tile.json").write_text(json.dumps(tile), encoding="utf-8")
     return cycle_dir
 
@@ -1182,6 +1188,114 @@ class TestMergeCyclesForD2Window(unittest.TestCase):
             index = json.loads((out_dir / "merged_d2_index.json").read_text(encoding="utf-8"))
             self.assertEqual(index["spcDay"], 2)
             self.assertEqual(index["d1WindowValidISO"], "2026-06-04T12:00:00Z")
+
+
+class TestConvectiveSetupAggregation(unittest.TestCase):
+    """Aggregating per-hour convective-setup summaries across the merged window."""
+
+    def test_aggregate_sums_cells_and_recomputes_coverage(self) -> None:
+        per_hour = [
+            {
+                "stormModes": [
+                    {"key": "discrete_supercell", "label": "discrete supercells", "coverage": 1.0, "cells": 10},
+                ],
+                "regimes": [
+                    {"key": "dryline", "label": "a dryline", "coverage": 0.5, "cells": 5},
+                ],
+                "riskCells": 10,
+            },
+            {
+                "stormModes": [
+                    {"key": "discrete_supercell", "label": "discrete supercells", "coverage": 0.5, "cells": 5},
+                    {"key": "qlcs", "label": "a QLCS", "coverage": 0.5, "cells": 5},
+                ],
+                "regimes": [],
+                "riskCells": 10,
+            },
+        ]
+
+        aggregated = _aggregate_convective_setup(per_hour)
+
+        self.assertEqual(aggregated["riskCells"], 20)
+        self.assertEqual(aggregated["hoursWithRisk"], 2)
+        # discrete_supercell: 10 + 5 = 15 cells over 20 risk cells = 0.75.
+        modes = {entry["key"]: entry for entry in aggregated["stormModes"]}
+        self.assertAlmostEqual(modes["discrete_supercell"]["coverage"], 0.75)
+        self.assertEqual(modes["discrete_supercell"]["cells"], 15)
+        # qlcs only appeared in one hour: 5 / 20 = 0.25.
+        self.assertAlmostEqual(modes["qlcs"]["coverage"], 0.25)
+        # Ranked by coverage, dominant mode first.
+        self.assertEqual(aggregated["stormModes"][0]["key"], "discrete_supercell")
+        self.assertEqual(aggregated["regimes"][0]["key"], "dryline")
+
+    def test_aggregate_ignores_hours_without_risk(self) -> None:
+        aggregated = _aggregate_convective_setup([
+            {"stormModes": [], "regimes": [], "riskCells": 0},
+            "not-a-mapping",
+        ])
+        self.assertEqual(aggregated["riskCells"], 0)
+        self.assertEqual(aggregated["hoursWithRisk"], 0)
+        self.assertEqual(aggregated["stormModes"], [])
+        self.assertEqual(aggregated["regimes"], [])
+
+
+class TestMergedConvectiveSetupFlow(unittest.TestCase):
+    """Per-hour convectiveSetup must flow through the merge into the merged tile."""
+
+    def test_merge_aggregates_convective_setup_into_tile_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.full((5, 5), 3, dtype=int)  # SLGT everywhere -> 25 risk cells/hour
+            setup = {
+                "stormModes": [
+                    {"key": "discrete_supercell", "label": "discrete supercells", "coverage": 1.0, "cells": 25},
+                ],
+                "regimes": [
+                    {"key": "dryline", "label": "a dryline", "coverage": 0.6, "cells": 15},
+                ],
+                "riskCells": 25,
+                "riskFloor": "MRGL",
+            }
+            cycle_dir = _write_cycle_artifacts(
+                root,
+                "00z",
+                "2026-06-03T00:00:00Z",
+                list(range(12, 37)),
+                grid,
+                convective_setup=setup,
+            )
+            output = root / "out"
+            result = merge_cycles_for_spc_window(
+                [cycle_dir],
+                spc_fetch_fn=_mock_spc_fetch(),
+                output_dir=output,
+            )
+
+            # Present on the verification summary.
+            self.assertIn("convectiveSetup", result)
+            summary_setup = result["convectiveSetup"]
+            self.assertGreater(summary_setup["riskCells"], 0)
+            self.assertEqual(summary_setup["hoursWithRisk"], len(result["contributingHours"]))
+            self.assertEqual(summary_setup["stormModes"][0]["key"], "discrete_supercell")
+            self.assertEqual(summary_setup["regimes"][0]["key"], "dryline")
+
+            # Present and identical on the merged probability tile.
+            tile = json.loads((output / "merged_probability_tile.json").read_text(encoding="utf-8"))
+            self.assertIn("convectiveSetup", tile)
+            self.assertEqual(tile["convectiveSetup"], summary_setup)
+
+    def test_merge_handles_missing_convective_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grid = np.ones((5, 5), dtype=int)
+            cycle_dir = _write_cycle_artifacts(
+                root, "00z", "2026-06-03T00:00:00Z", list(range(12, 37)), grid,
+            )
+            result = merge_cycles_for_spc_window([cycle_dir], spc_fetch_fn=_mock_spc_fetch())
+            # No per-hour setup -> well-formed empty aggregate, no crash.
+            self.assertIn("convectiveSetup", result)
+            self.assertEqual(result["convectiveSetup"]["stormModes"], [])
+            self.assertEqual(result["convectiveSetup"]["regimes"], [])
 
 
 if __name__ == "__main__":

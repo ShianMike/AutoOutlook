@@ -53,6 +53,7 @@ from backend.ml.gridded_outlook import (
     postprocess_category_grid,
     probability_tile,
     risk_polygons_from_grid,
+    summarize_convective_setup,
     _rings_geometry,
 )
 from backend.ml.outlook_pipeline import (
@@ -5345,6 +5346,61 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(len(payload["hours"][0]["upperAirVectors"]), 1)
 
 
+class ConvectiveSetupSummaryTests(unittest.TestCase):
+    """summarize_convective_setup runs regardless of the regional-regime flag."""
+
+    @staticmethod
+    def _plains_lat_lon(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+        rows, cols = shape
+        lats = np.linspace(33.0, 41.0, rows)[:, None] * np.ones((1, cols))
+        lons = np.ones((rows, 1)) * np.linspace(-101.0, -95.0, cols)[None, :]
+        return lats, lons
+
+    def test_diagnoses_storm_modes_with_regional_regimes_disabled(self) -> None:
+        shape = (5, 5)
+        lats, lons = self._plains_lat_lon(shape)
+        features = gridded_features_from_fields(small_fields(shape), forecast_hour=18, lats=lats, lons=lons)
+        category_grid = np.full(shape, SPC_RISK_LABELS.index("SLGT"), dtype=int)
+
+        # Detection must work even when the regime probability multipliers are off.
+        with patch.dict(os.environ, {"AUTOOUTLOOK_REGIONAL_REGIMES": "0"}):
+            summary = summarize_convective_setup(features, lats, lons, category_grid)
+
+        self.assertEqual(summary["riskCells"], 25)
+        self.assertEqual(summary["riskFloor"], "MRGL")
+        mode_keys = {entry["key"] for entry in summary["stormModes"]}
+        self.assertIn("discrete_supercell", mode_keys)
+        for entry in summary["stormModes"]:
+            self.assertEqual(set(entry), {"key", "label", "coverage", "cells"})
+            self.assertGreater(entry["coverage"], 0.0)
+            self.assertLessEqual(entry["coverage"], 1.0)
+        # Ranked by coverage (non-increasing).
+        coverages = [entry["coverage"] for entry in summary["stormModes"]]
+        self.assertEqual(coverages, sorted(coverages, reverse=True))
+
+    def test_empty_when_no_risk_cells(self) -> None:
+        shape = (5, 5)
+        lats, lons = self._plains_lat_lon(shape)
+        features = gridded_features_from_fields(small_fields(shape), forecast_hour=18, lats=lats, lons=lons)
+
+        summary = summarize_convective_setup(features, lats, lons, np.zeros(shape, dtype=int))
+
+        self.assertEqual(summary["riskCells"], 0)
+        self.assertEqual(summary["stormModes"], [])
+        self.assertEqual(summary["regimes"], [])
+
+    def test_empty_when_coordinates_missing(self) -> None:
+        shape = (5, 5)
+        lats, lons = self._plains_lat_lon(shape)
+        features = gridded_features_from_fields(small_fields(shape), forecast_hour=18, lats=lats, lons=lons)
+        category_grid = np.full(shape, SPC_RISK_LABELS.index("SLGT"), dtype=int)
+
+        summary = summarize_convective_setup(features, None, None, category_grid)
+
+        # Risk cells still counted, but no geography-bound diagnosis without coords.
+        self.assertEqual(summary["riskCells"], 25)
+        self.assertEqual(summary["stormModes"], [])
+        self.assertEqual(summary["regimes"], [])
 
 
 if __name__ == "__main__":
