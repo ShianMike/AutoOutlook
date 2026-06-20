@@ -44,6 +44,9 @@ AUTOOUTLOOK_PRODUCTION_INDEX_URL=https://autooutlook.tech/api/outlook/incrementa
 ```
 
 The workload identity provider is restricted to `ShianMike/AutoOutlook`.
+The GitHub deployment service account has `roles/storage.objectAdmin` and
+`roles/storage.legacyBucketReader` on the artifact bucket so it can synchronize
+objects and read bucket metadata without project-wide storage access.
 
 ## Manual Operations
 

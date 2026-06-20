@@ -3,6 +3,7 @@ substitutions:
   _SERVICE: autooutlook
   _REPOSITORY: autooutlook
   _ARTIFACT_BUCKET: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+  _RUNTIME_SERVICE_ACCOUNT: autooutlook-runtime@project-e75d6e93-197d-4d41-ad6.iam.gserviceaccount.com
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -30,6 +31,8 @@ steps:
       - --platform
       - managed
       - --allow-unauthenticated
+      - --service-account
+      - ${_RUNTIME_SERVICE_ACCOUNT}
       - --memory
       - 2Gi
       - --cpu
