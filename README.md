@@ -2,7 +2,7 @@
 
 **Automated Convective Risk Intelligence**
 
-[![Refresh static AutoOutlook artifacts](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml/badge.svg)](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml)
+[![Publish Google Cloud artifacts to Cloudflare](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml/badge.svg)](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml)
 
 AutoOutlook is an open-source severe-weather outlook dashboard and artifact pipeline. It turns selected HRRR model fields into SPC-style risk products, hazard probability grids, verification summaries, and a public React dashboard.
 
@@ -146,12 +146,19 @@ Important leakage guard: the pipeline writes prediction artifacts first, then do
 
 Production should keep the public website online while serving only finished artifacts from the web service. Normal visitors should not trigger HRRR/NOMADS downloads, XGBoost inference, f00-f48 generation, polygon regeneration, or preview image generation.
 
+The scheduled refresh now runs in Google Cloud:
+
+- Cloud Scheduler starts `autooutlook-artifact-refresh` at `03/09/15/21Z`.
+- The Cloud Run Job generates the complete F00-F48 cycle and publishes fixed object paths to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
+- GitHub Actions only downloads the completed GCS snapshot, exports `dist/_api`, and deploys Cloudflare Pages. It does not use GitHub artifacts or Actions caches.
+- The public Cloud Run service is an API fallback and reads the same GCS bucket.
+
 Recommended public Cloud Run service environment:
 
 ```powershell
 AUTOOUTLOOK_FORECAST_SOURCE=artifact
 AUTOOUTLOOK_ENABLE_LIVE_BUILD=false
-AUTOOUTLOOK_ARTIFACT_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963
+AUTOOUTLOOK_ARTIFACT_BUCKET=autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
 ```
 
 With `AUTOOUTLOOK_ENABLE_LIVE_BUILD=false`, `/api/forecast` returns the latest generated artifact bundle. If artifacts are missing or incomplete, the public service returns `{"code":"outlook_not_ready"}` instead of starting expensive model work. Raw artifact storage paths are not exposed in public API errors.
@@ -168,7 +175,7 @@ Recommended public Cloud Run service settings:
 
 ```powershell
 gcloud run services update autooutlook `
-  --region us-central1 `
+  --region us-east1 `
   --min-instances 0 `
   --max-instances 1 `
   --concurrency 20 `
@@ -183,35 +190,30 @@ The `--timeout 120` setting is the maximum time an individual HTTP request can r
 Production deployment checklist:
 
 ```powershell
-gcloud builds submit --config cloudbuild.yaml --project project-f47ca9d9-31bc-4a21-963
+gcloud builds submit --config cloudbuild.yaml --project project-e75d6e93-197d-4d41-ad6
 ```
 
-The build creates and pushes an image tagged with the Cloud Build ID. If the final Cloud Build deploy step fails with `iam.serviceaccounts.actAs` on `191625527569-compute@developer.gserviceaccount.com`, the image can still be deployed directly by an authenticated account with Cloud Run deploy access:
+The build creates and pushes an image tagged with the Cloud Build ID. The service and refresh job must use the same image revision:
 
 ```powershell
 gcloud run services update autooutlook `
-  --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
-  --region us-central1 `
-  --project project-f47ca9d9-31bc-4a21-963
+  --image us-east1-docker.pkg.dev/project-e75d6e93-197d-4d41-ad6/autooutlook/autooutlook:<IMAGE_TAG> `
+  --region us-east1 `
+  --project project-e75d6e93-197d-4d41-ad6
 ```
 
 When a release changes backend artifact-generation code or shared code used by the scheduled pipeline, update the hourly Cloud Run Job to the same image tag so the artifact generator and public service stay on the same revision:
 
 ```powershell
 gcloud run jobs update autooutlook-artifact-refresh `
-  --image us-central1-docker.pkg.dev/project-f47ca9d9-31bc-4a21-963/cloud-run-source-deploy/autooutlook:<IMAGE_TAG> `
-  --command sh `
-  --args "-c,python -m backend.ml.outlook_pipeline --incremental --all-hours --cycle-policy complete-requested --output-dir /tmp/autooutlook-artifacts/latest_incremental --cache-dir /tmp/autooutlook-cache/hrrr_selected --publish-gcs-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --gcs-lock-bucket autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963 --hour-workers 2 --range-workers 2 --grid-stride 2 --tile-stride 1" `
-  --set-env-vars "AUTOOUTLOOK_PUBLISH_GCS_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_RUN_LOCK_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,AUTOOUTLOOK_HOUR_WORKERS=2,AUTOOUTLOOK_RANGE_WORKERS=2,AUTOOUTLOOK_GRID_STRIDE=2,AUTOOUTLOOK_TILE_STRIDE=1" `
-  --remove-volume-mount /mnt/autooutlook-artifacts `
-  --remove-volume artifacts `
-  --region us-central1 `
-  --project project-f47ca9d9-31bc-4a21-963
+  --image us-east1-docker.pkg.dev/project-e75d6e93-197d-4d41-ad6/autooutlook/autooutlook:<IMAGE_TAG> `
+  --region us-east1 `
+  --project project-e75d6e93-197d-4d41-ad6
 ```
 
 The job should write working artifacts to local `/tmp` and upload finished JSON artifacts through the Cloud Storage client. Avoid routing generation output through a Cloud Storage FUSE mount; it adds filesystem translation overhead and makes overlapping executions more expensive.
 
-Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-30m` with schedule `0 * * * *` in `Etc/UTC`.
+Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 3,9,15,21 * * *` in `Etc/UTC`.
 
 ## Project layout
 

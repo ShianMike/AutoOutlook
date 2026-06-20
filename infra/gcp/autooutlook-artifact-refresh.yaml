@@ -1,0 +1,58 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: autooutlook-artifact-refresh
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: autooutlook-runtime@project-e75d6e93-197d-4d41-ad6.iam.gserviceaccount.com
+          timeoutSeconds: "10800"
+          maxRetries: 1
+          containers:
+            - image: us-east1-docker.pkg.dev/project-e75d6e93-197d-4d41-ad6/autooutlook/autooutlook:20260620-133722
+              command:
+                - python
+              args:
+                - -m
+                - backend.ml.outlook_pipeline
+                - --incremental
+                - --all-hours
+                - --cycle-policy
+                - complete-requested
+                - --output-dir
+                - /tmp/autooutlook-artifacts/latest_incremental
+                - --cache-dir
+                - /tmp/autooutlook-cache/hrrr_selected
+                - --publish-gcs-bucket
+                - autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+                - --gcs-lock-bucket
+                - autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+                - --hour-workers
+                - "8"
+                - --range-workers
+                - "4"
+                - --grid-stride
+                - "2"
+                - --tile-stride
+                - "1"
+              env:
+                - name: AUTOOUTLOOK_PUBLISH_GCS_BUCKET
+                  value: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+                - name: AUTOOUTLOOK_RUN_LOCK_BUCKET
+                  value: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+                - name: AUTOOUTLOOK_HOUR_WORKERS
+                  value: "8"
+                - name: AUTOOUTLOOK_RANGE_WORKERS
+                  value: "4"
+                - name: AUTOOUTLOOK_GRID_STRIDE
+                  value: "2"
+                - name: AUTOOUTLOOK_TILE_STRIDE
+                  value: "1"
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: 32Gi

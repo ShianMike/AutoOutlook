@@ -1,379 +1,190 @@
-name: Refresh static AutoOutlook artifacts
+name: Publish Google Cloud artifacts to Cloudflare
 
 on:
   schedule:
-    # Cycle-aligned ~2.5h after each 00/06/12/18z HRRR run, once the extended
-    # f48 index has posted. Running earlier (the former +1.5h schedule) meant the
-    # freshly initialized cycle was always rejected for a missing f48, so the
-    # detector kept falling back to the previous complete cycle. Primary times:
-    # 03:00Z, 09:00Z, 15:00Z, and 21:00Z.
-    - cron: '0 3,9,15,21 * * *'
-    # Backup trigger for GitHub scheduler drops. Workflow-level concurrency
-    # prevents overlap; the production freshness gate skips if the primary ran.
-    - cron: '15 3,9,15,21 * * *'
+    # The Cloud Run generator starts at 03/09/15/21Z. Publish its completed GCS
+    # snapshot 90 minutes later without storing artifacts or caches in GitHub.
+    - cron: '30 4,10,16,22 * * *'
   workflow_dispatch:
     inputs:
       force_deploy:
-        description: 'Deploy even when the production index already reports the same cycle.'
+        description: 'Deploy even when production already reports the same cycle.'
         required: false
         default: 'false'
 
-# concurrency:
-#   group: autooutlook-static-refresh
-#   cancel-in-progress: false
+concurrency:
+  group: autooutlook-cloudflare-publish
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  AUTOOUTLOOK_HOUR_WORKERS: ${{ vars.AUTOOUTLOOK_HOUR_WORKERS || '3' }}
-  AUTOOUTLOOK_RANGE_WORKERS: ${{ vars.AUTOOUTLOOK_RANGE_WORKERS || '4' }}
-  AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES: ${{ vars.AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES || '2097152' }}
-  AUTOOUTLOOK_GRID_STRIDE: ${{ vars.AUTOOUTLOOK_GRID_STRIDE || '2' }}
-  AUTOOUTLOOK_TILE_STRIDE: ${{ vars.AUTOOUTLOOK_TILE_STRIDE || '1' }}
   AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
+  GCP_ARTIFACT_BUCKET: ${{ vars.GCP_ARTIFACT_BUCKET }}
   CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook-pages' }}
   CLOUDFLARE_PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'master' }}
 
 jobs:
-  preflight:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      should_generate: ${{ steps.gate.outputs.should_generate }}
-      reason: ${{ steps.gate.outputs.reason }}
-      cycle: ${{ steps.detect.outputs.cycle }}
-      cycle_time_iso: ${{ steps.detect.outputs.cycle_time_iso }}
-      cycle_date: ${{ steps.detect.outputs.cycle_date }}
-    env:
-      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
+    timeout-minutes: 90
 
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
         with:
-          python-version: '3.11'
-          cache: pip
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
-      - name: Install detector dependencies
-        run: python -m pip install --upgrade requests numpy
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
 
-      - name: Detect latest complete HRRR cycle
-        id: detect
-        run: |
-          mkdir -p "$AUTOOUTLOOK_STATE_DIR"
-          python scripts/detect-hrrr-cycle.py --require-forecast-hour 48 > "$AUTOOUTLOOK_STATE_DIR/cycle.json"
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print(f"cycle={cycle.get('cycle', '')}", file=output)
-              cycle_time_iso = cycle.get('cycleTimeISO', '')
-              print(f"cycle_time_iso={cycle_time_iso}", file=output)
-              print(f"cycle_date={cycle_time_iso[:10]}", file=output)
-          print(json.dumps(cycle, indent=2))
-          PY
-
-      - name: Check for active concurrent runs
-        id: check-concurrency
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Get running runs of this workflow, excluding the current run
-          active_runs=$(gh run list --repo ${{ github.repository }} --workflow free-hosting-refresh.yml --status in_progress --json databaseId --jq '[.[] | select(.databaseId != ${{ github.run_id }})] | length')
-          echo "Other in-progress runs count: $active_runs"
-          if [ "$active_runs" -gt 0 ]; then
-            echo "Another run of this workflow is currently in progress."
-            echo "other_running=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No other runs are in progress."
-            echo "other_running=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check production freshness
+      - name: Download and validate completed GCS index
         id: gate
         env:
           FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
-          OTHER_RUNNING: ${{ steps.check-concurrency.outputs.other_running }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
+          mkdir -p .autooutlook/state
+          gcloud storage cp \
+            "gs://${GCP_ARTIFACT_BUCKET}/latest_incremental_complete/index.json" \
+            .autooutlook/state/gcs-index.json
           python - <<'PY'
           import json
           import os
           import urllib.request
           from pathlib import Path
 
-          def write_outputs(should_generate: bool, reason: str) -> None:
-              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                  print(f"should_generate={str(should_generate).lower()}", file=output)
-                  print(f"reason={reason}", file=output)
-              print(reason)
-
-          other_running = os.environ.get("OTHER_RUNNING", "false").lower() == "true"
-          event_name = os.environ.get("EVENT_NAME", "")
-          if other_running and event_name == "schedule":
-              write_outputs(False, "another scheduled run is in progress")
-              raise SystemExit
-
-          cycle = json.loads(Path(os.environ["AUTOOUTLOOK_STATE_DIR"], "cycle.json").read_text(encoding="utf-8"))
-          expected = cycle.get("cycleTimeISO", "")
-          force = os.environ.get("FORCE_DEPLOY", "false").lower() == "true"
-          url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
-
-          if force:
-              write_outputs(True, "manual force requested")
-              raise SystemExit
-
-          try:
-              request = urllib.request.Request(url, headers={"User-Agent": "AutoOutlook-GitHubActions/1.0"})
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  payload = json.load(response)
-              ready = payload.get("readyForecastHours") or []
-              ready_count = len(ready) if isinstance(ready, list) else 0
-              spc = payload.get("spcVerification") or {}
-              has_fresh_spc = bool(spc.get("spcFetchedAtISO")) and bool(spc.get("spcFetchedAfterPredictionArtifacts"))
-              complete = (
-                  payload.get("cycleTimeISO") == expected
-                  and payload.get("status") == "complete"
-                  and ready_count >= 49
-                  and has_fresh_spc
-              )
-              if complete:
-                  write_outputs(False, "production already has this complete cycle with SPC verification")
-              else:
-                  write_outputs(
-                      True,
-                      (
-                          f"production needs refresh: cycle={payload.get('cycleTimeISO')!r}, "
-                          f"expected={expected!r}, status={payload.get('status')!r}, "
-                          f"ready={ready_count}, spc={has_fresh_spc}"
-                      ),
-                  )
-          except Exception as exc:
-              write_outputs(True, f"production index check failed: {exc}")
-          PY
-
-  fetch-shards:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    needs: preflight
-    if: needs.preflight.outputs.should_generate == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6]
-    env:
-      AUTOOUTLOOK_REPO_DIR: ${{ github.workspace }}
-      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
-      AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ github.workspace }}/backend/cache/hrrr_selected
-      AUTOOUTLOOK_LOG_DIR: ${{ github.workspace }}/.autooutlook/logs
-      CLOUD_RUN_TASK_COUNT: 7
-      CLOUD_RUN_TASK_INDEX: ${{ matrix.shard }}
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install backend dependencies
-        run: |
-          python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -r backend/requirements.txt
-
-      - name: Ensure runtime hazard models
-        run: python -m backend.ml.ensure_runtime_models
-
-      - name: Cache HRRR GRIB files
-        uses: actions/cache@v5
-        with:
-          path: backend/cache/hrrr_selected
-          key: hrrr-selected-${{ needs.preflight.outputs.cycle }}-${{ matrix.shard }}
-          restore-keys: |
-            hrrr-selected-${{ needs.preflight.outputs.cycle }}-
-
-      - name: Show shard assignment
-        run: |
-          python - <<'PY'
-          from backend.ml.outlook_pipeline import (
-              cloud_run_task_shard_from_env,
-              resolve_cloud_run_task_forecast_hours,
-              resolve_forecast_hours,
+          index = json.loads(Path(".autooutlook/state/gcs-index.json").read_text(encoding="utf-8"))
+          ready = index.get("readyForecastHours") or []
+          ready_count = len(ready) if isinstance(ready, list) else 0
+          spc = index.get("spcVerification") or {}
+          has_fresh_spc = bool(spc.get("spcFetchedAtISO")) and bool(
+              spc.get("spcFetchedAfterPredictionArtifacts")
           )
+          if index.get("status") != "complete" or ready_count < 49 or not has_fresh_spc:
+              raise SystemExit(
+                  "Refusing publish: GCS snapshot is incomplete "
+                  f"(status={index.get('status')!r}, ready={ready_count}, spc={has_fresh_spc})."
+              )
 
-          shard = cloud_run_task_shard_from_env()
-          hours = resolve_forecast_hours(all_hours=True)
-          assigned = resolve_cloud_run_task_forecast_hours(hours, shard)
-          label = "none" if shard is None else f"{shard.index}/{shard.count}"
-          print(f"shard={label} hours={','.join(f'F{hour:02d}' for hour in assigned)}")
+          expected = index.get("cycleTimeISO", "")
+          force = os.environ.get("FORCE_DEPLOY", "false").lower() == "true"
+          should_publish = True
+          reason = "manual force requested" if force else "production needs the completed GCS cycle"
+
+          if not force:
+              try:
+                  request = urllib.request.Request(
+                      os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"],
+                      headers={"User-Agent": "AutoOutlook-GCS-Publisher/1.0"},
+                  )
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      production = json.load(response)
+                  production_ready = production.get("readyForecastHours") or []
+                  production_spc = production.get("spcVerification") or {}
+                  production_complete = (
+                      production.get("cycleTimeISO") == expected
+                      and production.get("status") == "complete"
+                      and isinstance(production_ready, list)
+                      and len(production_ready) >= 49
+                      and bool(production_spc.get("spcFetchedAtISO"))
+                      and bool(production_spc.get("spcFetchedAfterPredictionArtifacts"))
+                  )
+                  if production_complete:
+                      should_publish = False
+                      reason = "production already has this complete GCS cycle"
+              except Exception as exc:
+                  reason = f"production freshness check failed: {exc}"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"should_publish={str(should_publish).lower()}", file=output)
+              print(f"cycle_time_iso={expected}", file=output)
+          print(reason)
+          print(
+              f"GCS snapshot: cycle={expected} status={index.get('status')} "
+              f"ready={ready_count} spc={has_fresh_spc}"
+          )
           PY
 
-      - name: Generate shard hours
-        timeout-minutes: 10
-        run: |
-          python -m backend.ml.outlook_pipeline \
-            --incremental \
-            --all-hours \
-            --cycle-policy complete-requested \
-            --output-dir backend/artifacts/latest_incremental \
-            --cache-dir "$AUTOOUTLOOK_HRRR_CACHE_DIR" \
-            --hour-workers "$AUTOOUTLOOK_HOUR_WORKERS" \
-            --range-workers "$AUTOOUTLOOK_RANGE_WORKERS" \
-            --grid-stride "$AUTOOUTLOOK_GRID_STRIDE" \
-            --tile-stride "$AUTOOUTLOOK_TILE_STRIDE" \
-            --no-spc-verify
-
-      - name: Upload shard hours
-        uses: actions/upload-artifact@v7
-        with:
-          name: hours-shard-${{ matrix.shard }}
-          path: backend/artifacts/latest_incremental/hours
-          if-no-files-found: error
-          retention-days: 1
-
-  deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    needs: [preflight, fetch-shards]
-    if: needs.preflight.outputs.should_generate == 'true'
-    env:
-      AUTOOUTLOOK_REPO_DIR: ${{ github.workspace }}
-      AUTOOUTLOOK_STATE_DIR: ${{ github.workspace }}/.autooutlook/state
-      AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ github.workspace }}/backend/cache/hrrr_selected
-      AUTOOUTLOOK_LOG_DIR: ${{ github.workspace }}/.autooutlook/logs
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-
       - name: Set up Python
+        if: steps.gate.outputs.should_publish == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: backend/requirements.txt
 
       - name: Set up Node
+        if: steps.gate.outputs.should_publish == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
-          cache: npm
 
-      - name: Install backend dependencies
+      - name: Install dependencies
+        if: steps.gate.outputs.should_publish == 'true'
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r backend/requirements.txt
+          npm ci
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Download sharded hours
-        uses: actions/download-artifact@v8
-        with:
-          pattern: hours-shard-*
-          path: backend/artifacts/latest_incremental/hours
-          merge-multiple: true
-
-      - name: Ensure runtime hazard models
-        run: python -m backend.ml.ensure_runtime_models
-
-      - name: Cache HRRR GRIB files
-        uses: actions/cache@v5
-        with:
-          path: backend/cache/hrrr_selected
-          key: hrrr-selected-${{ needs.preflight.outputs.cycle }}-deploy
-          restore-keys: |
-            hrrr-selected-${{ needs.preflight.outputs.cycle }}-
-
-      - name: Restore merged D1 00Z cache
-        uses: actions/cache@v5
-        with:
-          path: backend/artifacts/latest_incremental_hrrr_00z
-          key: merged-d1-hrrr-00z-${{ needs.preflight.outputs.cycle_date }}-${{ github.run_id }}
-          restore-keys: |
-            merged-d1-hrrr-00z-${{ needs.preflight.outputs.cycle_date }}-
-
-      - name: Restore merged D2 12Z cache
-        uses: actions/cache@v5
-        with:
-          path: backend/artifacts/latest_incremental_hrrr_12z
-          key: merged-d2-hrrr-12z-${{ needs.preflight.outputs.cycle_date }}-${{ github.run_id }}
-          restore-keys: |
-            merged-d2-hrrr-12z-${{ needs.preflight.outputs.cycle_date }}-
-
-      - name: Restore ENH+ risk archive
-        uses: actions/cache@v5
-        with:
-          # Persist the accumulating ENH+ archive across deploys. The run-id keyed
-          # entry is immutable; restore-keys pull the most recent prior archive so
-          # past ENH+ days remain and their storm reports keep updating.
-          path: backend/artifacts/enh_plus_archive
-          key: enh-plus-risk-archive-${{ github.run_id }}
-          restore-keys: |
-            enh-plus-risk-archive-
-
-      - name: Finalize incremental artifacts
+      - name: Hydrate generated artifacts from GCS
+        if: steps.gate.outputs.should_publish == 'true'
         run: |
-          python -m backend.ml.outlook_pipeline \
-            --incremental \
-            --all-hours \
-            --cycle-policy complete-requested \
-            --output-dir backend/artifacts/latest_incremental \
-            --cache-dir "$AUTOOUTLOOK_HRRR_CACHE_DIR" \
-            --hour-workers "$AUTOOUTLOOK_HOUR_WORKERS" \
-            --range-workers "$AUTOOUTLOOK_RANGE_WORKERS" \
-            --grid-stride "$AUTOOUTLOOK_GRID_STRIDE" \
-            --tile-stride "$AUTOOUTLOOK_TILE_STRIDE"
+          mkdir -p backend/artifacts
+          gcloud storage rsync --recursive \
+            "gs://${GCP_ARTIFACT_BUCKET}" \
+            backend/artifacts
 
-      - name: Build frontend
-        run: npm run build
+      - name: Build frontend and export static API
+        if: steps.gate.outputs.should_publish == 'true'
+        run: |
+          python -m backend.ml.ensure_runtime_models
+          npm run build
+          python scripts/export-static-api.py
 
-      - name: Export static API
-        run: python scripts/export-static-api.py
-
-      - name: Verify static API export before deploy
+      - name: Verify static API export
+        if: steps.gate.outputs.should_publish == 'true'
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          api = Path("dist/_api")
-          health = api / "health.json"
-          index = api / "outlook" / "incremental" / "index.json"
-
-          missing = [str(path) for path in (health, index) if not path.is_file()]
-          if missing:
+          expected = json.loads(
+              Path(".autooutlook/state/gcs-index.json").read_text(encoding="utf-8")
+          ).get("cycleTimeISO")
+          deployed = json.loads(
+              Path("dist/_api/outlook/incremental/index.json").read_text(encoding="utf-8")
+          )
+          ready = deployed.get("readyForecastHours") or []
+          if (
+              deployed.get("cycleTimeISO") != expected
+              or deployed.get("status") != "complete"
+              or not isinstance(ready, list)
+              or len(ready) < 49
+          ):
               raise SystemExit(
-                  "Refusing to deploy: static API export is incomplete (the complete "
-                  f"snapshot was not produced). Missing: {missing}. Production keeps the "
-                  "last good deployment."
+                  "Static export does not match the completed GCS snapshot: "
+                  f"expected={expected!r}, cycle={deployed.get('cycleTimeISO')!r}, "
+                  f"status={deployed.get('status')!r}, ready={len(ready) if isinstance(ready, list) else 0}"
               )
-
-          payload = json.loads(index.read_text(encoding="utf-8"))
-          ready = payload.get("readyForecastHours") or []
-          ready_count = len(ready) if isinstance(ready, list) else 0
-          if payload.get("status") != "complete" or ready_count < 49:
-              raise SystemExit(
-                  "Refusing to deploy: static API index is not a complete cycle "
-                  f"(status={payload.get('status')!r}, ready={ready_count}). "
-                  "Production keeps the last good deployment."
-              )
-          print(f"Static API export OK: cycle={payload.get('cycleTimeISO')} ready={ready_count}")
+          print(f"Static export verified: cycle={expected} ready={len(ready)}")
           PY
 
+      - name: Persist ENH+ archive updates to GCS
+        if: steps.gate.outputs.should_publish == 'true'
+        run: |
+          if [ -d backend/artifacts/enh_plus_archive ]; then
+            gcloud storage rsync --recursive \
+              backend/artifacts/enh_plus_archive \
+              "gs://${GCP_ARTIFACT_BUCKET}/enh_plus_archive"
+          fi
+
       - name: Deploy to Cloudflare Pages
+        if: steps.gate.outputs.should_publish == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -384,6 +195,7 @@ jobs:
             --commit-dirty=true
 
       - name: Confirm deployed cycle
+        if: steps.gate.outputs.should_publish == 'true'
         run: |
           python - <<'PY'
           import json
@@ -391,37 +203,41 @@ jobs:
           import time
           import urllib.request
 
-          expected = "${{ needs.preflight.outputs.cycle_time_iso }}"
+          expected = "${{ steps.gate.outputs.cycle_time_iso }}"
           url = os.environ["AUTOOUTLOOK_PRODUCTION_INDEX_URL"]
           last_payload = None
-          for attempt in range(12):
+          for attempt in range(18):
               try:
-                  request = urllib.request.Request(url, headers={"User-Agent": "AutoOutlook-GitHubActions/1.0"})
+                  request = urllib.request.Request(
+                      url,
+                      headers={"User-Agent": "AutoOutlook-GCS-Publisher/1.0"},
+                  )
                   with urllib.request.urlopen(request, timeout=20) as response:
                       payload = json.load(response)
               except Exception as exc:
                   last_payload = {"error": f"{type(exc).__name__}: {exc}"}
-                  print(f"waiting for deployed cycle attempt {attempt + 1}: {last_payload['error']}")
+                  print(f"waiting for deployment attempt {attempt + 1}: {last_payload['error']}")
                   time.sleep(10)
                   continue
+
               last_payload = payload
               ready = payload.get("readyForecastHours") or []
-              ready_count = len(ready) if isinstance(ready, list) else 0
               spc = payload.get("spcVerification") or {}
-              has_fresh_spc = bool(spc.get("spcFetchedAtISO")) and bool(spc.get("spcFetchedAfterPredictionArtifacts"))
               if (
                   payload.get("cycleTimeISO") == expected
                   and payload.get("status") == "complete"
-                  and ready_count >= 49
-                  and has_fresh_spc
+                  and isinstance(ready, list)
+                  and len(ready) >= 49
+                  and bool(spc.get("spcFetchedAtISO"))
+                  and bool(spc.get("spcFetchedAfterPredictionArtifacts"))
               ):
-                  print(f"confirmed {expected} with {ready_count} ready hours and SPC verification")
+                  print(f"Confirmed production cycle {expected} with {len(ready)} hours.")
                   raise SystemExit
               print(
-                  f"waiting for deployed cycle attempt {attempt + 1}: "
+                  f"waiting for deployment attempt {attempt + 1}: "
                   f"cycle={payload.get('cycleTimeISO')!r} status={payload.get('status')!r} "
-                  f"ready={ready_count} spc={has_fresh_spc}"
+                  f"ready={len(ready) if isinstance(ready, list) else 0}"
               )
               time.sleep(10)
-          raise SystemExit(f"deployed cycle was not confirmed: {last_payload!r}")
+          raise SystemExit(f"Deployed cycle was not confirmed: {last_payload!r}")
           PY

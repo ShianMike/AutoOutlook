@@ -1,7 +1,8 @@
 substitutions:
-  _REGION: us-central1
+  _REGION: us-east1
   _SERVICE: autooutlook
-  _REPOSITORY: cloud-run-source-deploy
+  _REPOSITORY: autooutlook
+  _ARTIFACT_BUCKET: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -43,7 +44,7 @@ steps:
       - "1"
       - --cpu-boost
       - --set-env-vars
-      - AUTOOUTLOOK_CORS_ORIGINS=*,AUTOOUTLOOK_FORECAST_SOURCE=artifact,AUTOOUTLOOK_ENABLE_LIVE_BUILD=false,AUTOOUTLOOK_ARTIFACT_BUCKET=autooutlook-artifacts-project-f47ca9d9-31bc-4a21-963,WEB_CONCURRENCY=1,WEB_THREADS=20,GUNICORN_TIMEOUT=120
+      - AUTOOUTLOOK_CORS_ORIGINS=*,AUTOOUTLOOK_FORECAST_SOURCE=artifact,AUTOOUTLOOK_ENABLE_LIVE_BUILD=false,AUTOOUTLOOK_ARTIFACT_BUCKET=${_ARTIFACT_BUCKET},WEB_CONCURRENCY=1,WEB_THREADS=20,GUNICORN_TIMEOUT=120
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$BUILD_ID

@@ -1,79 +1,86 @@
-# Free Hosting Migration
+# Google Cloud Refresh With Cloudflare Pages
 
-This migration removes Google Cloud from the public serving path and from the scheduled artifact job.
+The expensive HRRR/XGBoost refresh runs in Google Cloud. Cloudflare Pages still serves `autooutlook.tech`.
 
-## Target Architecture
+## Architecture
 
-- Cloudflare Pages serves the Vite build and the `autooutlook.tech` custom domain.
-- A Cloudflare Pages Function handles `/api/*` and maps those routes to static files generated under `dist/_api`.
-- GitHub Actions runs the HRRR/XGBoost artifact job on the same cycle-aligned schedule and fast selected-field fetch profile that the Windows Task Scheduler runner used. `docs/windows-task-scheduler-runner.md` is now only a local fallback, and `docs/oracle-always-free-runner.md` remains the preferred no-GitHub-billing cloud path.
-- The runner deploys only when a newer complete F00-F48 HRRR cycle is available, keeping Cloudflare Pages deploys below the Free plan's 500/month limit.
-- No public request triggers HRRR downloads, model inference, polygon generation, or preview generation.
+- Cloud Scheduler starts the Cloud Run Job `autooutlook-artifact-refresh` at `03/09/15/21Z`.
+- The job writes temporary files under `/tmp` and publishes completed artifacts to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
+- The bucket uses stable object paths, so storage does not grow by retaining one archive per workflow run.
+- `.github/workflows/free-hosting-refresh.yml` runs 90 minutes later, authenticates with Google Workload Identity Federation, downloads the completed snapshot, exports `dist/_api`, and deploys Cloudflare Pages.
+- The GitHub workflow does not call `actions/upload-artifact`, `actions/download-artifact`, or `actions/cache`.
+- The Cloud Run service `autooutlook` reads the same bucket and provides a fallback API at `https://autooutlook-672125056378.us-east1.run.app`.
 
-## Required Accounts
+## Google Cloud Resources
 
-- GitHub repository with Actions enabled, or an Oracle Always Free VM configured with `docs/oracle-always-free-runner.md` if Actions minutes become a problem.
-- Cloudflare Free account with a Pages project.
-- Cloudflare API token with Pages deploy permission.
+```text
+Project: project-e75d6e93-197d-4d41-ad6
+Region: us-east1
+Artifact bucket: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+Artifact Registry repository: autooutlook
+Cloud Run service: autooutlook
+Cloud Run job: autooutlook-artifact-refresh
+Cloud Scheduler job: autooutlook-artifact-refresh-cycle
+Runtime service account: autooutlook-runtime@project-e75d6e93-197d-4d41-ad6.iam.gserviceaccount.com
+GitHub deployment service account: autooutlook-github-deploy@project-e75d6e93-197d-4d41-ad6.iam.gserviceaccount.com
+```
 
-## Cloudflare Setup
+## GitHub Configuration
 
-Create a Pages project named `autooutlook-pages`, then add these GitHub repository secrets:
+Cloudflare credentials remain repository secrets:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_API_TOKEN
 ```
 
-Optional repository variables:
+Google Cloud integration uses repository variables:
 
 ```text
-CLOUDFLARE_PAGES_PROJECT=autooutlook-pages
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/672125056378/locations/global/workloadIdentityPools/github-actions/providers/autooutlook
+GCP_SERVICE_ACCOUNT=autooutlook-github-deploy@project-e75d6e93-197d-4d41-ad6.iam.gserviceaccount.com
+GCP_ARTIFACT_BUCKET=autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
 AUTOOUTLOOK_PRODUCTION_INDEX_URL=https://autooutlook.tech/api/outlook/incremental
-AUTOOUTLOOK_HOUR_WORKERS=3
-AUTOOUTLOOK_RANGE_WORKERS=4
-AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES=2097152
-AUTOOUTLOOK_GRID_STRIDE=2
-AUTOOUTLOOK_TILE_STRIDE=1
-AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY=true
-AUTOOUTLOOK_CLEANUP_CACHE_AFTER_DEPLOY=true
 ```
 
-During staging, set `AUTOOUTLOOK_PRODUCTION_INDEX_URL` to the Pages preview URL so the hourly job can skip unchanged cycles before `autooutlook.tech` is moved.
+The workload identity provider is restricted to `ShianMike/AutoOutlook`.
 
-## Local Verification
+## Manual Operations
 
-Use existing generated artifacts:
+Run the generator and wait for completion:
 
 ```powershell
-npm run build
-python scripts/export-static-api.py
+gcloud run jobs replace infra/gcp/autooutlook-artifact-refresh.yaml `
+  --region us-east1 `
+  --project project-e75d6e93-197d-4d41-ad6
+
+gcloud run jobs execute autooutlook-artifact-refresh `
+  --region us-east1 `
+  --project project-e75d6e93-197d-4d41-ad6 `
+  --wait
 ```
 
-Expected outputs:
+Force the Cloudflare publisher after the GCS snapshot is complete:
 
-- `dist/index.html`
-- `dist/_api/forecast.json`
-- `dist/_api/outlook/incremental/index.json`
-- `dist/_api/outlook/incremental/hour/f00/probability-tile.json`
-- `dist/_api/outlook/incremental/hour/f48/probability-tile.json`
+```powershell
+gh workflow run free-hosting-refresh.yml -f force_deploy=true
+```
 
-## Cutover
+Inspect recent generator executions:
 
-1. Run the `Refresh static AutoOutlook artifacts` workflow manually with `force_deploy=true`.
-2. Verify the Pages URL:
-   - `/`
-   - `/api/health`
-   - `/api/forecast`
-   - `/api/outlook/incremental`
-   - `/api/outlook/incremental/hour/0/probability-tile`
-   - `/gif.worker.js`
-3. Add `autooutlook.tech` as a Cloudflare Pages custom domain.
-4. Move DNS for `autooutlook.tech` to Cloudflare if it is not already there.
-5. Recheck the same endpoints on `https://autooutlook.tech`.
+```powershell
+gcloud run jobs executions list `
+  --job autooutlook-artifact-refresh `
+  --region us-east1 `
+  --project project-e75d6e93-197d-4d41-ad6
+```
 
-## Limits To Watch
+## Verification
 
-- Cloudflare Pages Free: 500 deploys/month, 20,000 files/site, 25 MiB per uploaded file.
-- Workers Free, which backs Pages Functions: 100,000 function requests/day and 10 ms CPU/request.
-- GitHub scheduled workflows can be delayed or dropped at high load, so this is free and practical but not strict real-time cron.
+The publisher refuses deployment unless the GCS index:
+
+- has `status=complete`;
+- contains all 49 forecast hours;
+- contains SPC verification generated after the prediction artifacts.
+
+After deployment, it polls `https://autooutlook.tech/api/outlook/incremental` until the expected GCS cycle is visible.
