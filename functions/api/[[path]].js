@@ -26,8 +26,9 @@ function apiHeaders(cacheControl, contentType = 'application/json; charset=utf-8
   };
 }
 
-function resolveStaticPath(pathname, region, model = null, date = null) {
+function resolveStaticPath(pathname, region, model = null, date = null, backing = null) {
   const prefix = region === 'conus' ? '/_api/conus' : '/_api';
+  const pure = backing === 'pure';
 
   // Available dates list
   if (pathname === '/api/outlook/merged-d1-available-dates') {
@@ -67,9 +68,9 @@ function resolveStaticPath(pathname, region, model = null, date = null) {
     const filename = isMergedD1Verification
       ? 'verification.json'
       : isMergedD1RiskPolygons
-        ? 'risk-polygons.geojson'
+        ? (pure ? 'risk-polygons-pure.geojson' : 'risk-polygons.geojson')
         : isMergedD1ProbabilityTile
-          ? 'probability-tile.json'
+          ? (pure ? 'probability-tile-pure.json' : 'probability-tile.json')
           : 'storm-reports.json';
         
     if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -88,9 +89,9 @@ function resolveStaticPath(pathname, region, model = null, date = null) {
     const filename = isMergedD2Verification
       ? 'verification.json'
       : isMergedD2RiskPolygons
-        ? 'risk-polygons.geojson'
+        ? (pure ? 'risk-polygons-pure.geojson' : 'risk-polygons.geojson')
         : isMergedD2ProbabilityTile
-          ? 'probability-tile.json'
+          ? (pure ? 'probability-tile-pure.json' : 'probability-tile.json')
           : 'spc-day2-category.geojson';
 
     if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -172,20 +173,39 @@ export async function onRequest(context) {
   const region = url.searchParams.get('region');
   const model = url.searchParams.get('model');
   const date = url.searchParams.get('date');
+  const backing = url.searchParams.get('backing');
 
-  let staticPath = resolveStaticPath(pathname, region, model, date);
+  let staticPath = resolveStaticPath(pathname, region, model, date, backing);
   if (!staticPath) return notReady(pathname);
 
   let assetResponse = await fetchStaticAsset(context, staticPath);
 
   // If regional asset is not found, try falling back to the legacy root asset path
   if (isMissingAssetResponse(assetResponse) && region) {
-    const fallbackPath = resolveStaticPath(pathname, null, null, date);
+    const fallbackPath = resolveStaticPath(pathname, null, null, date, backing);
     if (fallbackPath && fallbackPath !== staticPath) {
       const fallbackResponse = await fetchStaticAsset(context, fallbackPath);
       if (!isMissingAssetResponse(fallbackResponse)) {
         assetResponse = fallbackResponse;
         staticPath = fallbackPath;
+      }
+    }
+  }
+
+  // If the pure ("Our Model") asset is missing (e.g. an export predating the
+  // pure/blend split), fall back to the SPC-blended asset so the map still
+  // renders rather than erroring.
+  if (isMissingAssetResponse(assetResponse) && backing === 'pure') {
+    const blendRegional = resolveStaticPath(pathname, region, model, date, null);
+    const blendCandidates = [blendRegional];
+    if (region) blendCandidates.push(resolveStaticPath(pathname, null, null, date, null));
+    for (const candidate of blendCandidates) {
+      if (!candidate || candidate === staticPath) continue;
+      const blendResponse = await fetchStaticAsset(context, candidate);
+      if (!isMissingAssetResponse(blendResponse)) {
+        assetResponse = blendResponse;
+        staticPath = candidate;
+        break;
       }
     }
   }

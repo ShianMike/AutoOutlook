@@ -221,6 +221,27 @@ def _in_progress_merge_date(dates: list[str]) -> str | None:
     return None
 
 
+def _write_lightweight_tile(tile_path: Path, dst_path: Path, label: str) -> None:
+    """Copy a merged probability tile with the heavy grids stripped.
+
+    The merged maps render categories/hazards from the vector risk + hazard
+    shape collections, so the client only needs the lightweight tile (vector
+    shapes + metadata); dropping ``categoryOrdinal`` / ``categoryLabel`` /
+    ``probabilities`` keeps the static payload small.
+    """
+    if not tile_path.exists():
+        return
+    try:
+        tile = json.loads(tile_path.read_text(encoding="utf-8"))
+        if isinstance(tile, dict):
+            tile["categoryOrdinal"] = []
+            tile["categoryLabel"] = []
+            tile["probabilities"] = {}
+            write_json(dst_path, tile)
+    except Exception as e:
+        print(f"Warning: failed to make lightweight {label} tile: {e}")
+
+
 def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
     # 1. Get available merge dates list
     dates = helpers._available_merge_dates_list(model="hrrr")
@@ -255,19 +276,13 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         copy_if_exists(merged_dir / "merged_verification_summary.json", date_out_dir / "verification.json")
         copy_if_exists(merged_dir / "merged_risk_polygons.geojson", date_out_dir / "risk-polygons.geojson")
         copy_if_exists(merged_dir / "merged_hazard_probability_shapes.geojson", date_out_dir / "hazard-probability-shapes.geojson")
-        
+        # Pure ("Our Model" / no SPC blend) variants, served when backing=pure.
+        copy_if_exists(merged_dir / "merged_risk_polygons_pure.geojson", date_out_dir / "risk-polygons-pure.geojson")
+        copy_if_exists(merged_dir / "merged_hazard_probability_shapes_pure.geojson", date_out_dir / "hazard-probability-shapes-pure.geojson")
+
         # Process and write lightweight probability tile (remove heavy lat/lon and probability grids)
-        tile_path = merged_dir / "merged_probability_tile.json"
-        if tile_path.exists():
-            try:
-                tile = json.loads(tile_path.read_text(encoding="utf-8"))
-                if isinstance(tile, dict):
-                    tile["categoryOrdinal"] = []
-                    tile["categoryLabel"] = []
-                    tile["probabilities"] = {}
-                    write_json(date_out_dir / "probability-tile.json", tile)
-            except Exception as e:
-                print(f"Warning: failed to make lightweight tile for {date_str}: {e}")
+        _write_lightweight_tile(merged_dir / "merged_probability_tile.json", date_out_dir / "probability-tile.json", "D1")
+        _write_lightweight_tile(merged_dir / "merged_probability_tile_pure.json", date_out_dir / "probability-tile-pure.json", "D1 pure")
                 
         # Fetch and write storm reports
         try:
@@ -286,6 +301,9 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         copy_if_exists(latest_date_dir / "risk-polygons.geojson", merged_d1_out_dir / "risk-polygons.geojson")
         copy_if_exists(latest_date_dir / "hazard-probability-shapes.geojson", merged_d1_out_dir / "hazard-probability-shapes.geojson")
         copy_if_exists(latest_date_dir / "probability-tile.json", merged_d1_out_dir / "probability-tile.json")
+        copy_if_exists(latest_date_dir / "risk-polygons-pure.geojson", merged_d1_out_dir / "risk-polygons-pure.geojson")
+        copy_if_exists(latest_date_dir / "hazard-probability-shapes-pure.geojson", merged_d1_out_dir / "hazard-probability-shapes-pure.geojson")
+        copy_if_exists(latest_date_dir / "probability-tile-pure.json", merged_d1_out_dir / "probability-tile-pure.json")
         print(f"Default fallback merged D1 set to latest date: {dates[0]}")
 
         # Storm reports accumulate over the 12Z–12Z convective day, so the
@@ -334,20 +352,14 @@ def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) ->
         copy_if_exists(merged_dir / "merged_risk_polygons.geojson", date_out_dir / "risk-polygons.geojson")
         copy_if_exists(merged_dir / "merged_hazard_probability_shapes.geojson", date_out_dir / "hazard-probability-shapes.geojson")
         copy_if_exists(merged_dir / "spc_day2_cat.geojson", date_out_dir / "spc-day2-category.geojson")
+        # Pure ("Our Model" / no SPC blend) variants, served when backing=pure.
+        copy_if_exists(merged_dir / "merged_risk_polygons_pure.geojson", date_out_dir / "risk-polygons-pure.geojson")
+        copy_if_exists(merged_dir / "merged_hazard_probability_shapes_pure.geojson", date_out_dir / "hazard-probability-shapes-pure.geojson")
 
         # Process and write lightweight probability tile (drop heavy grids; keep
         # the vector risk/hazard/cig shapes the merged maps actually render).
-        tile_path = merged_dir / "merged_probability_tile.json"
-        if tile_path.exists():
-            try:
-                tile = json.loads(tile_path.read_text(encoding="utf-8"))
-                if isinstance(tile, dict):
-                    tile["categoryOrdinal"] = []
-                    tile["categoryLabel"] = []
-                    tile["probabilities"] = {}
-                    write_json(date_out_dir / "probability-tile.json", tile)
-            except Exception as e:
-                print(f"Warning: failed to make lightweight D2 tile for {date_str}: {e}")
+        _write_lightweight_tile(merged_dir / "merged_probability_tile.json", date_out_dir / "probability-tile.json", "D2")
+        _write_lightweight_tile(merged_dir / "merged_probability_tile_pure.json", date_out_dir / "probability-tile-pure.json", "D2 pure")
 
         # D2 spans a future convective day, so there are no verifying storm
         # reports yet; write an empty list so the client gets a clean response.
@@ -363,6 +375,9 @@ def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) ->
         copy_if_exists(latest_date_dir / "hazard-probability-shapes.geojson", merged_d2_out_dir / "hazard-probability-shapes.geojson")
         copy_if_exists(latest_date_dir / "probability-tile.json", merged_d2_out_dir / "probability-tile.json")
         copy_if_exists(latest_date_dir / "spc-day2-category.geojson", merged_d2_out_dir / "spc-day2-category.geojson")
+        copy_if_exists(latest_date_dir / "risk-polygons-pure.geojson", merged_d2_out_dir / "risk-polygons-pure.geojson")
+        copy_if_exists(latest_date_dir / "hazard-probability-shapes-pure.geojson", merged_d2_out_dir / "hazard-probability-shapes-pure.geojson")
+        copy_if_exists(latest_date_dir / "probability-tile-pure.json", merged_d2_out_dir / "probability-tile-pure.json")
         copy_if_exists(latest_date_dir / "storm-reports.json", merged_d2_out_dir / "storm-reports.json")
         print(f"Default fallback merged D2 set to latest date: {dates[0]}")
 
