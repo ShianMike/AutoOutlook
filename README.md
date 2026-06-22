@@ -148,7 +148,7 @@ Production should keep the public website online while serving only finished art
 
 The scheduled refresh now runs in Google Cloud:
 
-- Cloud Scheduler starts `autooutlook-artifact-refresh` at `03/09/15/21Z`.
+- Cloud Scheduler starts `autooutlook-artifact-refresh` every two hours on even UTC hours.
 - The Cloud Run Job generates the complete F00-F48 cycle and publishes fixed object paths to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
 - GitHub Actions only downloads the completed GCS snapshot, exports `dist/_api`, and deploys Cloudflare Pages. It does not use GitHub artifacts or Actions caches.
 - The public Cloud Run service is an API fallback and reads the same GCS bucket.
@@ -202,7 +202,7 @@ gcloud run services update autooutlook `
   --project project-e75d6e93-197d-4d41-ad6
 ```
 
-When a release changes backend artifact-generation code or shared code used by the scheduled pipeline, update the hourly Cloud Run Job to the same image tag so the artifact generator and public service stay on the same revision:
+When a release changes backend artifact-generation code or shared code used by the scheduled pipeline, update the scheduled Cloud Run Job to the same image tag so the artifact generator and public service stay on the same revision:
 
 ```powershell
 gcloud run jobs update autooutlook-artifact-refresh `
@@ -213,7 +213,7 @@ gcloud run jobs update autooutlook-artifact-refresh `
 
 The job should write working artifacts to local `/tmp` and upload finished JSON artifacts through the Cloud Storage client. Avoid routing generation output through a Cloud Storage FUSE mount; it adds filesystem translation overhead and makes overlapping executions more expensive.
 
-Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 3,9,15,21 * * *` in `Etc/UTC`.
+Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 */2 * * *` in `Etc/UTC`.
 
 ## Project layout
 

@@ -2,8 +2,8 @@ name: Publish Google Cloud artifacts to Cloudflare
 
 on:
   schedule:
-    # The Cloud Run generator starts at 03/09/15/21Z. Publish its completed GCS
-    # snapshot 90 minutes later without storing artifacts or caches in GitHub.
+    # Publish the latest completed GCS snapshot on the established Cloudflare
+    # cadence without storing artifacts or caches in GitHub.
     - cron: '30 4,10,16,22 * * *'
   workflow_dispatch:
     inputs:
