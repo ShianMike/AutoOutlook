@@ -950,7 +950,7 @@ export default function OutlookMapPanel({
 
       {/* Unified Control Bar Row (Moved below the map) */}
       <div className="mt-2 border-[3px] border-ink bg-paper shadow-retro-sm flex flex-col animate-fadeIn">
-        <div className="flex flex-wrap items-start gap-x-3 gap-y-3 p-3">
+        <div className="flex flex-nowrap items-start gap-x-2 gap-y-3 p-3 overflow-x-auto [&>*]:shrink-0">
           {/* Forecast type */}
           <ControlField label="Type">
             <SegmentedControl
@@ -980,7 +980,7 @@ export default function OutlookMapPanel({
           </ControlField>
 
           {/* Map zoom region */}
-          <ControlField label="Zoom Region" className="w-44">
+          <ControlField label="Zoom Region" className="w-32">
             <select
               value={zoomRegion}
               onChange={(e) => setZoomRegion(e.target.value as MapZoomRegion)}
@@ -1011,8 +1011,8 @@ export default function OutlookMapPanel({
               ]}
             />
             {hourlySpcUnavailable && (
-              <p className="mt-1 text-[11px] leading-tight text-amber-500" role="status">
-                No SPC outlook covers this hour yet — showing the unblended model.
+              <p className="mt-1 max-w-[150px] text-[9px] font-bold uppercase tracking-wider leading-tight text-signal-red" role="status">
+                No SPC for this hour — showing unblended model.
               </p>
             )}
           </ControlField>
@@ -1041,7 +1041,7 @@ export default function OutlookMapPanel({
 
           {/* Anchor date (merged) */}
           {viewType === 'merged' && availableMergedDates.length > 0 && (
-            <ControlField label="Anchor Date" className="w-36 animate-fadeIn">
+            <ControlField label="Anchor Date" className="w-32 animate-fadeIn">
               <select
                 value={selectedMergedDate}
                 onChange={(e) => setSelectedMergedDate(e.target.value)}
@@ -1068,7 +1068,7 @@ export default function OutlookMapPanel({
 
           {/* Verified reports (merged) */}
           {viewType === 'merged' && setStormReportsMode && (
-            <ControlField label="Verified Reports" className="w-40 animate-fadeIn">
+            <ControlField label="Verified Reports" className="w-36 animate-fadeIn">
               <select
                 value={reportsPendingForSelectedDate ? 'none' : stormReportsMode}
                 onChange={(e) => setStormReportsMode(e.target.value as StormReportsMode)}
@@ -1092,7 +1092,7 @@ export default function OutlookMapPanel({
 
           {/* Hazard view (hazard mode) */}
           {mode === 'hazards' && (
-            <ControlField label="Hazard" className="w-40 animate-fadeIn">
+            <ControlField label="Hazard" className="w-36 animate-fadeIn">
               <select
                 value={hazardLayout === 'all' ? 'all' : selectedHazard}
                 onChange={(e) => {
@@ -1117,7 +1117,7 @@ export default function OutlookMapPanel({
           )}
 
           {(mode === 'levels' || (mode === 'hazards' && spcHazardProbabilityShapesOverride?.features?.length)) && (
-            <ControlField label="SPC Compare" className="w-44 animate-fadeIn" >
+            <ControlField label="SPC Compare" className="w-40 animate-fadeIn" >
               <select
                 value={spcComparisonMode}
                 onChange={(e) => setSpcComparisonMode(e.target.value as SpcComparisonMode)}
@@ -1133,9 +1133,9 @@ export default function OutlookMapPanel({
           )}
 
           {/* Export — pinned to the far right */}
-          <div className="ml-auto flex items-start gap-3">
+          <div className="ml-auto flex items-start gap-2">
             <ControlDivider />
-            <ControlField label="Export" className="w-40">
+            <ControlField label="Export" className="w-36">
               <select
                 value=""
                 onChange={(e) => {
