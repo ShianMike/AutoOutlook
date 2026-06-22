@@ -44,6 +44,8 @@ interface OutlookMapPanelProps {
   mergedArtifactsOverride?: OutlookArtifactState;
   spcDay1Override?: SpcCategoryFeatureCollection | null;
   spcHazardProbabilityShapesOverride?: OutlookProbabilityShapeFeatureCollection | null;
+  spcBacked?: boolean;
+  setSpcBacked?: (value: boolean) => void;
   initialSpcComparisonMode?: SpcComparisonMode;
   staticStormReportsAvailable?: boolean;
 }
@@ -289,10 +291,19 @@ export default function OutlookMapPanel({
   mergedArtifactsOverride,
   spcDay1Override = null,
   spcHazardProbabilityShapesOverride = null,
+  spcBacked: spcBackedProp,
+  setSpcBacked: setSpcBackedProp,
   initialSpcComparisonMode = 'auto',
   staticStormReportsAvailable = false,
 }: OutlookMapPanelProps) {
   const [mode, setMode] = useState<OutlookMode>('levels');
+  // SPC backing toggle, shared across hourly + merged views: false = "Our Model"
+  // (pure HRRR/XGBoost), true = "SPC Blend" (50/50 blend with the SPC envelope).
+  // Controlled by the parent when provided, else managed locally (defaults to
+  // the SPC blend, matching the previous always-blended merged product).
+  const [internalSpcBacked, setInternalSpcBacked] = useState(true);
+  const spcBacked = spcBackedProp ?? internalSpcBacked;
+  const setSpcBacked = setSpcBackedProp ?? setInternalSpcBacked;
   const [spcComparisonMode, setSpcComparisonMode] = useState<SpcComparisonMode>(initialSpcComparisonMode);
   const [hazardLayout, setHazardLayout] = useState<'all' | 'single'>('all');
   const [selectedHazard, setSelectedHazard] = useState<'thunder' | 'hail' | 'wind' | 'tornado'>('thunder');
@@ -347,6 +358,7 @@ export default function OutlookMapPanel({
   const liveMergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
     enabled: !mergedArtifactsOverride,
     day: mergedDay,
+    backing: spcBacked ? 'blend' : 'pure',
   });
   const mergedArtifacts = mergedArtifactsOverride ?? liveMergedArtifacts;
 
@@ -375,19 +387,18 @@ export default function OutlookMapPanel({
 
   const effectiveSpcOverride = spcDay1Override ?? (mergedDay === 2 ? mergedD2Spc : null);
 
-  // SPC-backed hourly scrubber: apply the SPC day envelope (ceiling mode) to the
+  // SPC-backed scrubber: apply the SPC day envelope (50/50 blend) to the
   // selected forecast hour at serve time. The SPC Day 1/Day 2 window is chosen
   // automatically from the hour's valid time by the backend.
-  const [hourlySpcBacked, setHourlySpcBacked] = useState(false);
   const spcBackedHourArtifacts = useSpcBackedHourArtifacts(
     activeRegion,
     snapshot?.forecastHour,
-    viewType === 'hourly' && hourlySpcBacked,
+    viewType === 'hourly' && spcBacked,
   );
 
   const effectiveArtifactState = viewType === 'merged'
     ? mergedArtifacts
-    : (hourlySpcBacked && spcBackedHourArtifacts.status === 'ready')
+    : (spcBacked && spcBackedHourArtifacts.status === 'ready')
       ? spcBackedHourArtifacts
       : outlookArtifacts;
   const effectiveMetadata = effectiveArtifactState.artifacts?.metadata;
@@ -979,21 +990,19 @@ export default function OutlookMapPanel({
 
           <ControlDivider />
 
-          {/* SPC backing for the hourly scrubber */}
-          {viewType === 'hourly' && (
-            <ControlField label="SPC Backing" className="animate-fadeIn">
-              <SegmentedControl
-                ariaLabel="SPC backing"
-                value={hourlySpcBacked ? 'spc' : 'hrrr'}
-                disabled={isAnyExporting}
-                onChange={(value) => setHourlySpcBacked(value === 'spc')}
-                options={[
-                  { value: 'hrrr', label: 'HRRR Only', title: 'Show the raw HRRR/XGBoost hour (no SPC backing)' },
-                  { value: 'spc', label: 'SPC-Backed', title: 'SPC-backed: this hour is capped by the SPC Day 1/Day 2 envelope' },
-                ]}
-              />
-            </ControlField>
-          )}
+          {/* SPC backing: pure "Our Model" vs the 50/50 SPC blend (both views) */}
+          <ControlField label="SPC Backing" className="animate-fadeIn">
+            <SegmentedControl
+              ariaLabel="SPC backing"
+              value={spcBacked ? 'spc' : 'hrrr'}
+              disabled={isAnyExporting}
+              onChange={(value) => setSpcBacked(value === 'spc')}
+              options={[
+                { value: 'hrrr', label: 'Our Model', title: 'Pure HRRR/XGBoost outlook (no SPC backing)' },
+                { value: 'spc', label: 'SPC Blend', title: '50/50 blend of our model with the official SPC outlook' },
+              ]}
+            />
+          </ControlField>
 
           {/* Outlook day (D1 / D2) */}
           {viewType === 'merged' && setMergedDay && (

@@ -969,26 +969,30 @@ def merge_cycles_for_spc_window(
                 f"SPC D1 window ({d1_valid.isoformat()} – {d1_expire.isoformat()})"
             )
 
-        merged_grid = np.maximum.reduce(category_grids)
-        merged_probs = {}
+        # Pure ("our model only") outlook = the multi-cycle HRRR/XGBoost
+        # element-wise maximum with no SPC influence.
+        pure_grid = np.maximum.reduce(category_grids)
+        pure_probs = {}
         for hazard, grids in hazard_grids_by_name.items():
             if grids:
-                merged_probs[hazard] = np.maximum.reduce(grids)
+                pure_probs[hazard] = np.maximum.reduce(grids)
             else:
-                merged_probs[hazard] = np.zeros(grid_shape)
+                pure_probs[hazard] = np.zeros(grid_shape)
 
         # Back the merged categorical outlook with the official SPC Day 1 outlook.
         # By default the HRRR/XGBoost guidance drives the outlook but is nudged
-        # 25% toward SPC (see _spc_support_weight); hazard probabilities are kept
-        # consistent with the resulting risk levels.
+        # 50% toward SPC (see _spc_support_weight); hazard probabilities are kept
+        # consistent with the resulting risk levels. Both the pure outlook and
+        # the SPC blend are emitted as separate artifacts so the UI can toggle
+        # between "Our Model" and "SPC Blend".
         spc_support_report: dict[str, Any] | None = None
         spc_support_weight = _spc_support_weight()
         if spc_support_weight > 0.0:
             blended = blend_merged_outlook_with_spc(
                 tile_lats,
                 tile_lons,
-                merged_grid,
-                merged_probs,
+                pure_grid,
+                pure_probs,
                 spc_geojson,
                 weight=spc_support_weight,
                 category_weighting=_spc_category_weighting_enabled(),
@@ -996,35 +1000,64 @@ def merge_cycles_for_spc_window(
             merged_grid = blended["category_grid"]
             merged_probs = blended["probabilities"]
             spc_support_report = blended["report"]
+        else:
+            merged_grid = pure_grid
+            merged_probs = pure_probs
 
         # Generate merged GeoJSON risk polygons and hazard shapes
         valid_time_str = d1_valid.isoformat().replace("+00:00", "Z")
-        merged_risk_polygons = risk_polygons_from_grid(
-            tile_lats,
-            tile_lons,
-            merged_grid,
-            forecast_hour=0,
-            valid_time_iso=valid_time_str,
-            probabilities=merged_probs,
-        )
-
-        merged_hazard_shapes = hazard_probability_shapes_from_grids(
-            tile_lats,
-            tile_lons,
-            merged_probs,
-            merged_grid,
-            forecast_hour=0,
-            valid_time_iso=valid_time_str,
-        )
-        merged_hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(
-            merged_hazard_shapes,
-            merged_risk_polygons,
-        )
         merged_cig_shapes = _merge_cig_shape_collections(
             cig_feature_collections,
             valid_time_str,
         )
         merged_convective_setup = _aggregate_convective_setup(convective_setups)
+        _tile_labels = ["NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH"]
+
+        def _build_outlook_artifacts(grid, probs):
+            """Build (risk_polygons, hazard_shapes, probability_tile) for a grid."""
+            risk_polygons = risk_polygons_from_grid(
+                tile_lats,
+                tile_lons,
+                grid,
+                forecast_hour=0,
+                valid_time_iso=valid_time_str,
+                probabilities=probs,
+            )
+            hazard_shapes = hazard_probability_shapes_from_grids(
+                tile_lats,
+                tile_lons,
+                probs,
+                grid,
+                forecast_hour=0,
+                valid_time_iso=valid_time_str,
+            )
+            hazard_shapes = constrain_hazard_probability_shapes_to_risk_support(
+                hazard_shapes,
+                risk_polygons,
+            )
+            probability_tile = {
+                "forecastHour": 0,
+                "validTimeISO": valid_time_str,
+                "stride": source_tile_stride or 4,
+                "shape": list(grid.shape),
+                "lats": tile_lats.tolist(),
+                "lons": tile_lons.tolist(),
+                "categoryOrdinal": grid.tolist(),
+                "categoryLabel": [[_tile_labels[int(val)] for val in row] for row in grid],
+                "probabilities": {hazard: g.tolist() for hazard, g in probs.items()},
+                "riskShapes": risk_polygons,
+                "hazardProbabilityShapes": hazard_shapes,
+                "cigShapes": merged_cig_shapes,
+                "convectiveSetup": merged_convective_setup,
+            }
+            return risk_polygons, hazard_shapes, probability_tile
+
+        merged_risk_polygons, merged_hazard_shapes, merged_probability_tile = (
+            _build_outlook_artifacts(merged_grid, merged_probs)
+        )
+        pure_risk_polygons, pure_hazard_shapes, pure_probability_tile = (
+            _build_outlook_artifacts(pure_grid, pure_probs)
+        )
 
         summary = compare_prediction_to_spc(tile_lats, tile_lons, merged_grid, spc_geojson, None)
         summary["mergedCycles"] = merged_cycles
@@ -1051,29 +1084,13 @@ def merge_cycles_for_spc_window(
             _write_json(output_dir / "merged_risk_polygons.geojson", merged_risk_polygons)
             _write_json(output_dir / "merged_hazard_probability_shapes.geojson", merged_hazard_shapes)
             _write_json(output_dir / "merged_cig_shapes.geojson", merged_cig_shapes)
-
-            # Generate the merged probability tile that contains everything
-            # (matches structure of OutlookProbabilityTile)
-            labels = ["NONE", "TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH"]
-            merged_probability_tile = {
-                "forecastHour": 0,
-                "validTimeISO": valid_time_str,
-                "stride": source_tile_stride or 4,
-                "shape": list(merged_grid.shape),
-                "lats": tile_lats.tolist(),
-                "lons": tile_lons.tolist(),
-                "categoryOrdinal": merged_grid.tolist(),
-                "categoryLabel": [[labels[int(val)] for val in row] for row in merged_grid],
-                "probabilities": {
-                    hazard: grid.tolist()
-                    for hazard, grid in merged_probs.items()
-                },
-                "riskShapes": merged_risk_polygons,
-                "hazardProbabilityShapes": merged_hazard_shapes,
-                "cigShapes": merged_cig_shapes,
-                "convectiveSetup": merged_convective_setup,
-            }
             _write_json(output_dir / "merged_probability_tile.json", merged_probability_tile)
+
+            # Pure ("our model only") artifacts, served when the UI requests the
+            # un-blended outlook (backing=pure).
+            _write_json(output_dir / "merged_risk_polygons_pure.geojson", pure_risk_polygons)
+            _write_json(output_dir / "merged_hazard_probability_shapes_pure.geojson", pure_hazard_shapes)
+            _write_json(output_dir / "merged_probability_tile_pure.json", pure_probability_tile)
 
             index_filename = "merged_d1_index.json" if spc_day == 1 else f"merged_d{spc_day}_index.json"
             _write_json(output_dir / index_filename, {

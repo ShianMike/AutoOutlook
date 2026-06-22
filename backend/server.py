@@ -291,6 +291,22 @@ def _generate_or_get_merged_d2_dir(target_date_str: str | None, model: str) -> P
     return _generate_or_get_merged_dir(target_date_str, model, spc_day=2)
 
 
+def _merged_artifact_path(merged_dir: Path, blend_name: str, pure_name: str) -> Path:
+    """Resolve a merged artifact path honoring the ``backing`` query parameter.
+
+    ``backing=pure`` serves the un-blended "our model only" artifact when it
+    exists (older merged dirs may predate the pure artifacts, in which case the
+    blended artifact is served as a fallback). Any other value serves the
+    SPC-blended artifact (the default product).
+    """
+    backing = (request.args.get("backing") or "blend").strip().lower()
+    if backing == "pure":
+        pure_path = merged_dir / pure_name
+        if pure_path.exists():
+            return pure_path
+    return merged_dir / blend_name
+
+
 def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day: int = 1) -> Path | None:
     """Ensure that the merged Day ``spc_day`` artifacts for target_date_str are generated."""
     from datetime import date, datetime, timedelta, timezone
@@ -318,6 +334,7 @@ def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day
     index_name = "merged_d1_index.json" if spc_day == 1 else f"merged_d{spc_day}_index.json"
     verification_path = merged_dir / "merged_verification_summary.json"
     tile_path = merged_dir / "merged_probability_tile.json"
+    pure_tile_path = merged_dir / "merged_probability_tile_pure.json"
     index_path = merged_dir / index_name
 
     def target_cycle_dirs() -> list[Path]:
@@ -349,6 +366,10 @@ def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day
     
     def check_freshness() -> bool:
         if not (verification_path.exists() and tile_path.exists() and index_path.exists()):
+            return False
+        # Require the pure ("our model only") tile too, so dirs generated before
+        # the pure/blend split are regenerated to emit it (Req: separate outputs).
+        if not pure_tile_path.exists():
             return False
 
         # Check if cached files are up-to-date with the selected run-anchored cycle.
@@ -445,7 +466,7 @@ def merged_d1_risk_polygons():
     merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
     if merged_dir is None:
         return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
-    return _json_path(merged_dir / "merged_risk_polygons.geojson")
+    return _json_path(_merged_artifact_path(merged_dir, "merged_risk_polygons.geojson", "merged_risk_polygons_pure.geojson"))
 
 
 @app.get("/api/outlook/merged-d1-probability-tile")
@@ -455,7 +476,7 @@ def merged_d1_probability_tile():
     merged_dir = _generate_or_get_merged_d1_dir(date_str, model)
     if merged_dir is None:
         return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
-    return _json_path(merged_dir / "merged_probability_tile.json")
+    return _json_path(_merged_artifact_path(merged_dir, "merged_probability_tile.json", "merged_probability_tile_pure.json"))
 
 
 @app.get("/api/outlook/merged-d2-available-dates")
@@ -482,7 +503,7 @@ def merged_d2_risk_polygons():
     merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
     if merged_dir is None:
         return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
-    return _json_path(merged_dir / "merged_risk_polygons.geojson")
+    return _json_path(_merged_artifact_path(merged_dir, "merged_risk_polygons.geojson", "merged_risk_polygons_pure.geojson"))
 
 
 @app.get("/api/outlook/merged-d2-probability-tile")
@@ -492,7 +513,7 @@ def merged_d2_probability_tile():
     merged_dir = _generate_or_get_merged_d2_dir(date_str, model)
     if merged_dir is None:
         return _json_error({"error": "No contributing forecast cycles found for the target date/model", "code": "no_cycles_found"}, 404)
-    return _json_path(merged_dir / "merged_probability_tile.json")
+    return _json_path(_merged_artifact_path(merged_dir, "merged_probability_tile.json", "merged_probability_tile_pure.json"))
 
 
 @app.get("/api/outlook/merged-d2-spc-category")

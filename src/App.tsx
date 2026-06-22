@@ -41,6 +41,9 @@ export default function App() {
   const [selectedMergedDate, setSelectedMergedDate] = useState<string>('');
   const [mergedDay, setMergedDay] = useState<1 | 2>(1);
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
+  // SPC backing toggle shared by the map + summary panels: true = 50/50 SPC
+  // blend (default product), false = pure "Our Model" (HRRR/XGBoost only).
+  const [spcBacked, setSpcBacked] = useState(true);
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('none');
   const [view, setView] = useState<AppView>(() => viewFromHash());
   // Monotonically increasing navigation counter. Bumped on every active-view
@@ -80,6 +83,7 @@ export default function App() {
   const mergedArtifacts = useMergedD1Artifacts(activeRegion, selectedMergedDate, {
     enabled: dashboardDataEnabled && isMerged,
     day: mergedDay,
+    backing: spcBacked ? 'blend' : 'pure',
   });
   const panelArtifactState = isMerged ? mergedArtifacts : outlookArtifacts;
   const panelSnapshot = isMerged && snapshot ? { ...snapshot, forecastHour: 0 } : snapshot;
@@ -233,6 +237,8 @@ export default function App() {
               setMergedDay={setMergedDay}
               viewType={viewType}
               setViewType={setViewType}
+              spcBacked={spcBacked}
+              setSpcBacked={setSpcBacked}
               stormReportsMode={stormReportsMode}
               setStormReportsMode={setStormReportsMode}
               stormReports={stormReports}

@@ -778,11 +778,12 @@ export function useMergedD1Verification(
 export function useMergedD1Artifacts(
   activeRegion: ActiveRegion = 'conus',
   selectedDate?: string,
-  options: { enabled?: boolean; day?: 1 | 2 } = {},
+  options: { enabled?: boolean; day?: 1 | 2; backing?: 'pure' | 'blend' } = {},
 ): OutlookArtifactState {
   const [state, setState] = useState<OutlookArtifactState>(INITIAL_STATE);
   const enabled = options.enabled ?? true;
   const day = options.day ?? 1;
+  const backing = options.backing ?? 'blend';
 
   useEffect(() => {
     if (!enabled) {
@@ -795,11 +796,17 @@ export function useMergedD1Artifacts(
 
     const load = async () => {
       try {
-        const query = selectedDate ? `?date=${selectedDate}` : '';
+        const params = new URLSearchParams();
+        if (selectedDate) params.set('date', selectedDate);
+        const verifyQuery = selectedDate ? `?date=${selectedDate}` : '';
+        // Pure ("Our Model") outlook is requested with backing=pure; the SPC
+        // blend (default) omits the param.
+        if (backing === 'pure') params.set('backing', 'pure');
+        const outlookQuery = params.toString() ? `?${params.toString()}` : '';
         const [riskPolygons, mergedTile, verification] = await Promise.all([
-          fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/merged-d${day}-risk-polygons${query}`, controller.signal, activeRegion),
-          fetchJson<OutlookProbabilityTile>(`/api/outlook/merged-d${day}-probability-tile${query}`, controller.signal, activeRegion),
-          fetchJson<MergedD1VerificationSummary>(`/api/outlook/merged-d${day}-verification${query}`, controller.signal, activeRegion),
+          fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/merged-d${day}-risk-polygons${outlookQuery}`, controller.signal, activeRegion),
+          fetchJson<OutlookProbabilityTile>(`/api/outlook/merged-d${day}-probability-tile${outlookQuery}`, controller.signal, activeRegion),
+          fetchJson<MergedD1VerificationSummary>(`/api/outlook/merged-d${day}-verification${verifyQuery}`, controller.signal, activeRegion),
         ]);
 
         const probabilityTiles: OutlookProbabilityTiles = {
@@ -844,7 +851,7 @@ export function useMergedD1Artifacts(
 
     load();
     return () => controller.abort();
-  }, [activeRegion, selectedDate, enabled, day]);
+  }, [activeRegion, selectedDate, enabled, day, backing]);
 
   return state;
 }
@@ -868,7 +875,7 @@ export function useSpcBackedHourArtifacts(
     const load = async () => {
       try {
         const tile = await fetchJson<OutlookProbabilityTile>(
-          `/api/outlook/incremental/hour/${forecastHour}/spc-backed-tile`,
+          `/api/outlook/incremental/hour/${forecastHour}/spc-backed-tile?mode=blend`,
           controller.signal,
           activeRegion,
         );
