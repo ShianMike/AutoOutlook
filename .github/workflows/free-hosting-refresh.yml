@@ -2,9 +2,10 @@ name: Publish Google Cloud artifacts to Cloudflare
 
 on:
   schedule:
-    # Publish the latest completed GCS snapshot on the established Cloudflare
-    # cadence without storing artifacts or caches in GitHub.
-    - cron: '30 4,10,16,22 * * *'
+    # Publish the latest completed GCS snapshot every two hours, 30 minutes
+    # after the Cloud Run refresh job (which runs at the top of even UTC hours),
+    # without storing artifacts or caches in GitHub.
+    - cron: '30 */2 * * *'
   workflow_dispatch:
     inputs:
       force_deploy:
