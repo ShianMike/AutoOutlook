@@ -401,6 +401,14 @@ export default function OutlookMapPanel({
     : (spcBacked && spcBackedHourArtifacts.status === 'ready')
       ? spcBackedHourArtifacts
       : outlookArtifacts;
+
+  // True when the user asked for the hourly SPC blend but the backend could not
+  // apply it (no cached SPC envelope covers this hour's window), so the map is
+  // really showing the unbacked model. Used to surface a small notice.
+  const hourlySpcUnavailable = viewType === 'hourly'
+    && spcBacked
+    && spcBackedHourArtifacts.status === 'ready'
+    && spcBackedHourArtifacts.artifacts?.probabilityTiles?.hours?.[0]?.tile?.spcBacking?.spcSupportApplied === false;
   const effectiveMetadata = effectiveArtifactState.artifacts?.metadata;
   const effectiveSnapshot = viewType === 'merged' && snapshot ? {
     ...snapshot,
@@ -1002,6 +1010,11 @@ export default function OutlookMapPanel({
                 { value: 'spc', label: 'SPC Blend', title: '50/50 blend of our model with the official SPC outlook' },
               ]}
             />
+            {hourlySpcUnavailable && (
+              <p className="mt-1 text-[11px] leading-tight text-amber-500" role="status">
+                No SPC outlook covers this hour yet — showing the unblended model.
+              </p>
+            )}
           </ControlField>
 
           {/* Outlook day (D1 / D2) */}

@@ -215,6 +215,10 @@ The job should write working artifacts to local `/tmp` and upload finished JSON 
 
 Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 */2 * * *` in `Etc/UTC`.
 
+The Cloud Build service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) needs `roles/run.developer` on the project and `roles/iam.serviceAccountUser` on the runtime service account (`autooutlook-runtime@...`) so the `gcloud builds submit` deploy step can update the Cloud Run service end-to-end. Without these, the build still builds and pushes the image, but the in-build `gcloud run deploy` step fails with `PERMISSION_DENIED` and the service/job must be pointed at the new image manually.
+
+The public Cloud Run service is an API fallback for the incremental F00-F48 artifacts only. Merged D1/D2 outlooks (including the pure "Our Model" and 50/50 SPC-blend variants) are produced by the static export and served from Cloudflare; the fallback service does not pre-generate them, so `merged-d*` endpoints there can return empty/404.
+
 ## Project layout
 
 ```

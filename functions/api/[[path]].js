@@ -14,7 +14,7 @@ const STATIC_ROUTES = new Map([
   ['/api/outlook/preview.png', '/_api/outlook/preview.png'],
 ]);
 
-const HOUR_ROUTE = /^\/api\/outlook\/incremental\/hour\/(\d+)\/(risk-polygons|probability-tile|metadata)$/;
+const HOUR_ROUTE = /^\/api\/outlook\/incremental\/hour\/(\d+)\/(risk-polygons|probability-tile|metadata|spc-backed-tile)$/;
 
 function apiHeaders(cacheControl, contentType = 'application/json; charset=utf-8') {
   return {

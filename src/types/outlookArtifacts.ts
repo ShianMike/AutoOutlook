@@ -261,6 +261,12 @@ export interface OutlookProbabilityTile {
   hazardProbabilityShapes?: OutlookProbabilityShapeFeatureCollection;
   cigShapes?: OutlookCigShapeFeatureCollection;
   convectiveSetup?: OutlookConvectiveSetup;
+  spcBacking?: {
+    spcSupportApplied?: boolean;
+    spcSupportMode?: string;
+    spcSupportWeight?: number | null;
+    reason?: string;
+  };
 }
 
 export interface OutlookProbabilityHour {

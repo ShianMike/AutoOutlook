@@ -1268,20 +1268,25 @@ def spc_backed_hour_tile(
     valid_iso = tile.get("validTimeISO")
     valid_dt = _parse_iso(valid_iso)
     if valid_dt is None:
-        return {"tile": dict(tile), "applied": False, "report": {"reason": "tile has no valid time"}}
+        reason = "tile has no valid time"
+        out = dict(tile)
+        out["spcBacking"] = {"spcSupportApplied": False, "reason": reason}
+        return {"tile": out, "applied": False, "report": {"reason": reason}}
 
     spc_geojson = select_spc_geojson_for_valid_time(spc_geojsons, valid_dt)
     if spc_geojson is None:
-        return {
-            "tile": dict(tile),
-            "applied": False,
-            "report": {"reason": "no SPC day window covers the tile valid time"},
-        }
+        reason = "no SPC day window covers the tile valid time"
+        out = dict(tile)
+        out["spcBacking"] = {"spcSupportApplied": False, "reason": reason}
+        return {"tile": out, "applied": False, "report": {"reason": reason}}
 
     try:
         lats, lons, grid = _tile_grid_payload(tile)
     except (ValueError, KeyError):
-        return {"tile": dict(tile), "applied": False, "report": {"reason": "tile grid payload invalid"}}
+        reason = "tile grid payload invalid"
+        out = dict(tile)
+        out["spcBacking"] = {"spcSupportApplied": False, "reason": reason}
+        return {"tile": out, "applied": False, "report": {"reason": reason}}
 
     probabilities = {
         hazard: np.asarray(values, dtype=float)

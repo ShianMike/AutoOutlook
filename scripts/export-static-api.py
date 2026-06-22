@@ -416,6 +416,60 @@ def _refresh_recent_archived_reports(archive_dir, merged_dates, refresh_fn) -> N
             print(f"Warning: ENH+ archive report refresh failed for {date_str}: {exc}")
 
 
+def export_spc_backed_hours(index: dict[str, Any], artifact_dir: Path, output_dir: Path, helpers) -> None:
+    """Pre-compute the 50/50 SPC-blended hourly tiles for the static scrubber.
+
+    Mirrors the dynamic ``/incremental/hour/<h>/spc-backed-tile`` endpoint in
+    blend mode so the hourly "SPC Blend" toggle works on the static deployment.
+    The SPC envelope comes from the merged-D1 cache, so this must run after
+    :func:`export_merged_d1_archives`. Every ready hour is written (even when no
+    SPC window covers it) so the tile always carries an ``spcBacking`` note and
+    the client can render the "no SPC" state instead of 404-ing.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        from backend.ml.merged_outlook import spc_backed_hour_tile
+    except Exception as exc:
+        print(f"Warning: cannot import spc_backed_hour_tile; skipping hourly SPC backing: {exc}")
+        return
+
+    cycle_iso = index.get("cycleTimeISO")
+    base_date = None
+    if isinstance(cycle_iso, str):
+        try:
+            base_date = datetime.fromisoformat(cycle_iso.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+        except Exception:
+            base_date = None
+    if base_date is None:
+        base_date = datetime.now(timezone.utc).date()
+    window_dates = [base_date, base_date + timedelta(days=1)]
+
+    try:
+        spc_geojsons = helpers._spc_geojsons_for_dates(window_dates, "hrrr")
+    except Exception as exc:
+        print(f"Warning: failed to load SPC geojsons for hourly backing: {exc}")
+        spc_geojsons = []
+
+    written = 0
+    backed = 0
+    for forecast_hour in coerce_hours(index.get("readyForecastHours")):
+        tile = read_json(artifact_dir / "hours" / f"f{forecast_hour:02d}" / "probability_tile.json")
+        if not isinstance(tile, dict):
+            continue
+        try:
+            result = spc_backed_hour_tile(tile, spc_geojsons, mode="blend")
+        except Exception as exc:
+            print(f"Warning: SPC-backed hour F{forecast_hour:02d} failed: {exc}")
+            continue
+        target = output_dir / "outlook" / "incremental" / "hour" / f"f{forecast_hour:02d}" / "spc-backed-tile.json"
+        write_json(target, result["tile"])
+        written += 1
+        if result.get("applied"):
+            backed += 1
+    print(f"Exported {written} SPC-backed hourly tiles ({backed} with an SPC envelope).")
+
+
 def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> None:
     """Accumulate ENH+ (Enhanced risk or higher) days into a persistent archive.
 
@@ -551,6 +605,9 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
 
     # Export merged D1 outlook archives
     export_merged_d1_archives(output_dir, artifact_dir.parent, helpers)
+
+    # Pre-compute SPC-blended hourly tiles (needs the merged-D1 SPC cache above)
+    export_spc_backed_hours(index, artifact_dir, output_dir, helpers)
 
     # Export merged D2 outlook archives (12Z cycle F24-F48)
     export_merged_d2_archives(output_dir, artifact_dir.parent, helpers)
