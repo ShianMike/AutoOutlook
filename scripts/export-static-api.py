@@ -484,6 +484,7 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
     from backend.ml.enh_plus_archive import (
         archive_available_dates,
         refresh_reports_for_archived_date,
+        repair_archived_spc_window,
         update_archive_for_date,
     )
 
@@ -509,6 +510,18 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
     # so without this a day freezes the moment newer cycles push it out of view.
     # Storm reports need only the date, so no merged artifacts are required here.
     _refresh_recent_archived_reports(archive_dir, set(merged_dates), refresh_reports_for_archived_date)
+
+    # 1c. Repair archived days whose SPC categorical was frozen on the wrong
+    # convective day by an early-morning capture (no-op when already correct).
+    for date_str in archive_available_dates(archive_dir):
+        try:
+            entry = repair_archived_spc_window(archive_dir, _date.fromisoformat(date_str))
+            if entry is not None and entry.get("removed"):
+                print(f"ENH+ archive: removed {date_str} (midday categorical {entry['maxCategory']} below ENH+)")
+            elif entry is not None:
+                print(f"ENH+ archive: repaired SPC window for {date_str} -> {entry['maxCategory']}")
+        except Exception as exc:
+            print(f"Warning: ENH+ archive SPC repair failed for {date_str}: {exc}")
 
     # 2. Export the accumulated archive tree.
     dates = archive_available_dates(archive_dir)

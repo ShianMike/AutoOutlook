@@ -134,16 +134,20 @@ class TestArchivedSpcLatestSelection(unittest.TestCase):
         # Latest issuance is MRGL (ordinal 2), not the earlier ENH (ordinal 4).
         self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 2)
 
-    def test_day1_blend_excludes_post_16z_reissue(self) -> None:
-        # 1300Z issuance: SLGT (the latest issuance before the 16Z blend cutoff).
+    def test_day1_blend_includes_midday_excludes_evening_reissue(self) -> None:
+        # 1300Z issuance: SLGT morning outlook.
         morning = _make_spc_geojson("2026-06-17T12:00:00Z", "2026-06-18T12:00:00Z", "SLGT", 3)
         morning["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T13:00:00Z"
-        # 1630Z reissue: upgraded to MDT, but issued after 16Z -> must be ignored.
-        afternoon = _make_spc_geojson("2026-06-17T16:30:00Z", "2026-06-18T12:00:00Z", "MDT", 5)
-        afternoon["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T16:30:00Z"
+        # 1630Z midday update: upgraded to MDT, issued before the 17Z cutoff -> included.
+        midday = _make_spc_geojson("2026-06-17T16:30:00Z", "2026-06-18T12:00:00Z", "MDT", 5)
+        midday["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T16:30:00Z"
+        # 2000Z evening reissue: HIGH, issued after the cutoff -> must be ignored.
+        evening = _make_spc_geojson("2026-06-17T20:00:00Z", "2026-06-18T12:00:00Z", "HIGH", 6)
+        evening["features"][0]["properties"]["ISSUE_ISO"] = "2026-06-17T20:00:00Z"
         zips = {
             "1300": self._zip_bytes(morning, "day1otlk"),
-            "1630": self._zip_bytes(afternoon, "day1otlk"),
+            "1630": self._zip_bytes(midday, "day1otlk"),
+            "2000": self._zip_bytes(evening, "day1otlk"),
         }
 
         class _Resp:
@@ -167,11 +171,11 @@ class TestArchivedSpcLatestSelection(unittest.TestCase):
 
         session = _Session()
         result = fetch_archived_spc_category("2026-06-17", session=session, day=1)
-        # The 1630Z reissue is never even requested (filtered out by run time).
-        self.assertNotIn("1630", session.requested_run_times)
-        self.assertEqual(result["selectedIssueTimeUTC"], "1300")
-        # Blend uses the pre-16Z SLGT, not the post-16Z MDT upgrade.
-        self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 3)
+        # The 2000Z evening reissue is never even requested (filtered out by run time).
+        self.assertNotIn("2000", session.requested_run_times)
+        self.assertEqual(result["selectedIssueTimeUTC"], "1630")
+        # Blend uses the 1630Z midday MDT, not the post-cutoff HIGH upgrade.
+        self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 5)
 
     def test_day2_still_uses_latest_reissue(self) -> None:
         # Day 2 must be unaffected by the Day 1 cutoff: latest issuance wins.

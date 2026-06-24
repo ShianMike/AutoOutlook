@@ -540,14 +540,15 @@ _SPC_ARCHIVE_RUN_TIMES: dict[int, list[str]] = {
     2: ["0600", "1730", "0700"],
 }
 
-# SPC reissues the Day 1 outlook through the afternoon and evening (1630Z, 2000Z,
-# 0100Z), and those later updates increasingly reflect ongoing/observed
-# convection. To keep the merged outlook a fair model + morning-guidance blend
+# SPC reissues the Day 1 outlook through the afternoon and evening (2000Z and the
+# overnight 0100Z), and those later updates increasingly reflect ongoing/observed
+# convection. To keep the merged outlook a fair model + midday-guidance blend
 # (and avoid leaking SPC's late, situationally-updated risk into our product),
 # only Day 1 issuances *before* this UTC hour on the convective day are eligible
-# for blending. The 12Z/13Z morning issuances qualify; the 1630Z and later
-# reissues are ignored.
-SPC_D1_BLEND_MAX_ISSUE_HOUR_UTC = 16
+# for blending. This admits the 12Z/13Z morning issuances and the 1630Z midday
+# update (issued before peak convection initiates), while the 2000Z and 0100Z
+# evening/overnight reissues are ignored.
+SPC_D1_BLEND_MAX_ISSUE_HOUR_UTC = 17
 
 
 def _spc_archive_run_time_datetime(target_date: date, run_time: str) -> datetime:
@@ -585,11 +586,12 @@ def fetch_archived_spc_category(
     *issued* outlook available for ``target_date`` (by ``ISSUE_ISO``), so the
     merged outlook reflects SPC's current thinking instead of an earlier update.
 
-    For Day 1, issuances at or after ``SPC_D1_BLEND_MAX_ISSUE_HOUR_UTC`` (16Z) on
+    For Day 1, issuances at or after ``SPC_D1_BLEND_MAX_ISSUE_HOUR_UTC`` (17Z) on
     the convective day are excluded, so the blend never incorporates SPC's
-    afternoon/evening reissues (1630Z, 2000Z, 0100Z) that reflect ongoing
-    observed convection. The latest qualifying morning issuance (typically 13Z)
-    is used instead. Day 2 is unaffected.
+    evening/overnight reissues (2000Z, 0100Z) that reflect ongoing observed
+    convection. The latest qualifying issuance (the 1630Z midday update when
+    present, otherwise the 13Z morning outlook) is used instead. Day 2 is
+    unaffected.
     """
     from datetime import date
     if day not in (1, 2):
@@ -605,9 +607,9 @@ def fetch_archived_spc_category(
     year = target_date.year
     date_str = target_date.strftime("%Y%m%d")
     run_times = _SPC_ARCHIVE_RUN_TIMES[day]
-    # Day 1: ignore SPC's afternoon/evening reissues so the blend stays a fair
-    # model + morning-guidance product. Only issuances before the cutoff (12Z/13Z)
-    # are eligible; 1630Z/2000Z/0100Z are dropped. (Day 2 keeps the latest reissue.)
+    # Day 1: ignore SPC's evening/overnight reissues so the blend stays a fair
+    # model + midday-guidance product. Issuances before the cutoff (12Z/13Z/1630Z)
+    # are eligible; 2000Z/0100Z are dropped. (Day 2 keeps the latest reissue.)
     blend_cutoff = _spc_d1_blend_issue_cutoff(target_date) if day == 1 else None
     if blend_cutoff is not None:
         eligible = [rt for rt in run_times if _spc_archive_run_time_datetime(target_date, rt) < blend_cutoff]

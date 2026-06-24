@@ -372,6 +372,38 @@ def _generate_or_get_merged_dir(target_date_str: str | None, model: str, spc_day
         if not pure_tile_path.exists():
             return False
 
+        # Day 1 products must be backed by the SPC Day-1 issuance that covers this
+        # convective day (12Z D -> 12Z D+1). A build made right after the 00Z cycle
+        # is ready (~04Z) can capture the prior day's overnight issuance, which
+        # expires at 12Z D. The cycle-based freshness check below only reacts to
+        # HRRR cycle changes, so without this such a build would freeze and never
+        # pick up the real Day-1 outlook once SPC issues it later that morning.
+        if spc_day == 1:
+            expected_spc_expire = datetime(
+                target_date.year, target_date.month, target_date.day,
+                12, 0, 0, tzinfo=timezone.utc,
+            ) + timedelta(days=1)
+            try:
+                cached_summary = json.loads(verification_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            cached_spc_expire_str = (
+                cached_summary.get("spcExpireTimeISO") if isinstance(cached_summary, dict) else None
+            )
+            cached_spc_expire = None
+            if isinstance(cached_spc_expire_str, str) and cached_spc_expire_str:
+                try:
+                    cached_spc_expire = datetime.fromisoformat(
+                        cached_spc_expire_str.replace("Z", "+00:00")
+                    ).astimezone(timezone.utc)
+                except ValueError:
+                    cached_spc_expire = None
+            # Only force regeneration when an SPC categorical is present but is
+            # anchored to the wrong convective day. A model-only product (no SPC
+            # overlay yet) is left alone -- there is nothing better to switch to.
+            if cached_spc_expire is not None and cached_spc_expire != expected_spc_expire:
+                return False
+
         # Check if cached files are up-to-date with the selected run-anchored cycle.
         cycle_dirs = target_cycle_dirs()
         if not cycle_dirs:
@@ -537,6 +569,7 @@ def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int 
     from backend.ml.enh_plus_archive import (
         archive_available_dates,
         refresh_reports_for_archived_date,
+        repair_archived_spc_window,
         update_archive_for_date,
     )
     from backend.ml.historical_event_verification import event_window_for_date
@@ -579,6 +612,14 @@ def _refresh_enh_plus_archive(model: str = "hrrr", *, min_interval_seconds: int 
             refresh_reports_for_archived_date(archive_dir, event_date)
         except Exception:
             log.exception("ENH+ archive report refresh failed for %s", date_str)
+
+    # Repair any archived day whose SPC categorical was frozen on the wrong
+    # convective day by an early-morning capture (no-op when already correct).
+    for date_str in archive_available_dates(archive_dir):
+        try:
+            repair_archived_spc_window(archive_dir, _date.fromisoformat(date_str))
+        except Exception:
+            log.exception("ENH+ archive SPC repair failed for %s", date_str)
 
     # Touch an empty index so the throttle holds even when no ENH+ days exist yet.
     if not index_path.exists():
