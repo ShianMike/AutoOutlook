@@ -19,6 +19,11 @@ SPC_DAY1_URL = "https://www.spc.noaa.gov/products/outlook/day1otlk.html"
 SPC_DAY2_URL = "https://www.spc.noaa.gov/products/outlook/day2otlk.html"
 GEOJSON_ZIP_RE = re.compile(r'href=["\']([^"\']*day1otlk_[^"\']+-geojson\.zip)["\']', re.IGNORECASE)
 GEOJSON_ZIP_RE_DAY2 = re.compile(r'href=["\']([^"\']*day2otlk_[^"\']+-geojson\.zip)["\']', re.IGNORECASE)
+SPC_HAZARD_GEOJSON_MEMBERS = {
+    "tornado": "torn",
+    "hail": "hail",
+    "wind": "wind",
+}
 
 
 def fetch_current_spc_day1_category(
@@ -67,10 +72,12 @@ def _fetch_current_spc_category(
                 if name.endswith("_cat.nolyr.geojson") or name.endswith(f"{product}_cat.nolyr.geojson")
             )
             category_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
+            hazard_geojson = _read_spc_hazard_probability_collection(zf, product)
 
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / f"spc_day{day}_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
+            (output_dir / f"spc_day{day}_hazards.geojson").write_text(json.dumps(hazard_geojson), encoding="utf-8")
             (output_dir / "spc_source.json").write_text(json.dumps({
                 "day1Url": page_url,
                 "spcDay": day,
@@ -83,6 +90,7 @@ def _fetch_current_spc_category(
             "geojsonZipUrl": zip_url,
             "fetchedAtISO": _now_iso(),
             "categoryGeojson": category_geojson,
+            "hazardGeojson": hazard_geojson,
         }
     finally:
         if own_session:
@@ -146,6 +154,117 @@ def official_category_grid(
             if _contains_geometry(geometry, float(lon_grid[idx]), float(lat_grid[idx])):
                 out[idx] = ordinal
     return out
+
+
+def official_hazard_probability_grid(
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    spc_hazard_geojson: Mapping[str, Any],
+    hazard: str,
+) -> np.ndarray:
+    """Rasterize SPC's actual per-hazard probability polygons onto the grid."""
+    hazard_key = str(hazard).strip().lower()
+    out = np.zeros(lat_grid.shape, dtype=float)
+    features = list(spc_hazard_geojson.get("features", []))
+    features.sort(
+        key=lambda feature: _spc_probability_value(
+            (feature.get("properties") or {}).get("probability")
+        ) or 0.0
+    )
+    for feature in features:
+        if not isinstance(feature, Mapping):
+            continue
+        props = feature.get("properties") or {}
+        feature_hazard = str(
+            props.get("hazard") or props.get("hazardLabel") or ""
+        ).strip().lower()
+        if feature_hazard != hazard_key:
+            continue
+        probability = _spc_probability_value(
+            props.get("probability", props.get("threshold", props.get("LABEL")))
+        )
+        if probability is None or probability <= 0.0:
+            continue
+        geometry = feature.get("geometry")
+        for idx in np.ndindex(lat_grid.shape):
+            if probability <= out[idx]:
+                continue
+            if _contains_geometry(geometry, float(lon_grid[idx]), float(lat_grid[idx])):
+                out[idx] = probability
+    return out
+
+
+def _read_spc_hazard_probability_collection(zf: zipfile.ZipFile, product: str) -> dict[str, Any]:
+    """Read SPC tornado/hail/wind probability GeoJSON members from an outlook zip."""
+    names = zf.namelist()
+    features: list[dict[str, Any]] = []
+    available_hazards: list[str] = []
+    for hazard, member_token in SPC_HAZARD_GEOJSON_MEMBERS.items():
+        member_name = _select_spc_hazard_member(names, product, member_token)
+        if member_name is None:
+            continue
+        try:
+            payload = json.loads(zf.read(member_name).decode("utf-8"))
+        except Exception:
+            continue
+        available_hazards.append(hazard)
+        for feature in payload.get("features", []):
+            if not isinstance(feature, Mapping) or not feature.get("geometry"):
+                continue
+            props = feature.get("properties") or {}
+            probability = _spc_probability_value(
+                props.get("probability", props.get("threshold", props.get("LABEL")))
+            )
+            if probability is None or probability <= 0.0:
+                continue
+            normalized_props = dict(props)
+            normalized_props["hazard"] = hazard
+            normalized_props["probability"] = probability
+            normalized_props.setdefault("threshold", probability)
+            features.append({
+                "type": "Feature",
+                "geometry": feature.get("geometry"),
+                "properties": normalized_props,
+            })
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "properties": {
+            "source": "SPC hazard probability outlook",
+            "availableHazards": available_hazards,
+        },
+    }
+
+
+def _select_spc_hazard_member(names: list[str], product: str, member_token: str) -> str | None:
+    suffix = f"_{member_token}.nolyr.geojson"
+    specific = [
+        name for name in names
+        if (base := name.rsplit("/", 1)[-1]).endswith(suffix) and base.startswith(product)
+    ]
+    generic = [
+        name for name in names
+        if name.rsplit("/", 1)[-1] == f"{product}_{member_token}.nolyr.geojson"
+    ]
+    return (specific or generic or [None])[0]
+
+
+def _spc_probability_value(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            text = value.strip().replace("%", "")
+            if not text:
+                return None
+            probability = float(text)
+        else:
+            probability = float(value)
+    except (TypeError, ValueError):
+        return None
+    if probability > 1.0:
+        probability /= 100.0
+    return max(0.0, min(1.0, probability))
 
 
 def _contains_geometry(geometry: Mapping[str, Any] | None, lon: float, lat: float) -> bool:

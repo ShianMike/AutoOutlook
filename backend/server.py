@@ -882,22 +882,29 @@ def incremental_outlook_hour_probability_tile(forecast_hour: int):
 
 
 def _spc_geojsons_for_dates(target_dates, model: str, session=None) -> list[dict]:
-    """Assemble SPC Day 1 categorical geojsons for the given convective-day dates.
+    """Assemble SPC Day 1 geojsons for the given convective-day dates.
 
-    Serve-time and fast: reads only the cached ``spc_day1_cat.geojson`` written by
-    the merged-D1 products (each window's Day 1 outlook is the most accurate
-    envelope, and the next date's Day 1 supplies the 'Day 2' span). No blocking
-    network fetches happen in the request path; if a window's SPC isn't cached,
-    that hour simply has no backing (the raw tile is served).
+    Serve-time and fast: reads the cached ``spc_day1_cat.geojson`` and, when
+    available, ``spc_day1_hazards.geojson`` written by the merged-D1 products.
+    Each window's Day 1 outlook is the most accurate envelope, and the next
+    date's Day 1 supplies the 'Day 2' span. No blocking network fetches happen in
+    the request path; if a window's SPC isn't cached, that hour simply has no
+    backing (the raw tile is served).
     """
     artifact_root = PROJECT_ROOT / "backend" / "artifacts"
     geojsons: list[dict] = []
     for target_date in target_dates:
-        cached = artifact_root / f"merged_{model}_{target_date.isoformat()}" / "spc_day1_cat.geojson"
+        merged_dir = artifact_root / f"merged_{model}_{target_date.isoformat()}"
+        cached = merged_dir / "spc_day1_cat.geojson"
         if not cached.exists():
             continue
         try:
             geo = json.loads(cached.read_text(encoding="utf-8"))
+            hazards_path = merged_dir / "spc_day1_hazards.geojson"
+            if hazards_path.exists():
+                hazards = json.loads(hazards_path.read_text(encoding="utf-8"))
+                if isinstance(hazards, dict):
+                    geo["hazardGeojson"] = hazards
         except Exception:
             continue
         if isinstance(geo, dict):

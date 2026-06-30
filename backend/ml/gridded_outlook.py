@@ -1287,6 +1287,8 @@ def apply_environmental_probability_caps(
 def apply_category_probability_ceiling(
     probabilities: Mapping[str, np.ndarray],
     category_grid: np.ndarray,
+    *,
+    floor_thunder: bool = True,
 ) -> ProbabilityCapResult:
     """Keep displayed hazard probabilities consistent with final risk bands.
 
@@ -1299,7 +1301,9 @@ def apply_category_probability_ceiling(
     sub-threshold thunder probability, so the TSTM outlook reads "below
     threshold" and the general-thunder polygon is never drawn even though
     organized severe storms are expected. The floor is itself capped by the
-    category ceiling so it can never lift thunder past the next band.
+    category ceiling so it can never lift thunder past the next band. Set
+    ``floor_thunder=False`` for blends where the probability itself must remain
+    an average of two probability sources rather than a category-derived floor.
     """
     grid = np.asarray(category_grid, dtype=np.int16)
     thunder_floor = _thunder_probability_from_category_grid(grid)
@@ -1310,7 +1314,7 @@ def apply_category_probability_ceiling(
         arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
         cap = _category_probability_cap_grid(hazard, grid)
         capped_values = np.minimum(arr, cap)
-        if str(hazard).lower() in {"thunder", "thunderstorm"}:
+        if floor_thunder and str(hazard).lower() in {"thunder", "thunderstorm"}:
             floored_values = np.maximum(capped_values, np.minimum(thunder_floor, cap))
             thunder_floored_cells = int(np.sum(floored_values > capped_values))
             capped_values = floored_values

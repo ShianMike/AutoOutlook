@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from unittest import mock
 
 import numpy as np
@@ -60,6 +60,33 @@ def _make_spc_geojson(
                 },
             }
         ],
+    }
+
+
+def _make_spc_hazard_geojson(
+    probabilities: Mapping[str, float],
+    polygon: list[list[list[float]]] | None = None,
+) -> dict[str, Any]:
+    if polygon is None:
+        polygon = [[[-100.0, 34.0], [-95.0, 34.0], [-95.0, 38.0], [-100.0, 38.0], [-100.0, 34.0]]]
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": polygon},
+                "properties": {
+                    "hazard": hazard,
+                    "probability": probability,
+                    "threshold": probability,
+                    "LABEL": str(probability),
+                },
+            }
+            for hazard, probability in probabilities.items()
+        ],
+        "properties": {
+            "availableHazards": list(probabilities.keys()),
+        },
     }
 
 
@@ -133,6 +160,48 @@ class TestArchivedSpcLatestSelection(unittest.TestCase):
         self.assertEqual(result["selectedIssueTimeUTC"], "1300")
         # Latest issuance is MRGL (ordinal 2), not the earlier ENH (ordinal 4).
         self.assertEqual(_spc_geojson_max_category_ordinal(result["categoryGeojson"]), 2)
+
+    def test_archive_fetch_includes_hazard_probability_layers(self) -> None:
+        cat = _make_spc_geojson("2026-06-03T12:00:00Z", "2026-06-04T12:00:00Z", "ENH", 4)
+        hazard = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[-100.0, 34.0], [-95.0, 34.0], [-95.0, 38.0], [-100.0, 38.0], [-100.0, 34.0]]],
+                    },
+                    "properties": {"LABEL": "0.05"},
+                }
+            ],
+        }
+
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("day1otlk_cat.nolyr.geojson", json.dumps(cat))
+            zf.writestr("day1otlk_torn.nolyr.geojson", json.dumps(hazard))
+        zip_bytes = buf.getvalue()
+
+        class _Resp:
+            def __init__(self, status: int, content: bytes) -> None:
+                self.status_code = status
+                self.content = content
+
+        class _Session:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+
+            def get(self, url: str, timeout: int | None = None) -> "_Resp":
+                return _Resp(200 if "_1200-geojson" in url else 404, zip_bytes)
+
+        result = fetch_archived_spc_category("2026-06-03", session=_Session(), day=1)
+        hazard_geojson = result["hazardGeojson"]
+        self.assertEqual(hazard_geojson["properties"]["availableHazards"], ["tornado"])
+        self.assertEqual(hazard_geojson["features"][0]["properties"]["hazard"], "tornado")
+        self.assertAlmostEqual(hazard_geojson["features"][0]["properties"]["probability"], 0.05)
 
     def test_day1_blend_includes_midday_excludes_evening_reissue(self) -> None:
         # 1300Z issuance: SLGT morning outlook.
@@ -996,35 +1065,59 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
         self.assertTrue(aware["report"]["spcCategoryWeighting"])
         self.assertAlmostEqual(aware["report"]["spcSupportWeightMax"], 0.65)
 
-    def test_spc_support_blends_hazard_probabilities_toward_spc(self) -> None:
-        # SPC draws SLGT over the whole 3x3 domain; HRRR has zero hazard
-        # probability. At weight 0.5 the hazard probabilities must be pulled up
-        # toward the SPC-implied level (not left at zero), bounded by the blended
-        # category ceiling.
+    def test_spc_support_blends_with_actual_spc_hazard_probabilities(self) -> None:
+        # Hazard probabilities use SPC's actual hazard probability layers, not a
+        # category-derived proxy. Equal 5% model/SPC tornado stays 5%; 15% model
+        # against 5% SPC becomes 10% with the default 50/50 probability blend.
         lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
         lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
-        hrrr_grid = np.full((3, 3), 3, dtype=np.int16)  # SLGT
+        hrrr_grid = np.full((3, 3), 4, dtype=np.int16)  # ENH
         hrrr_probs = {
-            "tornado": np.zeros((3, 3)),
-            "hail": np.zeros((3, 3)),
-            "wind": np.zeros((3, 3)),
-            "thunder": np.zeros((3, 3)),
+            "tornado": np.full((3, 3), 0.15),
+            "hail": np.full((3, 3), 0.30),
+            "wind": np.full((3, 3), 0.30),
+            "thunder": np.full((3, 3), 0.40),
         }
         spc_geojson = _make_spc_geojson(
-            label="SLGT",
-            dn=3,
+            label="ENH",
+            dn=4,
+            polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
+        )
+        spc_hazards = _make_spc_hazard_geojson(
+            {"tornado": 0.05, "hail": 0.15, "wind": 0.15},
             polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
         )
 
         out = blend_merged_outlook_with_spc(
-            lats, lons, hrrr_grid, hrrr_probs, spc_geojson, weight=0.5
+            lats,
+            lons,
+            hrrr_grid,
+            hrrr_probs,
+            spc_geojson,
+            weight=0.5,
+            spc_hazard_geojson=spc_hazards,
         )
 
         self.assertTrue(out["report"]["hazardProbabilitiesBlended"])
-        # HRRR hail/wind were 0 but SPC SLGT implies a positive hail/wind band,
-        # so the blended probabilities must be lifted above zero.
-        self.assertGreater(float(np.max(out["probabilities"]["hail"])), 0.0)
-        self.assertGreater(float(np.max(out["probabilities"]["wind"])), 0.0)
+        self.assertEqual(
+            out["report"]["hazardProbabilitySources"]["tornado"],
+            "official_spc_hazard_probability",
+        )
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["tornado"])), 0.10)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["hail"])), 0.225)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["wind"])), 0.225)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["thunder"])), 0.55)
+
+        equal = blend_merged_outlook_with_spc(
+            lats,
+            lons,
+            hrrr_grid,
+            {**hrrr_probs, "tornado": np.full((3, 3), 0.05)},
+            spc_geojson,
+            weight=0.5,
+            spc_hazard_geojson=spc_hazards,
+        )
+        self.assertAlmostEqual(float(np.max(equal["probabilities"]["tornado"])), 0.05)
 
     def test_resolve_cycle_dirs_for_window(self) -> None:
         from backend.ml.merged_outlook import resolve_cycle_dirs_for_window

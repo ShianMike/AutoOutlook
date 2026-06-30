@@ -17,16 +17,18 @@ from backend.ml.spc_verification import (
     fetch_current_spc_day1_category,
     fetch_current_spc_day2_category,
     official_category_grid,
+    official_hazard_probability_grid,
+    _read_spc_hazard_probability_collection,
 )
 from backend.ml.gridded_outlook import (
     SPC_RISK_LABELS,
-    _category_probability_cap_grid,
     _clean_projected_geometry,
     _drop_small_projected_parts,
     _projected_component_count,
     _smooth_display_projected_geometry,
     apply_category_probability_ceiling,
     constrain_hazard_probability_shapes_to_risk_support,
+    _thunder_probability_from_category_grid,
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
 )
@@ -49,23 +51,6 @@ _SPC_CATEGORY_SUPPORT_WEIGHTS: dict[int, float] = {
     5: 0.85,  # MDT
     6: 0.90,  # HIGH
 }
-
-
-def _spc_implied_hazard_probability(hazard: str, spc_category_grid: np.ndarray) -> np.ndarray:
-    """Per-cell probability implied by the SPC category for a single hazard.
-
-    SPC's Day 1 categorical outlook is hazard-agnostic (one category per cell),
-    so there is no true per-hazard SPC probability. We approximate the SPC
-    "target" for each hazard as the midpoint of that hazard's probability band
-    for the SPC category: ``0.5 * (band_floor + band_ceiling)``. Cells where SPC
-    draws no risk (category NONE) imply a zero target.
-    """
-    grid = np.asarray(spc_category_grid, dtype=np.int16)
-    ceiling = _category_probability_cap_grid(hazard, grid)
-    lower_category = np.clip(grid - 1, 0, _MAX_CATEGORY_ORDINAL).astype(np.int16)
-    floor = _category_probability_cap_grid(hazard, lower_category)
-    implied = 0.5 * (floor + ceiling)
-    return np.where(grid <= 0, 0.0, implied)
 
 
 def _spc_anchored_outlook_enabled() -> bool:
@@ -137,6 +122,30 @@ def _category_aware_weight_grid(base_weight: float, spc_grid: np.ndarray) -> np.
     return weights
 
 
+def _spc_hazard_probability_available(
+    spc_hazard_geojson: Mapping[str, Any] | None,
+    hazard: str,
+) -> bool:
+    if not isinstance(spc_hazard_geojson, Mapping):
+        return False
+    hazard_key = str(hazard).lower()
+    props = spc_hazard_geojson.get("properties")
+    if isinstance(props, Mapping):
+        available = props.get("availableHazards")
+        if isinstance(available, list):
+            return hazard_key in {str(item).lower() for item in available}
+    for feature in spc_hazard_geojson.get("features", []):
+        if not isinstance(feature, Mapping):
+            continue
+        feature_props = feature.get("properties") or {}
+        feature_hazard = str(
+            feature_props.get("hazard") or feature_props.get("hazardLabel") or ""
+        ).lower()
+        if feature_hazard == hazard_key:
+            return True
+    return False
+
+
 def blend_merged_outlook_with_spc(
     lats: np.ndarray,
     lons: np.ndarray,
@@ -146,6 +155,7 @@ def blend_merged_outlook_with_spc(
     weight: float = DEFAULT_SPC_SUPPORT_WEIGHT,
     mode: str = "blend",
     category_weighting: bool = True,
+    spc_hazard_geojson: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Back the HRRR/XGBoost outlook with the official SPC categorical outlook.
 
@@ -157,9 +167,9 @@ def blend_merged_outlook_with_spc(
         final_ordinal = round((1 - weight) * hrrr_ordinal + weight * spc_ordinal)
 
     so ``weight=0`` leaves the HRRR outlook untouched, ``weight=1`` conforms it
-    fully to SPC, and ``weight=0.5`` produces a 50/50 blend. HRRR hazard
-    probabilities are blended toward the SPC-category-implied level by the same
-    weight.
+    fully to SPC, and ``weight=0.5`` produces a 50/50 blend. Severe-hazard
+    probabilities are blended only when SPC's actual per-hazard probability
+    outlook is available; they are never inferred from the categorical outlook.
 
     When ``category_weighting`` is set (default), the per-cell weight escalates
     where SPC draws a higher category (SLGT and above, see
@@ -218,19 +228,44 @@ def blend_merged_outlook_with_spc(
             (1.0 - weight_grid) * hrrr_grid.astype(float) + weight_grid * spc_grid.astype(float)
         )
         blended_grid = np.clip(blended_grid, 0, _MAX_CATEGORY_ORDINAL).astype(np.int16)
-        # Blend each HRRR hazard probability toward the SPC-category-implied level
-        # for that hazard by the same per-cell weight.
+        probability_weight_grid = np.full(spc_grid.shape, float(weight), dtype=float)
         blended_probabilities = {}
+        hazard_sources: dict[str, str] = {}
+        hazards_blended = False
         for hazard, values in hrrr_probabilities.items():
+            hazard_key = str(hazard).lower()
             arr = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
-            spc_target = _spc_implied_hazard_probability(hazard, spc_grid)
-            blended_probabilities[hazard] = np.clip(
-                (1.0 - weight_grid) * arr + weight_grid * spc_target, 0.0, 1.0
-            )
-        hazards_blended = True
+            if hazard_key in {"tornado", "hail", "wind"} and _spc_hazard_probability_available(
+                spc_hazard_geojson,
+                hazard_key,
+            ):
+                spc_target = official_hazard_probability_grid(lat_grid, lon_grid, spc_hazard_geojson, hazard_key)
+                blended_probabilities[hazard] = np.clip(
+                    (1.0 - probability_weight_grid) * arr + probability_weight_grid * spc_target,
+                    0.0,
+                    1.0,
+                )
+                hazard_sources[hazard_key] = "official_spc_hazard_probability"
+                hazards_blended = True
+            elif hazard_key in {"thunder", "thunderstorm"}:
+                spc_target = _thunder_probability_from_category_grid(spc_grid)
+                blended_probabilities[hazard] = np.clip(
+                    (1.0 - probability_weight_grid) * arr + probability_weight_grid * spc_target,
+                    0.0,
+                    1.0,
+                )
+                hazard_sources[hazard_key] = "spc_category_thunder_probability"
+                hazards_blended = True
+            else:
+                blended_probabilities[hazard] = arr
+                hazard_sources[hazard_key] = "model_only_no_spc_hazard_probability"
         support_weight_max = float(np.max(weight_grid))
 
-    ceiling = apply_category_probability_ceiling(blended_probabilities, blended_grid)
+    ceiling = apply_category_probability_ceiling(
+        blended_probabilities,
+        blended_grid,
+        floor_thunder=normalized_mode != "blend",
+    )
 
     report = {
         "spcSupportApplied": True,
@@ -240,6 +275,7 @@ def blend_merged_outlook_with_spc(
         "spcSupportWeightMax": support_weight_max,
         "fullyAnchored": normalized_mode == "blend" and weight >= 1.0,
         "hazardProbabilitiesBlended": hazards_blended,
+        "hazardProbabilitySources": hazard_sources if normalized_mode == "blend" else {},
         "spcCategoryCells": int(np.sum(spc_grid > 0)),
         "hrrrCategoryCells": int(np.sum(hrrr_grid > 0)),
         "blendedCategoryCells": int(np.sum(blended_grid > 0)),
@@ -617,6 +653,7 @@ def fetch_archived_spc_category(
     zip_url = None
     selected_run_time = None
     category_geojson = None
+    hazard_geojson = None
     # Track the issuance time of the currently-selected candidate so we always
     # keep SPC's *latest* reissue for the day (e.g. the 1300Z D1 update or the
     # 1730Z D2 update), rather than an older one. The run-time list is not always
@@ -640,6 +677,7 @@ def fetch_archived_spc_category(
                         if name.endswith("_cat.nolyr.geojson") or name.endswith(f"{product}_cat.nolyr.geojson")
                     )
                     candidate_geojson = json.loads(zf.read(cat_name).decode("utf-8"))
+                    candidate_hazard_geojson = _read_spc_hazard_probability_collection(zf, product)
                 candidate_issue = _spc_geojson_issue_time(candidate_geojson)
                 # Enforce the Day 1 blend cutoff against the actual ISSUE_ISO too,
                 # in case an archived slot carries a later issuance than its run-time
@@ -663,6 +701,7 @@ def fetch_archived_spc_category(
                     zip_url = url
                     selected_run_time = run_time
                     category_geojson = candidate_geojson
+                    hazard_geojson = candidate_hazard_geojson
                     selected_issue = candidate_issue
                     selected_index = index
             except Exception as exc:
@@ -678,6 +717,8 @@ def fetch_archived_spc_category(
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / f"spc_day{day}_cat.geojson").write_text(json.dumps(category_geojson), encoding="utf-8")
+            if isinstance(hazard_geojson, Mapping):
+                (output_dir / f"spc_day{day}_hazards.geojson").write_text(json.dumps(hazard_geojson), encoding="utf-8")
             (output_dir / "spc_source.json").write_text(json.dumps({
                 "day1Url": html_url,
                 "spcDay": day,
@@ -693,6 +734,7 @@ def fetch_archived_spc_category(
             "selectedIssueTimeUTC": selected_run_time,
             "fetchedAtISO": _now_iso(),
             "categoryGeojson": category_geojson,
+            "hazardGeojson": hazard_geojson,
         }
     finally:
         if own_session:
@@ -809,7 +851,9 @@ def merge_cycles_for_spc_window(
         # 2. Try to find/fetch the SPC Day {spc_day} geojson
         spc = None
         spc_geojson = None
+        spc_hazard_geojson = None
         spc_cat_filename = f"spc_day{spc_day}_cat.geojson"
+        spc_hazards_filename = f"spc_day{spc_day}_hazards.geojson"
 
         # Try to find a cached spc_day{spc_day}_cat.geojson in the cycle_dirs.
         # Skipped for live products (prefer_fresh_spc) because the cycle's cached
@@ -819,6 +863,12 @@ def merge_cycles_for_spc_window(
             if cached_geojson_path.exists():
                 try:
                     geo = json.loads(cached_geojson_path.read_text(encoding="utf-8"))
+                    hazards_path = cycle_dir / spc_hazards_filename
+                    hazard_geo = None
+                    if hazards_path.exists():
+                        candidate_hazard = json.loads(hazards_path.read_text(encoding="utf-8"))
+                        if isinstance(candidate_hazard, Mapping):
+                            hazard_geo = candidate_hazard
                     if d1_valid is not None:
                         cv, ce = spc_d1_window(geo)
                         date_matches = target_date is not None and cv.date() == target_date
@@ -830,8 +880,10 @@ def merge_cycles_for_spc_window(
                                 else None
                             )
                             spc_geojson = geo
+                            spc_hazard_geojson = hazard_geo
                             spc = {
                                 "categoryGeojson": geo,
+                                "hazardGeojson": hazard_geo,
                                 "day1Url": day1_url,
                                 "spcDay": spc_day,
                                 "fetchedAtISO": _now_iso(),
@@ -839,8 +891,10 @@ def merge_cycles_for_spc_window(
                             break
                     else:
                         spc_geojson = geo
+                        spc_hazard_geojson = hazard_geo
                         spc = {
                             "categoryGeojson": geo,
+                            "hazardGeojson": hazard_geo,
                             "spcDay": spc_day,
                             "fetchedAtISO": _now_iso(),
                         }
@@ -871,6 +925,7 @@ def merge_cycles_for_spc_window(
                 spc = spc_fetch(session, output_dir)
 
             spc_geojson = spc.get("categoryGeojson")
+            spc_hazard_geojson = spc.get("hazardGeojson")
 
         if not isinstance(spc_geojson, Mapping):
             raise ValueError("Could not find or fetch a valid SPC Day 1 category GeoJSON")
@@ -998,6 +1053,11 @@ def merge_cycles_for_spc_window(
                 spc_geojson,
                 weight=spc_support_weight,
                 category_weighting=_spc_category_weighting_enabled(),
+                spc_hazard_geojson=(
+                    spc_hazard_geojson
+                    if isinstance(spc_hazard_geojson, Mapping)
+                    else None
+                ),
             )
             merged_grid = blended["category_grid"]
             merged_probs = blended["probabilities"]
@@ -1306,7 +1366,18 @@ def spc_backed_hour_tile(
         probabilities = {hazard: values[::step, ::step] for hazard, values in probabilities.items()}
 
     blended = blend_merged_outlook_with_spc(
-        lats, lons, grid, probabilities, spc_geojson, weight=weight, mode=mode
+        lats,
+        lons,
+        grid,
+        probabilities,
+        spc_geojson,
+        weight=weight,
+        mode=mode,
+        spc_hazard_geojson=(
+            spc_geojson.get("hazardGeojson")
+            if isinstance(spc_geojson.get("hazardGeojson"), Mapping)
+            else None
+        ),
     )
     new_grid = np.asarray(blended["category_grid"], dtype=np.int16)
     new_probs = blended["probabilities"]
