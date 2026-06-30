@@ -7,7 +7,7 @@ The expensive HRRR/XGBoost refresh runs in Google Cloud. Cloudflare Pages still 
 - Cloud Scheduler starts the Cloud Run Job `autooutlook-artifact-refresh` every two hours on even UTC hours.
 - The job writes temporary files under `/tmp` and publishes completed artifacts to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
 - The bucket uses stable object paths, so storage does not grow by retaining one archive per workflow run.
-- `.github/workflows/free-hosting-refresh.yml` runs every two hours (30 minutes after the Cloud Run refresh job), authenticates with Google Workload Identity Federation, downloads the latest completed snapshot, exports `dist/_api`, and deploys Cloudflare Pages.
+- `.github/workflows/free-hosting-refresh.yml` polls every 15 minutes, authenticates with Google Workload Identity Federation, and deploys Cloudflare Pages only when production does not already have the latest completed GCS snapshot. This gives publication multiple recovery chances if an individual GitHub scheduled run is delayed or skipped.
 - The GitHub workflow does not call `actions/upload-artifact`, `actions/download-artifact`, or `actions/cache`.
 - The Cloud Run service `autooutlook` reads the same bucket and provides a fallback API at `https://autooutlook-672125056378.us-east1.run.app`.
 

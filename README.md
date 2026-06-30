@@ -150,7 +150,7 @@ The scheduled refresh now runs in Google Cloud:
 
 - Cloud Scheduler starts `autooutlook-artifact-refresh` every two hours on even UTC hours.
 - The Cloud Run Job generates the complete F00-F48 cycle and publishes fixed object paths to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
-- GitHub Actions only downloads the completed GCS snapshot, exports `dist/_api`, and deploys Cloudflare Pages. It does not use GitHub artifacts or Actions caches.
+- GitHub Actions polls GCS every 15 minutes, skips when production already has the latest completed snapshot, and only then downloads the completed GCS snapshot, exports `dist/_api`, and deploys Cloudflare Pages. It does not use GitHub artifacts or Actions caches.
 - The public Cloud Run service is an API fallback and reads the same GCS bucket.
 
 Recommended public Cloud Run service environment:
@@ -213,7 +213,7 @@ gcloud run jobs update autooutlook-artifact-refresh `
 
 The job should write working artifacts to local `/tmp` and upload finished JSON artifacts through the Cloud Storage client. Avoid routing generation output through a Cloud Storage FUSE mount; it adds filesystem translation overhead and makes overlapping executions more expensive.
 
-Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 */2 * * *` in `Etc/UTC`.
+Do not execute the job during a normal deployment unless an immediate artifact refresh is intended. Cloud Scheduler should remain enabled on `autooutlook-artifact-refresh-cycle` with schedule `0 */2 * * *` in `Etc/UTC`. The GitHub publisher should remain scheduled as a 15-minute polling loop; its freshness gate skips deploy work when production already matches the completed GCS cycle.
 
 The Cloud Build service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) needs `roles/run.developer` on the project and `roles/iam.serviceAccountUser` on the runtime service account (`autooutlook-runtime@...`) so the `gcloud builds submit` deploy step can update the Cloud Run service end-to-end. Without these, the build still builds and pushes the image, but the in-build `gcloud run deploy` step fails with `PERMISSION_DENIED` and the service/job must be pointed at the new image manually.
 
