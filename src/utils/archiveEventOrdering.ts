@@ -1,5 +1,3 @@
-import type { HistoricalEnhPlusEvent } from '../data/historicalEnhPlusVerification';
-
 /**
  * Risk Archive event ordering (Requirement 5).
  *
@@ -18,6 +16,9 @@ import type { HistoricalEnhPlusEvent } from '../data/historicalEnhPlusVerificati
  *      most recent event appears first (Requirement 5.1).
  *
  * `Issued_Date` corresponds to the event's `eventDate` field (`YYYY-MM-DD`).
+ * The function is generic over the event shape so it can order either full
+ * `HistoricalEnhPlusEvent` objects or lightweight catalog metadata items — it
+ * only reads `eventDate`.
  */
 
 /**
@@ -40,16 +41,16 @@ function parseIssuedDate(value: unknown): number | null {
  * Combine, de-duplicate, and order Risk Archive events by `Issued_Date`
  * descending, giving live events precedence over catalog events on ties.
  */
-export function orderArchiveEvents(
-  liveEvents: HistoricalEnhPlusEvent[],
-  catalogEvents: HistoricalEnhPlusEvent[],
-): HistoricalEnhPlusEvent[] {
+export function orderArchiveEvents<T extends { eventDate?: unknown }>(
+  liveEvents: T[],
+  catalogEvents: T[],
+): T[] {
   // Live events are considered first so they win de-duplication ties against
   // catalog events sharing the same Issued_Date (Requirement 5.4).
-  const combined: HistoricalEnhPlusEvent[] = [...liveEvents, ...catalogEvents];
+  const combined: T[] = [...liveEvents, ...catalogEvents];
 
   const seen = new Set<string>();
-  const deduped: Array<{ event: HistoricalEnhPlusEvent; issuedAt: number }> = [];
+  const deduped: Array<{ event: T; issuedAt: number }> = [];
 
   for (const event of combined) {
     const issuedAt = parseIssuedDate(event?.eventDate);

@@ -22,7 +22,9 @@ import {
   type MergedArtifactsOverride,
 } from '../../utils/backingResolver';
 import {
-  HISTORICAL_ENH_PLUS_EVENTS,
+  loadEnhPlusCatalogEvent,
+  loadEnhPlusCatalogIndex,
+  type EnhPlusArchiveCatalogItem,
   type HistoricalEnhPlusEvent,
 } from '../../data/historicalEnhPlusVerification';
 import { orderArchiveEvents } from '../../utils/archiveEventOrdering';
@@ -53,49 +55,87 @@ const EMPTY_INGREDIENTS: Ingredients = {
 
 export default function HistoricalEnhPlusVerification() {
   const { events: liveEvents } = useEnhPlusArchiveEvents('conus', true);
-  const allEvents = useMemo(
-    // Merge live + catalog into a single set, then de-duplicate and order by
-    // Issued_Date descending across the entire combined set (Requirement 5.1,
-    // 5.2). Live events take precedence over catalog events on date ties.
-    () => orderArchiveEvents(liveEvents, HISTORICAL_ENH_PLUS_EVENTS),
-    [liveEvents],
-  );
+  const [catalogIndex, setCatalogIndex] = useState<EnhPlusArchiveCatalogItem[]>([]);
 
-  const eventDates = useMemo(() => allEvents.map((event) => event.eventDate), [allEvents]);
+  // Load the lightweight catalog index (metadata only). The heavy per-event
+  // geojson is fetched lazily when an event is selected.
+  useEffect(() => {
+    const controller = new AbortController();
+    loadEnhPlusCatalogIndex(controller.signal)
+      .then(setCatalogIndex)
+      .catch(() => setCatalogIndex([]));
+    return () => controller.abort();
+  }, []);
+
+  // Merge live + catalog metadata into one ordered list; live events (full)
+  // win date ties over catalog metadata (Requirement 5.1-5.4).
+  const orderedList = useMemo(
+    () => orderArchiveEvents<EnhPlusArchiveCatalogItem>(liveEvents, catalogIndex),
+    [liveEvents, catalogIndex],
+  );
+  const eventDates = useMemo(() => orderedList.map((item) => item.eventDate), [orderedList]);
+
   const [selectedDate, setSelectedDate] = useState('');
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('all');
-  // SPC backing comparison mode for the archive. Defaults to "Our Model"
-  // (Requirement 6.6) and resets to the default whenever a different event is
-  // selected so each event's first view starts on "Our Model".
+  // SPC backing comparison mode; defaults to "SPC Blend" and resets per event.
   const [spcBacked, setSpcBacked] = useState(backingModeToSpcBacked(DEFAULT_BACKING_MODE));
 
-  const event = allEvents.find((item) => item.eventDate === selectedDate) ?? allEvents[0];
-
-  const snapshot = useMemo(() => buildSnapshot(event), [event]);
-  const bundle = useMemo(() => buildBundle(event, snapshot), [event, snapshot]);
-  // Both backing variants are baked into each archived event: "SPC Blend" is
-  // the SPC-backed merged outlook and "Our Model" is the pure HRRR/XGBoost
-  // merged outlook. Reading both from the event avoids a live backend call,
-  // which cannot serve historical archive dates.
-  const blendArtifactState = useMemo(() => buildArtifactState(event, 'blend'), [event]);
-  const pureArtifactState = useMemo(() => buildArtifactState(event, 'pure'), [event]);
-  const mergedOverride = useMemo<MergedArtifactsOverride>(
-    () => ({
-      pure: pureArtifactState,
-      blend: blendArtifactState,
-    }),
-    [pureArtifactState, blendArtifactState],
+  const selectedMeta = useMemo(
+    () => orderedList.find((item) => item.eventDate === selectedDate) ?? orderedList[0],
+    [orderedList, selectedDate],
   );
+  const resolvedDate = selectedMeta?.eventDate;
+
+  // Resolve the selected event's full payload: a live event already carries it;
+  // a catalog event lazy-loads its static per-event JSON on demand.
+  const [event, setEvent] = useState<HistoricalEnhPlusEvent | null>(null);
+  useEffect(() => {
+    if (!resolvedDate) {
+      setEvent(null);
+      return undefined;
+    }
+    const live = liveEvents.find((item) => item.eventDate === resolvedDate);
+    if (live) {
+      setEvent(live);
+      return undefined;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    setEvent(null);
+    loadEnhPlusCatalogEvent(resolvedDate, controller.signal)
+      .then((full) => { if (!cancelled) setEvent(full); })
+      .catch(() => { if (!cancelled) setEvent(null); });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [resolvedDate, liveEvents]);
 
   useEffect(() => {
     setSpcBacked(backingModeToSpcBacked(DEFAULT_BACKING_MODE));
-  }, [selectedDate]);
+  }, [resolvedDate]);
 
-  if (!event) {
+  const snapshot = useMemo(() => (event ? buildSnapshot(event) : null), [event]);
+  const bundle = useMemo(
+    () => (event && snapshot ? buildBundle(event, snapshot) : null),
+    [event, snapshot],
+  );
+  // Both backing variants come from the loaded event: "SPC Blend" is the
+  // SPC-backed merged outlook and "Our Model" is the pure HRRR/XGBoost outlook.
+  const blendArtifactState = useMemo(() => (event ? buildArtifactState(event, 'blend') : null), [event]);
+  const pureArtifactState = useMemo(() => (event ? buildArtifactState(event, 'pure') : null), [event]);
+  const mergedOverride = useMemo<MergedArtifactsOverride | undefined>(
+    () => (pureArtifactState && blendArtifactState
+      ? { pure: pureArtifactState, blend: blendArtifactState }
+      : undefined),
+    [pureArtifactState, blendArtifactState],
+  );
+
+  if (!selectedMeta) {
     return (
       <div className="border-[3px] border-ink bg-paper p-4 font-mono text-[11px] font-bold uppercase tracking-widest text-ink/60 shadow-retro-sm">
-        No historical 2026 risk verification events are hardcoded yet.
+        Loading the 2026 risk verification archive…
       </div>
     );
   }
@@ -103,41 +143,47 @@ export default function HistoricalEnhPlusVerification() {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-        <ArchiveMetric label="Event" value={event.label} />
-        <ArchiveMetric label="SPC Peak" value={event.maxSpcCategory} />
-        <ArchiveMetric label="Run Cycle" value={formatUtc(event.cycleTimeISO)} />
-        <ArchiveMetric label="Risk Window" value={`${formatHour(event.eventWindowStartISO)}-${formatHour(event.eventWindowEndISO)}`} />
+        <ArchiveMetric label="Event" value={selectedMeta.label} />
+        <ArchiveMetric label="SPC Peak" value={selectedMeta.maxSpcCategory} />
+        <ArchiveMetric label="Run Cycle" value={formatUtc(selectedMeta.cycleTimeISO)} />
+        <ArchiveMetric label="Risk Window" value={`${formatHour(selectedMeta.eventWindowStartISO)}-${formatHour(selectedMeta.eventWindowEndISO)}`} />
         <ArchiveMetric
           label="Grid / Tile Stride"
-          value={`${event.gridStride ?? '—'} / ${event.tileStride ?? '—'}`}
+          value={`${selectedMeta.gridStride ?? '—'} / ${selectedMeta.tileStride ?? '—'}`}
         />
       </div>
 
-      <OutlookMapPanel
-        snapshot={snapshot}
-        outlookArtifacts={blendArtifactState}
-        bundle={bundle}
-        selectedIndex={0}
-        isPlaying={false}
-        onIndexChange={() => undefined}
-        setPlaying={() => undefined}
-        activeRegion="conus"
-        selectedMergedDate={selectedDate}
-        setSelectedMergedDate={setSelectedDate}
-        viewType={viewType}
-        setViewType={setViewType}
-        spcBacked={spcBacked}
-        setSpcBacked={setSpcBacked}
-        stormReportsMode={stormReportsMode}
-        setStormReportsMode={setStormReportsMode}
-        stormReports={event.stormReports}
-        availableMergedDatesOverride={eventDates}
-        mergedArtifactsOverride={mergedOverride}
-        spcDay1Override={event.spcDay1}
-        spcHazardProbabilityShapesOverride={event.spcHazardProbabilityShapes}
-        initialSpcComparisonMode="overlay"
-        staticStormReportsAvailable
-      />
+      {event && snapshot && bundle && blendArtifactState && mergedOverride ? (
+        <OutlookMapPanel
+          snapshot={snapshot}
+          outlookArtifacts={blendArtifactState}
+          bundle={bundle}
+          selectedIndex={0}
+          isPlaying={false}
+          onIndexChange={() => undefined}
+          setPlaying={() => undefined}
+          activeRegion="conus"
+          selectedMergedDate={resolvedDate ?? ''}
+          setSelectedMergedDate={setSelectedDate}
+          viewType={viewType}
+          setViewType={setViewType}
+          spcBacked={spcBacked}
+          setSpcBacked={setSpcBacked}
+          stormReportsMode={stormReportsMode}
+          setStormReportsMode={setStormReportsMode}
+          stormReports={event.stormReports}
+          availableMergedDatesOverride={eventDates}
+          mergedArtifactsOverride={mergedOverride}
+          spcDay1Override={event.spcDay1}
+          spcHazardProbabilityShapesOverride={event.spcHazardProbabilityShapes}
+          initialSpcComparisonMode="overlay"
+          staticStormReportsAvailable
+        />
+      ) : (
+        <div className="border-[3px] border-ink bg-paper p-6 text-center font-mono text-[11px] font-bold uppercase tracking-widest text-ink/60 shadow-retro-sm">
+          Loading outlook for {selectedMeta.label}…
+        </div>
+      )}
     </div>
   );
 }

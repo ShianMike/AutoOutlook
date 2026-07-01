@@ -52,8 +52,9 @@ steps:
         python scripts/fetch-enh-plus-verification-events.py ${_FETCH_ARGS}
         echo "=== Stage 2: regenerate the risk-archive catalog (blend + pure) ==="
         python scripts/generate-enh-plus-verification-data.py ${_GEN_ARGS} --jobs ${_JOBS}
-        echo "=== Generated catalog ==="
-        wc -c src/data/historicalEnhPlusVerification.ts
+        echo "=== Generated catalog assets ==="
+        ls -la public/data/enh-plus-archive | head -5
+        wc -c public/data/enh-plus-archive/index.json
 
   - id: persist-sources
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -72,6 +73,6 @@ steps:
       - -c
       - |
         set -euo pipefail
-        gsutil cp src/data/historicalEnhPlusVerification.ts \
-          gs://${_OUT_BUCKET}/regen/${BUILD_ID}/historicalEnhPlusVerification.ts
-        echo "Uploaded to gs://${_OUT_BUCKET}/regen/${BUILD_ID}/historicalEnhPlusVerification.ts"
+        gsutil -m rsync -r -d public/data/enh-plus-archive \
+          gs://${_OUT_BUCKET}/regen/${BUILD_ID}/enh-plus-archive
+        echo "Uploaded catalog assets to gs://${_OUT_BUCKET}/regen/${BUILD_ID}/enh-plus-archive/"
