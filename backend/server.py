@@ -713,6 +713,21 @@ def _enh_plus_archive_file_response(file_key: str):
     return _json_path(_enh_plus_archive_dir() / date_str / filename)
 
 
+def _enh_plus_archive_file_with_fallback(file_key: str, fallback_key: str):
+    """Serve an archived file, falling back to another archived file when the
+    primary is absent. Used for the pure ("Our Model") layers, which fall back
+    to the SPC-blend layer for archived events that predate the pure variant so
+    the response is a valid 200 instead of a 404."""
+    date_str = request.args.get("date")
+    if not date_str:
+        return _json_error({"error": "date query parameter is required", "code": "missing_date"}, 400)
+    base = _enh_plus_archive_dir() / date_str
+    primary = base / _ENH_PLUS_ARCHIVE_FILES[file_key]
+    if _artifact_exists(primary):
+        return _json_path(primary)
+    return _json_path(base / _ENH_PLUS_ARCHIVE_FILES[fallback_key])
+
+
 @app.get("/api/outlook/enh-plus-archive-verification")
 def enh_plus_archive_verification():
     return _enh_plus_archive_file_response("verification")
@@ -745,12 +760,12 @@ def enh_plus_archive_spc_hazard_shapes():
 
 @app.get("/api/outlook/enh-plus-archive-risk-polygons-pure")
 def enh_plus_archive_risk_polygons_pure():
-    return _enh_plus_archive_file_response("risk-polygons-pure")
+    return _enh_plus_archive_file_with_fallback("risk-polygons-pure", "risk-polygons")
 
 
 @app.get("/api/outlook/enh-plus-archive-hazard-shapes-pure")
 def enh_plus_archive_hazard_shapes_pure():
-    return _enh_plus_archive_file_response("hazard-shapes-pure")
+    return _enh_plus_archive_file_with_fallback("hazard-shapes-pure", "hazard-shapes")
 
 
 @app.get("/api/outlook/enh-plus-archive-storm-reports")
