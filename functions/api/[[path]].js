@@ -48,6 +48,9 @@ function resolveStaticPath(pathname, region, model = null, date = null, backing 
     '/api/outlook/enh-plus-archive-hazard-shapes': 'hazard-probability-shapes.geojson',
     '/api/outlook/enh-plus-archive-probability-tile': 'probability-tile.json',
     '/api/outlook/enh-plus-archive-spc-category': 'spc-day1-category.geojson',
+    '/api/outlook/enh-plus-archive-spc-hazard-shapes': 'spc-hazard-shapes.geojson',
+    '/api/outlook/enh-plus-archive-risk-polygons-pure': 'risk-polygons-pure.geojson',
+    '/api/outlook/enh-plus-archive-hazard-shapes-pure': 'hazard-probability-shapes-pure.geojson',
     '/api/outlook/enh-plus-archive-storm-reports': 'storm-reports.json',
   };
   if (Object.prototype.hasOwnProperty.call(ENH_PLUS_ARCHIVE_FILES, pathname)) {
@@ -199,6 +202,29 @@ export async function onRequest(context) {
     const blendRegional = resolveStaticPath(pathname, region, model, date, null);
     const blendCandidates = [blendRegional];
     if (region) blendCandidates.push(resolveStaticPath(pathname, null, null, date, null));
+    for (const candidate of blendCandidates) {
+      if (!candidate || candidate === staticPath) continue;
+      const blendResponse = await fetchStaticAsset(context, candidate);
+      if (!isMissingAssetResponse(blendResponse)) {
+        assetResponse = blendResponse;
+        staticPath = candidate;
+        break;
+      }
+    }
+  }
+
+  // The ENH+ archive pure layers are path-based (…-pure) rather than a
+  // ?backing=pure query. When an archived event predates the pure variant,
+  // fall back to its SPC-blended layer so live archive events return 200.
+  const ENH_PLUS_PURE_FALLBACK = {
+    '/api/outlook/enh-plus-archive-risk-polygons-pure': '/api/outlook/enh-plus-archive-risk-polygons',
+    '/api/outlook/enh-plus-archive-hazard-shapes-pure': '/api/outlook/enh-plus-archive-hazard-shapes',
+  };
+  if (isMissingAssetResponse(assetResponse)
+    && Object.prototype.hasOwnProperty.call(ENH_PLUS_PURE_FALLBACK, pathname)) {
+    const blendPath = resolveStaticPath(ENH_PLUS_PURE_FALLBACK[pathname], region, model, date, null);
+    const blendCandidates = [blendPath];
+    if (region) blendCandidates.push(resolveStaticPath(ENH_PLUS_PURE_FALLBACK[pathname], null, null, date, null));
     for (const candidate of blendCandidates) {
       if (!candidate || candidate === staticPath) continue;
       const blendResponse = await fetchStaticAsset(context, candidate);

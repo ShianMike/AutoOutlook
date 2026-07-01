@@ -539,6 +539,9 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
         "risk-polygons.geojson",
         "hazard-probability-shapes.geojson",
         "spc-day1-category.geojson",
+        "spc-hazard-shapes.geojson",
+        "risk-polygons-pure.geojson",
+        "hazard-probability-shapes-pure.geojson",
         "storm-reports.json",
     )
     for date_str in dates:
