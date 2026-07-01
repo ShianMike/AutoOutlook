@@ -10,12 +10,12 @@ import {
   getArtifactHazardPeak,
   getArtifactHourTile,
   getArtifactThunderPeak,
-  type ArtifactProbabilityFeature,
   type ArtifactProbabilityFeatureCollection,
   type ArtifactHazardKey,
   type GeneratedArtifactHazardKey,
 } from '../utils/artifactProbabilities';
 import { HAZARD_CONFIGS, getHazardConfig } from '../utils/hazardProbabilityBands';
+import { spcHazardColor } from '../utils/spcColors';
 import { map500mbLines } from '../utils/upperAirLines';
 import { map500mbWindVectors } from '../utils/upperAirWind';
 import { buildUpperAirIntensitySegments, upperAirLineVisualStyle } from '../utils/upperAirLineStyle';
@@ -113,6 +113,26 @@ export default function GeneratedHazardProbabilityMap({
     () => spcHazardShapesToFeatureCollection(spcHazardProbabilityShapes, hazard),
     [hazard, spcHazardProbabilityShapes],
   );
+  // Split the SPC hazard shapes into probability-threshold fills and the
+  // significant-severe subset. The significant-severe subset is rendered as a
+  // hatched region visually distinct from the probability fills (Requirement
+  // 1.4/4a); the fills drive the probability legend (Requirement 1.7).
+  const spcFillCollection = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: spcFeatureCollection.features.filter((feature) => !feature.properties.significantSevere),
+    }),
+    [spcFeatureCollection],
+  );
+  const spcSigCollection = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: spcFeatureCollection.features.filter((feature) => feature.properties.significantSevere),
+    }),
+    [spcFeatureCollection],
+  );
+  const spcLegendItems = useMemo(() => spcHazardLegendItems(spcFeatureCollection), [spcFeatureCollection]);
+  const hasSpcSig = spcSigCollection.features.length > 0;
   const hasSpcHazardLayer = hazard !== 'thunder' && spcFeatureCollection.features.length > 0;
   const effectiveComparisonMode = hasSpcHazardLayer ? comparisonMode : 'auto';
   const showAutoLayer = effectiveComparisonMode !== 'spc';
@@ -222,6 +242,9 @@ export default function GeneratedHazardProbabilityMap({
             <pattern id="generated-hazard-cig" patternUnits="userSpaceOnUse" width="22" height="22">
               <path d="M-5 22 L22 -5 M6 27 L27 6" stroke="#111111" strokeWidth="1.05" strokeOpacity={0.74} />
             </pattern>
+            <pattern id="spc-hazard-sig" patternUnits="userSpaceOnUse" width="14" height="14">
+              <path d="M0 0 L14 14 M14 0 L0 14" stroke="#111111" strokeWidth="1.2" strokeOpacity={0.85} />
+            </pattern>
             <mask id={usClipId} maskUnits="userSpaceOnUse" x="0" y="0" width="900" height="520">
               <rect x="0" y="0" width="900" height="520" fill="#000000" />
               <Geographies geography={geoUrl}>
@@ -329,8 +352,8 @@ export default function GeneratedHazardProbabilityMap({
             </g>
           )}
 
-          {(showSpcFillLayer || showSpcOutlineLayer) && spcFeatureCollection.features.length > 0 && (
-            <Geographies geography={spcFeatureCollection}>
+          {(showSpcFillLayer || showSpcOutlineLayer) && spcFillCollection.features.length > 0 && (
+            <Geographies geography={spcFillCollection}>
               {({ geographies }) =>
                 geographies.map((geo, index) => {
                   const color = geo.properties.color as string;
@@ -353,6 +376,41 @@ export default function GeneratedHazardProbabilityMap({
                         default: spcStyle,
                         hover: spcStyle,
                         pressed: spcStyle,
+                      }}
+                    />
+                  );
+                })
+              }
+            </Geographies>
+          )}
+
+          {(showSpcFillLayer || showSpcOutlineLayer) && hasSpcSig && (
+            <Geographies geography={spcSigCollection}>
+              {({ geographies }) =>
+                geographies.map((geo, index) => {
+                  // Significant-severe rendered as a cross-hatch pattern that is
+                  // visually distinct from every solid probability-threshold
+                  // fill and from the single-diagonal CIG hatch (Requirement
+                  // 1.4/4a). The hatch pattern guarantees distinctness, so the
+                  // area is always safe to render.
+                  const sigStyle = {
+                    fill: 'url(#spc-hazard-sig)',
+                    fillOpacity: 0.9,
+                    stroke: '#111111',
+                    strokeWidth: 1.1,
+                    strokeOpacity: 0.85,
+                    outline: 'none',
+                    pointerEvents: 'none' as const,
+                  };
+                  return (
+                    <Geography
+                      key={`spc-hazard-sig-${hazard}-${geo.rsmKey ?? index}`}
+                      geography={geo}
+                      tabIndex={-1}
+                      style={{
+                        default: sigStyle,
+                        hover: sigStyle,
+                        pressed: sigStyle,
                       }}
                     />
                   );
@@ -614,6 +672,34 @@ export default function GeneratedHazardProbabilityMap({
               </div>
             ))}
           </div>
+          {(showSpcFillLayer || showSpcOutlineLayer) && (spcLegendItems.length > 0 || hasSpcSig) && (
+            <div className="mt-1 border-t-[1px] border-ink/20 pt-1">
+              <div className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink/70 leading-none mb-1">
+                SPC
+              </div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
+                {spcLegendItems.map((item) => (
+                  <div key={`spc-legend-${item.label}`} className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                    <span
+                      className="inline-block w-3 h-2 border-[1.5px] border-ink shrink-0"
+                      style={{ background: item.color }}
+                      aria-hidden
+                    />
+                    <span className="text-ink">{item.label}</span>
+                  </div>
+                ))}
+                {hasSpcSig && (
+                  <div key="spc-legend-sig" className="flex items-center gap-1 font-mono text-[9px] font-bold leading-none">
+                    <span
+                      className="inline-block w-3 h-2 border-[1.5px] border-ink shrink-0 bg-[repeating-linear-gradient(45deg,transparent_0,transparent_1.5px,#111_1.5px,#111_2.5px)]"
+                      aria-hidden
+                    />
+                    <span className="text-ink">SIG</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {hasCigOverlay && showCigOverlay && showAutoLayer && (
             <div className="mt-1 border-t-[1px] border-ink/20 pt-1">
               <div className="flex items-center gap-1.5 font-mono text-[9px] font-bold leading-none">
@@ -678,14 +764,41 @@ export default function GeneratedHazardProbabilityMap({
   );
 }
 
+interface SpcHazardRenderFeature {
+  type: 'Feature';
+  geometry: {
+    type: 'Polygon' | 'MultiPolygon';
+    coordinates: number[][][] | number[][][][];
+  };
+  properties: {
+    hazard: GeneratedHazardKey;
+    probability: number;
+    bucket: number;
+    label: string;
+    color: string;
+    significantSevere: boolean;
+  };
+}
+
+interface SpcHazardRenderCollection {
+  type: 'FeatureCollection';
+  features: SpcHazardRenderFeature[];
+}
+
+interface SpcHazardLegendItem {
+  label: string;
+  color: string;
+  bucket: number;
+}
+
 function spcHazardShapesToFeatureCollection(
   collection: OutlookProbabilityShapeFeatureCollection | null,
   hazard: GeneratedHazardKey,
-): ArtifactProbabilityFeatureCollection {
+): SpcHazardRenderCollection {
   if (!collection || hazard === 'thunder') return { type: 'FeatureCollection', features: [] };
   const features = collection.features
     .filter((feature) => feature.properties.hazard === hazard)
-    .map((feature): ArtifactProbabilityFeature => ({
+    .map((feature): SpcHazardRenderFeature => ({
       type: 'Feature',
       geometry: feature.geometry,
       properties: {
@@ -693,11 +806,37 @@ function spcHazardShapesToFeatureCollection(
         probability: Number(feature.properties.probability),
         bucket: Number(feature.properties.bucket),
         label: feature.properties.label,
-        color: feature.properties.color,
+        // Recolor to the SPC palette by bucket, overriding any baked color.
+        color: spcHazardColor(hazard, Number(feature.properties.bucket)),
+        // The backend normalizer emits a boolean `significantSevere` on each
+        // SPC hazard feature (not present on the generated-hazard type), so it
+        // is read defensively here (Requirement 1.4).
+        significantSevere: Boolean(
+          (feature.properties as { significantSevere?: boolean }).significantSevere,
+        ),
       },
     }))
     .sort((a, b) => a.properties.bucket - b.properties.bucket);
   return { type: 'FeatureCollection', features };
+}
+
+// Build the distinct probability-threshold legend entries present in the
+// rendered SPC hazard outlook, de-duplicated by label and ordered by threshold
+// bucket. Significant-severe features are excluded here; they are represented
+// by a separate SIG legend entry (Requirement 1.7).
+function spcHazardLegendItems(collection: SpcHazardRenderCollection): SpcHazardLegendItem[] {
+  const seen = new Map<string, SpcHazardLegendItem>();
+  for (const feature of collection.features) {
+    if (feature.properties.significantSevere) continue;
+    if (!seen.has(feature.properties.label)) {
+      seen.set(feature.properties.label, {
+        label: feature.properties.label,
+        color: feature.properties.color,
+        bucket: feature.properties.bucket,
+      });
+    }
+  }
+  return Array.from(seen.values()).sort((a, b) => a.bucket - b.bucket);
 }
 
 function formatProbabilityMetric(probability: number, drawableThreshold?: number): string {

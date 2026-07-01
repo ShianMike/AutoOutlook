@@ -2,6 +2,7 @@ import { geoArea, type GeoPermissibleObjects } from 'd3-geo';
 import type { RiskCategory, Ingredients, HazardKey, HourSnapshot } from '../types/forecast';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import { lvlFromProb } from './hazardEngine';
+import { SPC_HAZARD_COLORS, spcHazardColor } from './spcColors';
 import type {
   OutlookArtifactFeatureCollection,
   ArtifactRiskCategory,
@@ -64,9 +65,9 @@ const TORNADO_LABELS = ['2%', '5%', '10%', '15%', '30%', '45%', '60%'];
 const SEVERE_LABELS = ['5%', '15%', '30%', '45%', '60%'];
 const THUNDER_THRESHOLDS = [0.01, 0.10, 0.40, 0.70];
 const THUNDER_LABELS = ['TSTM', '10%', '40%', '70%'];
-const TORNADO_COLORS = ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1', '#6e0099', '#4b006b'];
-const SEVERE_COLORS = ['#a87d4f', '#f6c842', '#cf2727', '#c43eb1', '#6e0099'];
-const THUNDER_COLORS = ['#5baa58', '#c9a279', '#5cdde6', '#ef6055'];
+const TORNADO_COLORS = SPC_HAZARD_COLORS.tornado;
+const SEVERE_COLORS = SPC_HAZARD_COLORS.wind;
+const THUNDER_COLORS = SPC_HAZARD_COLORS.thunder;
 
 export function getArtifactHourTile(
   artifacts: OutlookArtifacts | null,
@@ -137,7 +138,9 @@ export function artifactProbabilityShapesToFeatureCollection(
           probability: Number(feature.properties.probability),
           bucket: Number(feature.properties.bucket),
           label: feature.properties.label,
-          color: feature.properties.color,
+          // Recolor to the SPC palette by bucket, overriding any color baked
+          // into the artifact so live and archived outlooks match SPC colors.
+          color: spcHazardColor(hazard, Number(feature.properties.bucket)),
         },
       }];
     })

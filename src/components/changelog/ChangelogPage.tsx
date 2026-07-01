@@ -84,10 +84,93 @@ const TONE_TEXT: Record<ToneName, string> = {
 
 const RELEASES: VersionRelease[] = [
   {
+    version: 'v1.3',
+    codename: 'SPC Hazard Outlook, Archive & Refresh Fixes',
+    date: '2026-07-01',
+    status: 'CURRENT',
+    summary:
+      'This release adds the official SPC hazard outlook (tornado, hail, wind, and thunder probability shapes, including significant-severe hatching) rendered in the same style as the SPC categorical outlook, and extends the Risk Archive so past ENH+ events can show the archived SPC hazard outlook alongside the SPC categorical outlook. It also corrects four defects: cache corruption of the current outlook after a page refresh, incorrect Risk Archive ordering by issued date, the broken "Our Model" vs "SPC Blend" comparison on the Risk Archive, and a Risk Timeline that desynced and briefly flashed the wrong category in the merged view. The Risk Archive backing comparison now bakes both the SPC-blend and pure "Our Model" outlooks per event so the toggle works for historical and live events, defaults to "SPC Blend", and the curated 2026 archive was regenerated to 37 events.',
+    highlights: [
+      'Official SPC hazard outlook: The hazard maps can now display SPC\'s tornado, hail, wind, and thunder probability shapes, using the same projection, base layers, and styling as the SPC categorical outlook, with per-hazard filtering and a toggleable overlay alongside the generated hazard outlook.',
+      'Significant-severe hatching + legend: SPC significant-severe areas render as a distinct hatched region set apart from the probability fills, and the legend lists each present probability threshold plus a dedicated SIG entry when a significant-severe area is shown.',
+      'SPC hazard outlook in the Risk Archive: Archived ENH+ events now serve and display their SPC hazard outlook next to the archived SPC categorical outlook, with a 10-second timeout and up to two retries, gracefully keeping the categorical outlook when the hazard outlook is unavailable.',
+      'Refresh no longer corrupts the outlook: The outlook cache is now keyed on a durable cycle identity (issuing day, cycle timestamp, outlook type) rather than volatile fields, so reloading the page keeps the current categorical and hazard outlooks intact instead of clearing them.',
+      'Correct Risk Archive ordering: Live and catalog events are merged before sorting and ordered strictly newest-first by issued date, de-duplicated with live precedence, and events with an invalid issued date are dropped.',
+      'Working SPC backing comparison on the archive: Toggling "Our Model" vs "SPC Blend" for an archived event now swaps the displayed outlook in place without navigating away, defaults to "Our Model" on first view, and shows an unavailable notice while retaining the prior outlook when a mode has no data.',
+      'Synchronized Risk Timeline: In the merged view the timeline derives each period from the currently displayed merged outlook, highlights exactly one period for the selected hour, sets the forecast hour once per click without an intermediate wrong-category flash, and marks unresolvable periods with a distinct "no data" state.',
+      'Working archive backing toggle with both variants baked: Each archived event now stores both the SPC-blend and the pure "Our Model" outlook, so switching backing on the Risk Archive changes the displayed risk polygons and hazard shapes in place — including live auto-archived events, which now serve the pure variant too.',
+      'SPC Blend is the default backing: The Risk Archive now opens on "SPC Blend" instead of "Our Model".',
+      'Refreshed 2026 Risk Archive catalog: The curated historical archive was regenerated with the current models and now covers 37 ENH+/MDT events across March–June 2026, adding thirteen dates (Mar 10 & 22, Apr 2 & 13, May 6, 15 & 30, and Jun 13, 19, 23, 24, 27 & 30) and dropping a few lower-confidence days.',
+      'SPC-matched outlook colors: The categorical and hazard maps, legends, and the SPC comparison overlays now render in the official SPC outlook colors instead of the previous custom palette.',
+    ],
+    changes: [
+      {
+        kind: 'NEW',
+        title: 'Official SPC hazard outlook display',
+        body: 'Added a backend SPC hazard normalizer and a live /api/outlook/spc-hazard-shapes endpoint that serves tornado, hail, wind, and thunder probability shapes with distinct success, not-found, and error statuses. The hazard maps consume these shapes through a new live hook and render them with the same projection and base layers as the categorical map, per-hazard filtering, a threshold legend, and a toggleable overlay concurrent with the generated hazard outlook. When the SPC hazard outlook is unavailable, a visible notice is shown and the generated hazard outlook and selected hazard type are preserved.',
+      },
+      {
+        kind: 'NEW',
+        title: 'Significant-severe hatching and SIG legend entry',
+        body: 'SPC significant-severe areas are rendered as a cross-hatched region that is visually distinct from every probability-threshold fill and from the CIG hatch, and the SPC legend gains a dedicated SIG entry that appears only when a significant-severe area is drawn.',
+      },
+      {
+        kind: 'NEW',
+        title: 'SPC hazard outlook added to the Risk Archive',
+        body: 'The archive pipeline now normalizes and stores an SPC hazard artifact per archived ENH+ event and serves it through /api/outlook/enh-plus-archive-spc-hazard-shapes. The archive data service fetches it per event with a 10-second timeout and up to two retries, renders it with the same color mapping, legend, and overlay layout as the live SPC hazard outlook, and falls back to the categorical outlook when a hazard type or the whole outlook is unavailable.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Page refresh no longer corrupts the current outlook',
+        body: 'The outlook cache previously keyed on volatile fields that changed on every refresh, evicting a valid cache and corrupting the displayed categorical and hazard outlooks. The cache now reconciles on a durable cycle identity: it reuses a matching-cycle outlook (rejecting empty or field-dropping replacements), replaces on a genuinely new cycle, and stores when absent. The last valid merged outlook keeps displaying during a reload, a reload exceeding 30 seconds is treated as failed, and a failed reload retains the last valid outlook with a per-day status message.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Risk Archive ordered correctly by issued date',
+        body: 'The archive previously sorted only the live events before merging in the catalog, producing an inconsistent order. Live and catalog events are now merged into a single set, de-duplicated by issued date with live precedence, cleared of events with a missing or unparseable issued date, and sorted strictly descending so the newest event appears first across the entire combined set.',
+      },
+      {
+        kind: 'FIX',
+        title: 'SPC backing comparison works on the Risk Archive',
+        body: 'The archive supplied a single merged outlook that ignored the SPC backing toggle. The map panel now receives both the pure ("Our Model") and blended ("SPC Blend") variants and resolves the displayed outlook from the toggle, swapping in place without navigating away, defaulting to "Our Model" on first view, and showing an unavailable-comparison notice while retaining the previously displayed outlook when the selected mode has no data.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Risk Timeline synchronized in the merged view',
+        body: 'In the merged view the timeline derived from a stale bundle, so it could desync from the displayed outlook and briefly flash the wrong risk category when a period was clicked. Timeline periods are now derived from the currently displayed merged outlook, exactly one period is highlighted for the selected forecast hour, clicking a period sets the forecast hour once and transitions the category directly with no intermediate value, and a period that cannot be resolved renders a distinct "no data" state while the other periods keep their categories.',
+      },
+      {
+        kind: 'FIX',
+        title: 'Archive backing toggle now switches the displayed outlook',
+        body: 'The "Our Model" vs "SPC Blend" comparison on the Risk Archive appeared to do nothing because each archived event stored only the SPC-blended outlook, and the pure "Our Model" side was requested live — a call that cannot serve historical dates, so both sides resolved to the same outlook. Each archived event now bakes both variants (a pure HRRR/XGBoost merged outlook and the 50/50 SPC blend), and the panel reads both directly, so switching backing changes the risk polygons and hazard shapes in place. Live auto-archived events now also store and serve the pure variant, so the toggle works for them as well.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'SPC Blend is the default archive backing',
+        body: 'The Risk Archive now defaults to the "SPC Blend" backing when an event is first viewed, instead of "Our Model".',
+      },
+      {
+        kind: 'IMPROVE',
+        title: '2026 Risk Archive regenerated and expanded to 37 events',
+        body: 'The curated historical ENH+/MDT archive was regenerated with the current models across the full 12Z-to-12Z Day 1 window and now spans 37 events for March through June 2026. Thirteen dates were added (Mar 10 and 22, Apr 2 and 13, May 6, 15 and 30, and Jun 13, 19, 23, 24, 27 and 30) and a few lower-confidence days were removed.',
+      },
+      {
+        kind: 'IMPROVE',
+        title: 'Outlook colors matched to the official SPC palette',
+        body: 'The categorical risk maps (and the SPC categorical comparison overlay) now use SPC\'s official category fills — TSTM, MRGL, SLGT, ENH, MDT, and HIGH — and the tornado, hail, and wind hazard maps, legends, and SPC hazard overlays use SPC\'s probabilistic threshold colors, replacing the previous custom palette. Colors are applied by threshold so both live and archived outlooks match SPC without regenerating artifacts.',
+      },
+      {
+        kind: 'DOCS',
+        title: 'Version surfaces updated to v1.3',
+        body: 'Recorded the SPC hazard outlook, Risk Archive hazard layers, and the four defect fixes as the v1.3 release, bumped package metadata and the app/landing/changelog footers and transition screens, and moved v1.2.3 to stable in the in-app changelog.',
+      },
+    ],
+  },
+  {
     version: 'v1.2.3',
     codename: 'Outlook Map Controls & Region Zoom',
     date: '2026-06-18',
-    status: 'CURRENT',
+    status: 'STABLE',
     summary:
       'This patch redesigns the outlook map control deck, adds a CONUS region zoom selector, gives the map panels more height with a slightly tighter default framing, and reworks the animated GIF export dialog. The GIF export is now restricted to the hourly scrubber, since a multi-cycle merged outlook has no hourly sequence to animate. It also adds a convective-setup ("why this risk") narrative to the merged Forecast Discussion, diagnosed from the HRRR ingredient fields.',
     highlights: [
@@ -1494,7 +1577,7 @@ function ChangelogFooter() {
     <footer className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.2.3
+          AutoOutlook · Automated Convective Risk Intelligence · v1.3
         </span>
         <div className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#" onClick={go('')} className="hover:text-paper">Home</a>

@@ -1512,7 +1512,7 @@ function FinalCTA({ reducedMotion = false }: { reducedMotion?: boolean }) {
           <div className="flex flex-wrap items-center gap-2">
             <RetroBadge tone="lime" pulse>READY</RetroBadge>
             <RetroBadge tone="paper">CONUS · F00–F48</RetroBadge>
-            <RetroBadge tone="amber">v1.2</RetroBadge>
+            <RetroBadge tone="amber">v1.3</RetroBadge>
           </div>
 
           <h2
@@ -1616,7 +1616,7 @@ function LandingFooter() {
     <footer aria-label="Site footer" className="border-t-[3px] border-ink bg-ink text-paper">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-paper/60">
-          AutoOutlook · Automated Convective Risk Intelligence · v1.2.3
+          AutoOutlook · Automated Convective Risk Intelligence · v1.3
         </span>
         <nav aria-label="Footer" className="flex flex-wrap items-center gap-4 font-mono text-[10px] uppercase tracking-[0.3em] text-paper/40">
           <a href="#dashboard" onClick={go('#dashboard')} className="hover:text-paper">Dashboard</a>

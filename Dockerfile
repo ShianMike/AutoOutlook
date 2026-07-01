@@ -7,7 +7,9 @@ RUN npm ci
 COPY index.html postcss.config.js tailwind.config.ts tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY public ./public
 COPY src ./src
-RUN npm run build
+# The baked risk-archive catalog is large; give the production bundle build a
+# bigger V8 heap so `vite build` does not OOM in CI/Cloud Build.
+RUN NODE_OPTIONS=--max-old-space-size=6144 npm run build
 
 FROM python:3.11-slim AS runtime
 WORKDIR /app

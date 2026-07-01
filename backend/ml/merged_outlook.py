@@ -13,6 +13,7 @@ import requests
 
 from backend.ml.spc_verification import (
     _lat_lon_grid,
+    _spc_probability_value,
     compare_prediction_to_spc,
     fetch_current_spc_day1_category,
     fetch_current_spc_day2_category,
@@ -28,6 +29,11 @@ from backend.ml.gridded_outlook import (
     _smooth_display_projected_geometry,
     apply_category_probability_ceiling,
     constrain_hazard_probability_shapes_to_risk_support,
+    _probability_shape_label,
+    _PROBABILITY_COLORS,
+    _SEVERE_PROBABILITY_THRESHOLDS,
+    _THUNDER_PROBABILITY_THRESHOLDS,
+    _TORNADO_PROBABILITY_THRESHOLDS,
     _thunder_probability_from_category_grid,
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
@@ -144,6 +150,146 @@ def _spc_hazard_probability_available(
         if feature_hazard == hazard_key:
             return True
     return False
+
+
+# Supported SPC hazard types, in canonical display order. Thunder is derived
+# rather than sourced directly from the SPC probability zip, but the served
+# contract always exposes all four keys so the frontend can render a stable,
+# complete set of hazard tabs (Requirement 2.3).
+SPC_HAZARD_TYPES: tuple[str, ...] = ("tornado", "hail", "wind", "thunder")
+
+_SPC_HAZARD_ALIASES = {
+    "tornado": "tornado",
+    "torn": "tornado",
+    "hail": "hail",
+    "wind": "wind",
+    "thunder": "thunder",
+    "thunderstorm": "thunder",
+    "tstm": "thunder",
+}
+
+_SPC_HAZARD_THRESHOLDS: dict[str, tuple[float, ...]] = {
+    "tornado": _TORNADO_PROBABILITY_THRESHOLDS,
+    "hail": _SEVERE_PROBABILITY_THRESHOLDS,
+    "wind": _SEVERE_PROBABILITY_THRESHOLDS,
+    "thunder": _THUNDER_PROBABILITY_THRESHOLDS,
+}
+
+
+def _canonical_spc_hazard(value: Any) -> str | None:
+    """Return the canonical hazard key for ``value`` or ``None`` if unknown."""
+    if value is None:
+        return None
+    return _SPC_HAZARD_ALIASES.get(str(value).strip().lower())
+
+
+def _spc_hazard_threshold_bucket(hazard: str, fraction: float) -> int:
+    """Return the color/threshold bucket index for a probability fraction."""
+    thresholds = _SPC_HAZARD_THRESHOLDS.get(hazard, _SEVERE_PROBABILITY_THRESHOLDS)
+    bucket = 0
+    for index, threshold in enumerate(thresholds):
+        if fraction + 1e-9 >= float(threshold):
+            bucket = index
+    return bucket
+
+
+def _spc_hazard_significant_severe(props: Mapping[str, Any]) -> bool:
+    """Detect whether an SPC hazard feature marks a significant-severe area."""
+    for key in ("significantSevere", "sigSevere", "significant", "sig", "hatched"):
+        value = props.get(key)
+        if isinstance(value, bool):
+            if value:
+                return True
+        elif isinstance(value, (int, float)):
+            if value != 0:
+                return True
+        elif isinstance(value, str) and value.strip().lower() in {"true", "yes", "sig", "sign", "1"}:
+            return True
+    for key in ("label", "LABEL", "hazardLabel", "DN"):
+        text = props.get(key)
+        if isinstance(text, str) and "sig" in text.strip().lower():
+            return True
+    return False
+
+
+def normalize_spc_hazard_outlook(
+    hazard_geojson: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Convert raw SPC hazard GeoJSON into the served hazard-shape contract.
+
+    Returns a ``FeatureCollection`` with one entry per supported ``Hazard_Type``
+    guaranteed present in ``availableHazards`` (a hazard with no shapes appears
+    as an empty subset rather than being omitted). Each feature carries exactly
+    one ``hazard`` from ``{tornado, hail, wind, thunder}``, a
+    ``probabilityPercent`` clamped to the inclusive range ``[0, 100]``, and a
+    boolean ``significantSevere``. Unknown hazard keys are dropped defensively.
+
+    This is a pure function so the live endpoint and the archive artifact can
+    share a single normalization path (Requirements 2.2, 2.3).
+    """
+    features: list[dict[str, Any]] = []
+    hazards_present: dict[str, bool] = {hazard: False for hazard in SPC_HAZARD_TYPES}
+
+    raw_features: Any = []
+    if isinstance(hazard_geojson, Mapping):
+        raw_features = hazard_geojson.get("features", [])
+    if not isinstance(raw_features, (list, tuple)):
+        raw_features = []
+
+    for feature in raw_features:
+        if not isinstance(feature, Mapping):
+            continue
+        geometry = feature.get("geometry")
+        if not geometry:
+            continue
+        props = feature.get("properties")
+        if not isinstance(props, Mapping):
+            props = {}
+
+        hazard = _canonical_spc_hazard(props.get("hazard") or props.get("hazardLabel"))
+        if hazard is None:
+            # Drop unknown / unsupported hazard keys defensively.
+            continue
+
+        raw_probability = props.get("probability")
+        if raw_probability is None:
+            raw_probability = props.get("probabilityPercent")
+        if raw_probability is None:
+            raw_probability = props.get("threshold", props.get("LABEL"))
+        fraction = _spc_probability_value(raw_probability)
+        if fraction is None:
+            # No parseable probability -> nothing meaningful to clamp; skip.
+            continue
+
+        probability_percent = max(0.0, min(100.0, float(fraction) * 100.0))
+        bucket = _spc_hazard_threshold_bucket(hazard, fraction)
+        colors = _PROBABILITY_COLORS.get(hazard, _PROBABILITY_COLORS["wind"])
+        color = colors[min(bucket, len(colors) - 1)]
+
+        hazards_present[hazard] = True
+        features.append({
+            "type": "Feature",
+            "geometry": geometry,
+            "properties": {
+                "hazard": hazard,
+                "probabilityPercent": probability_percent,
+                "significantSevere": bool(_spc_hazard_significant_severe(props)),
+                "threshold": float(fraction),
+                "thresholdPercent": int(round(probability_percent)),
+                "bucket": bucket,
+                "label": _probability_shape_label(hazard, float(fraction)),
+                "color": color,
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "properties": {
+            "availableHazards": list(SPC_HAZARD_TYPES),
+            "hazardsPresent": hazards_present,
+        },
+        "features": features,
+    }
 
 
 def blend_merged_outlook_with_spc(

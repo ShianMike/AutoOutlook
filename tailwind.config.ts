@@ -17,12 +17,12 @@ export default {
           violet: '#7a0177',
         },
         risk: {
-          tstm: '#9ad62a',
-          mrgl: '#f7b500',
-          slgt: '#ff8c00',
-          enh: '#ef3b2c',
-          mod: '#b30000',
-          high: '#7a0177',
+          tstm: '#C1E9C1',
+          mrgl: '#66A366',
+          slgt: '#FFE066',
+          enh: '#FFA366',
+          mod: '#E06666',
+          high: '#EE99EE',
         },
       },
       fontFamily: {

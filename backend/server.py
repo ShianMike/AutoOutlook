@@ -269,6 +269,57 @@ def latest_outlook_spc_day1_category():
     return _json_artifact("spc_day1_cat.geojson")
 
 
+@app.get("/api/outlook/spc-hazard-shapes")
+def spc_hazard_shapes():
+    """Serve the current SPC Day 1 hazard outlook as a normalized collection.
+
+    Reads the cached ``spc_day1_hazards.geojson`` written by the merged-D1
+    products (serve-time and fast; no blocking network fetch happens in the
+    request path). The response is normalized fully in memory before anything
+    is emitted, so a partial collection is never returned. Statuses are
+    mutually distinct (Requirements 2.1, 2.3, 2.4, 2.5):
+
+    - **200**: normalized ``FeatureCollection`` with all four hazard keys
+      present in ``properties.availableHazards``.
+    - **404** ``spc_hazard_unavailable``: no cached SPC hazard outlook exists
+      for the current outlook; the body carries no ``features``.
+    - **500** ``spc_hazard_failed``: reading/parsing/normalizing failed; the
+      body carries no partial ``features``.
+    """
+    from backend.ml.merged_outlook import normalize_spc_hazard_outlook
+
+    model = _request_model()
+    artifact_root = PROJECT_ROOT / "backend" / "artifacts"
+
+    # Locate the current merged D1 directory from cached artifacts only. The
+    # available-dates list is ordered most-recent-first, so the first cached
+    # hazard file is the current outlook. No merge / network fetch is triggered.
+    hazards_path: Path | None = None
+    for date_str in _available_merge_dates_list(model):
+        candidate = artifact_root / f"merged_{model}_{date_str}" / "spc_day1_hazards.geojson"
+        if candidate.exists():
+            hazards_path = candidate
+            break
+
+    if hazards_path is None:
+        return _json_error({
+            "error": "SPC hazard outlook unavailable for the current outlook",
+            "code": "spc_hazard_unavailable",
+        }, 404)
+
+    try:
+        raw = json.loads(hazards_path.read_text(encoding="utf-8"))
+        normalized = normalize_spc_hazard_outlook(raw if isinstance(raw, dict) else None)
+    except Exception:
+        log.exception("SPC hazard outlook normalization failed for %s", hazards_path)
+        return _json_error({
+            "error": "SPC hazard outlook could not be produced",
+            "code": "spc_hazard_failed",
+        }, 500)
+
+    return _json_response(normalized)
+
+
 def _available_merge_dates_list(model: str) -> list[str]:
     from backend.ml.merged_outlook import available_merged_d1_dates
 
@@ -647,6 +698,9 @@ _ENH_PLUS_ARCHIVE_FILES = {
     "hazard-shapes": "hazard-probability-shapes.geojson",
     "probability-tile": "probability-tile.json",
     "spc-category": "spc-day1-category.geojson",
+    "spc-hazard-shapes": "spc-hazard-shapes.geojson",
+    "risk-polygons-pure": "risk-polygons-pure.geojson",
+    "hazard-shapes-pure": "hazard-probability-shapes-pure.geojson",
     "storm-reports": "storm-reports.json",
 }
 
@@ -682,6 +736,21 @@ def enh_plus_archive_probability_tile():
 @app.get("/api/outlook/enh-plus-archive-spc-category")
 def enh_plus_archive_spc_category():
     return _enh_plus_archive_file_response("spc-category")
+
+
+@app.get("/api/outlook/enh-plus-archive-spc-hazard-shapes")
+def enh_plus_archive_spc_hazard_shapes():
+    return _enh_plus_archive_file_response("spc-hazard-shapes")
+
+
+@app.get("/api/outlook/enh-plus-archive-risk-polygons-pure")
+def enh_plus_archive_risk_polygons_pure():
+    return _enh_plus_archive_file_response("risk-polygons-pure")
+
+
+@app.get("/api/outlook/enh-plus-archive-hazard-shapes-pure")
+def enh_plus_archive_hazard_shapes_pure():
+    return _enh_plus_archive_file_response("hazard-shapes-pure")
 
 
 @app.get("/api/outlook/enh-plus-archive-storm-reports")

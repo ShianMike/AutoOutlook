@@ -10,6 +10,7 @@ import type {
 import { RISK_META } from '../types/forecast';
 import type { OutlookTimelineHourSummary } from '../types/outlookArtifacts';
 import { focusLocationFromRegion } from './focusLocation';
+import { NO_DATA, derivePeriodCategories } from './timelineDerivation';
 
 export type TimeOfDay = 'morning' | 'afternoon' | 'evening' | 'overnight';
 export type TimelinePeriod =
@@ -40,9 +41,23 @@ export interface TimelineSegment {
   focusStates: string;
   usesCoordinateLabel: boolean;
   note: string;
+  /**
+   * True when this period's displayed merged outlook data cannot be resolved
+   * to a valid risk category. Only set in the merged view; the period should
+   * render a distinct "no data" state rather than a risk category
+   * (Requirement 7.3).
+   */
+  noData: boolean;
 }
 
-const HRRR_PERIOD_WINDOWS: Array<{ period: TimelinePeriod; label: string; minHour: number; maxHour: number }> = [
+export interface TimelinePeriodWindow {
+  period: TimelinePeriod;
+  label: string;
+  minHour: number;
+  maxHour: number;
+}
+
+export const HRRR_PERIOD_WINDOWS: TimelinePeriodWindow[] = [
   { period: 'f000_f006', label: 'F000-F006', minHour: 0,  maxHour: 6  },
   { period: 'f007_f012', label: 'F007-F012', minHour: 7,  maxHour: 12 },
   { period: 'f013_f018', label: 'F013-F018', minHour: 13, maxHour: 18 },
@@ -162,10 +177,21 @@ function dominantSevereHazard(snaps: HourSnapshot[], artifacts?: TimelineArtifac
 export function buildRiskTimeline(
   bundle: ForecastBundle,
   artifactHours: OutlookTimelineHourSummary[] = [],
+  options: { mergedView?: boolean } = {},
 ): TimelineSegment[] {
   const artifacts = new Map(artifactHours.map((hour) => [hour.forecastHour, hour]));
   const windows = HRRR_PERIOD_WINDOWS;
+  // In the merged view, per-period risk categories are derived strictly from
+  // the currently displayed merged artifact hours. A period with no resolvable
+  // merged hour resolves to NO_DATA and must render the distinct "no data"
+  // state rather than falling back to the backing bundle's hourly category
+  // (Requirements 7.1, 7.3).
+  const mergedView = Boolean(options.mergedView);
+  const derivedByPeriod = new Map(
+    derivePeriodCategories(artifactHours, windows).map((derived) => [derived.period, derived]),
+  );
   const segs: TimelineSegment[] = windows.map((window) => {
+    const noData = mergedView && derivedByPeriod.get(window.period)?.category === NO_DATA;
     const snaps = bundle.hours.filter((snap) =>
       snap.forecastHour >= window.minHour && snap.forecastHour <= window.maxHour
     );
@@ -190,6 +216,7 @@ export function buildRiskTimeline(
         focusStates: '',
         usesCoordinateLabel: false,
         note: 'No forecast points in this period.',
+        noData: mergedView,
       };
       return empty;
     }
@@ -222,8 +249,9 @@ export function buildRiskTimeline(
       focusStates: focus.states,
       usesCoordinateLabel: focus.usesCoordinateLabel,
       note: '',
+      noData: Boolean(noData),
     };
-    seg.note = noteFor(seg);
+    seg.note = noData ? 'Merged outlook data unavailable for this period.' : noteFor(seg);
     return seg;
   });
 

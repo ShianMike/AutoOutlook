@@ -57,10 +57,10 @@ _DISPLAY_BAND_MIN_SUPPORT_METERS = 35_000.0
 _DISPLAY_BAND_CRS = "EPSG:5070"
 _MIN_SERIALIZED_RING_AREA_DEG2 = 1e-5
 _PROBABILITY_COLORS = {
-    "tornado": ("#3b9b3b", "#a87d4f", "#d4ad7c", "#cf2727", "#c43eb1", "#6e0099", "#4b006b"),
-    "hail": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
-    "wind": ("#a87d4f", "#f6c842", "#cf2727", "#c43eb1", "#6e0099"),
-    "thunder": ("#5baa58", "#c9a279", "#5cdde6", "#ef6055"),
+    "tornado": ("#008B00", "#8B4726", "#FFC800", "#FF0000", "#FF00FF", "#912CEE", "#104E8B"),
+    "hail": ("#8B4726", "#FFC800", "#FF0000", "#FF00FF", "#912CEE"),
+    "wind": ("#8B4726", "#FFC800", "#FF0000", "#FF00FF", "#912CEE"),
+    "thunder": ("#C1E9C1", "#66A366", "#FFE066", "#FFA366"),
 }
 
 # --- Tunable category-calibration constants ---

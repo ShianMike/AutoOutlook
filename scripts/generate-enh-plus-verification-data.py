@@ -11,9 +11,12 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import zipfile
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
@@ -55,6 +58,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-root", type=Path, default=ARTIFACT_ROOT)
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH)
     parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes to build event payloads in parallel. "
+            "Each event merge is independent and CPU-bound, so a value close to "
+            "the core count regenerates the whole archive far faster. Defaults to "
+            "1 (serial)."
+        ),
+    )
+    parser.add_argument(
         "--reports-only",
         action="store_true",
         help=(
@@ -81,10 +95,25 @@ def main() -> None:
         rebake_reports_in_place(output_path, event_dates, artifact_root)
         return
     expected_model = read_json(MODEL_METADATA_PATH)
-    events = [
-        build_event_payload(event_date, artifact_root, expected_model)
-        for event_date in event_dates
-    ]
+    jobs = max(1, int(args.jobs))
+    if jobs > 1 and len(event_dates) > 1:
+        # Each event merge is independent and CPU-bound. Limit BLAS/OpenMP
+        # threads per worker so N processes do not oversubscribe the cores.
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            os.environ.setdefault(var, "1")
+        worker = partial(build_event_payload, artifact_root=artifact_root, expected_model=expected_model)
+        workers = min(jobs, len(event_dates))
+        print(f"Building {len(event_dates)} event(s) across {workers} worker process(es)...", flush=True)
+        events: list[dict[str, Any]] = []
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            for event_date, payload in zip(event_dates, executor.map(worker, event_dates)):
+                events.append(payload)
+                print(f"[built] {event_date.isoformat()}", flush=True)
+    else:
+        events = [
+            build_event_payload(event_date, artifact_root, expected_model)
+            for event_date in event_dates
+        ]
     write_typescript(output_path, events)
     print(f"Wrote {output_path.relative_to(PROJECT_ROOT)} with {len(events)} verification event(s).")
 
@@ -107,6 +136,8 @@ def build_event_payload(
     summary = merged["summary"]
     risk_polygons = merged["riskPolygons"]
     hazard_shapes = merged["hazardProbabilityShapes"]
+    risk_polygons_pure = merged["riskPolygonsPure"]
+    hazard_shapes_pure = merged["hazardProbabilityShapesPure"]
     merged_tile = merged["probabilityTile"]
 
     reports = load_or_fetch_reports(source_dir, event_date)
@@ -159,6 +190,8 @@ def build_event_payload(
         "summary": summary,
         "riskPolygons": risk_polygons,
         "hazardProbabilityShapes": hazard_shapes,
+        "riskPolygonsPure": risk_polygons_pure,
+        "hazardProbabilityShapesPure": hazard_shapes_pure,
         "spcDay1": spc_geojson,
         "spcHazardProbabilityShapes": spc_hazards,
         "stormReports": [frontend_report(report) for report in filtered_reports],
@@ -286,6 +319,10 @@ def generate_event_merge(
             "riskPolygons": read_json(output_dir / "merged_risk_polygons.geojson"),
             "hazardProbabilityShapes": read_json(output_dir / "merged_hazard_probability_shapes.geojson"),
             "probabilityTile": read_json(output_dir / "merged_probability_tile.json"),
+            # Pure ("Our Model") variant so the archive can toggle backing modes
+            # without a live backend call (which cannot serve historical dates).
+            "riskPolygonsPure": read_json(output_dir / "merged_risk_polygons_pure.geojson"),
+            "hazardProbabilityShapesPure": read_json(output_dir / "merged_hazard_probability_shapes_pure.geojson"),
         }
 
 
@@ -482,6 +519,8 @@ def write_typescript(output: Path, events: list[dict[str, Any]]) -> None:
         "  summary: Record<string, unknown>;\n"
         "  riskPolygons: OutlookArtifactFeatureCollection;\n"
         "  hazardProbabilityShapes: OutlookProbabilityShapeFeatureCollection;\n"
+        "  riskPolygonsPure: OutlookArtifactFeatureCollection;\n"
+        "  hazardProbabilityShapesPure: OutlookProbabilityShapeFeatureCollection;\n"
         "  spcDay1: SpcCategoryFeatureCollection;\n"
         "  spcHazardProbabilityShapes: OutlookProbabilityShapeFeatureCollection;\n"
         "  stormReports: SpcStormReport[];\n"

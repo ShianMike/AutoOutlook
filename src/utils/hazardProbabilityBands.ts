@@ -69,7 +69,7 @@ export interface HazardConfig {
 export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   thunder: {
     thresholds: [0.01, 0.10, 0.40, 0.70],
-    colors:     ['#5baa58', '#c9a279', '#5cdde6', '#ef6055'],
+    colors:     ['#C1E9C1', '#66A366', '#FFE066', '#FFA366'],
     labels:     ['TSTM', '10%', '40%', '70%'],
     baseLatRadius: 3.1,
     aspect: 1.7,
@@ -83,7 +83,7 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   },
   tornado: {
     thresholds: [0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60],
-    colors:     ['#3b9b3b', '#a87d4f', '#d4ad7c', '#cf2727', '#c43eb1', '#6e0099', '#4b006b'],
+    colors:     ['#008B00', '#8B4726', '#FFC800', '#FF0000', '#FF00FF', '#912CEE', '#104E8B'],
     labels:     ['2%', '5%', '10%', '15%', '30%', '45%', '60%'],
     baseLatRadius: 1.45,
     aspect: 1.7,
@@ -98,7 +98,7 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   },
   hail: {
     thresholds: [0.05, 0.15, 0.30, 0.45, 0.60],
-    colors:     ['#a87d4f', '#f6c842', '#cf2727', '#c43eb1', '#6e0099'],
+    colors:     ['#8B4726', '#FFC800', '#FF0000', '#FF00FF', '#912CEE'],
     labels:     ['5%', '15%', '30%', '45%', '60%'],
     baseLatRadius: 2.15,
     aspect: 1.85,
@@ -114,7 +114,7 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   },
   wind: {
     thresholds: [0.05, 0.15, 0.30, 0.45, 0.60],
-    colors:     ['#a87d4f', '#f6c842', '#cf2727', '#c43eb1', '#6e0099'],
+    colors:     ['#8B4726', '#FFC800', '#FF0000', '#FF00FF', '#912CEE'],
     labels:     ['5%', '15%', '30%', '45%', '60%'],
     baseLatRadius: 2.05,
     aspect: 1.95,
@@ -130,7 +130,7 @@ export const HAZARD_CONFIGS: Record<OutlookHazardKey, HazardConfig> = {
   },
   flood: {
     thresholds: [0.05, 0.15, 0.30, 0.45, 0.60],
-    colors:     ['#5b8540', '#7eb453', '#cf2727', '#c43eb1', '#6e0099'],
+    colors:     ['#8B4726', '#FFC800', '#FF0000', '#FF00FF', '#912CEE'],
     labels:     ['5%', '15%', '30%', '45%', '60%'],
     baseLatRadius: 2.0,
     aspect: 1.65,

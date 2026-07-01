@@ -3459,9 +3459,14 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         hazard_source = (root / "src" / "components" / "GeneratedHazardProbabilityMap.tsx").read_text(encoding="utf-8")
         artifact_probability_source = (root / "src" / "utils" / "artifactProbabilities.ts").read_text(encoding="utf-8")
+        # Scope the assertion to the generated hazard probability fill block
+        # only. The SPC hazard overlay that follows it renders the
+        # significant-severe area as a hatched region with an intentional dark
+        # boundary stroke (Requirement 1.4), which is a separate layer and not
+        # a probability fill.
         probability_fill = hazard_source[
             hazard_source.index("key={`artifact-prob-${"):
-            hazard_source.index("{showAutoLayer && visibleCigHatchCollection")
+            hazard_source.index("{(showSpcFillLayer || showSpcOutlineLayer) && spcFillCollection.features.length > 0")
         ]
 
         self.assertIn("stroke: 'none'", probability_fill)

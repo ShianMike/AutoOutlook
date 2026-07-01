@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   ForecastBundle,
   HazardAssessment,
@@ -17,9 +17,15 @@ import type {
 import OutlookMapPanel from '../OutlookMapPanel';
 import { useEnhPlusArchiveEvents, type OutlookArtifactState } from '../../hooks/useOutlookArtifacts';
 import {
+  DEFAULT_BACKING_MODE,
+  backingModeToSpcBacked,
+  type MergedArtifactsOverride,
+} from '../../utils/backingResolver';
+import {
   HISTORICAL_ENH_PLUS_EVENTS,
   type HistoricalEnhPlusEvent,
 } from '../../data/historicalEnhPlusVerification';
+import { orderArchiveEvents } from '../../utils/archiveEventOrdering';
 
 const EMPTY_INGREDIENTS: Ingredients = {
   mlcape: 0,
@@ -47,34 +53,44 @@ const EMPTY_INGREDIENTS: Ingredients = {
 
 export default function HistoricalEnhPlusVerification() {
   const { events: liveEvents } = useEnhPlusArchiveEvents('conus', true);
-  const allEvents = useMemo(() => {
-    // Live auto-archived ENH+ days first (newest first), then the curated
-    // historical catalog, de-duplicated by event date (live wins).
-    const seen = new Set<string>();
-    const merged: HistoricalEnhPlusEvent[] = [];
-    for (const event of [...liveEvents].sort((a, b) => b.eventDate.localeCompare(a.eventDate))) {
-      if (seen.has(event.eventDate)) continue;
-      seen.add(event.eventDate);
-      merged.push(event);
-    }
-    for (const event of HISTORICAL_ENH_PLUS_EVENTS) {
-      if (seen.has(event.eventDate)) continue;
-      seen.add(event.eventDate);
-      merged.push(event);
-    }
-    return merged;
-  }, [liveEvents]);
+  const allEvents = useMemo(
+    // Merge live + catalog into a single set, then de-duplicate and order by
+    // Issued_Date descending across the entire combined set (Requirement 5.1,
+    // 5.2). Live events take precedence over catalog events on date ties.
+    () => orderArchiveEvents(liveEvents, HISTORICAL_ENH_PLUS_EVENTS),
+    [liveEvents],
+  );
 
   const eventDates = useMemo(() => allEvents.map((event) => event.eventDate), [allEvents]);
   const [selectedDate, setSelectedDate] = useState('');
   const [viewType, setViewType] = useState<'hourly' | 'merged'>('merged');
   const [stormReportsMode, setStormReportsMode] = useState<'none' | 'all' | 'tornado' | 'hail' | 'wind'>('all');
+  // SPC backing comparison mode for the archive. Defaults to "Our Model"
+  // (Requirement 6.6) and resets to the default whenever a different event is
+  // selected so each event's first view starts on "Our Model".
+  const [spcBacked, setSpcBacked] = useState(backingModeToSpcBacked(DEFAULT_BACKING_MODE));
 
   const event = allEvents.find((item) => item.eventDate === selectedDate) ?? allEvents[0];
 
   const snapshot = useMemo(() => buildSnapshot(event), [event]);
   const bundle = useMemo(() => buildBundle(event, snapshot), [event, snapshot]);
-  const artifactState = useMemo(() => buildArtifactState(event), [event]);
+  // Both backing variants are baked into each archived event: "SPC Blend" is
+  // the SPC-backed merged outlook and "Our Model" is the pure HRRR/XGBoost
+  // merged outlook. Reading both from the event avoids a live backend call,
+  // which cannot serve historical archive dates.
+  const blendArtifactState = useMemo(() => buildArtifactState(event, 'blend'), [event]);
+  const pureArtifactState = useMemo(() => buildArtifactState(event, 'pure'), [event]);
+  const mergedOverride = useMemo<MergedArtifactsOverride>(
+    () => ({
+      pure: pureArtifactState,
+      blend: blendArtifactState,
+    }),
+    [pureArtifactState, blendArtifactState],
+  );
+
+  useEffect(() => {
+    setSpcBacked(backingModeToSpcBacked(DEFAULT_BACKING_MODE));
+  }, [selectedDate]);
 
   if (!event) {
     return (
@@ -99,7 +115,7 @@ export default function HistoricalEnhPlusVerification() {
 
       <OutlookMapPanel
         snapshot={snapshot}
-        outlookArtifacts={artifactState}
+        outlookArtifacts={blendArtifactState}
         bundle={bundle}
         selectedIndex={0}
         isPlaying={false}
@@ -110,11 +126,13 @@ export default function HistoricalEnhPlusVerification() {
         setSelectedMergedDate={setSelectedDate}
         viewType={viewType}
         setViewType={setViewType}
+        spcBacked={spcBacked}
+        setSpcBacked={setSpcBacked}
         stormReportsMode={stormReportsMode}
         setStormReportsMode={setStormReportsMode}
         stormReports={event.stormReports}
         availableMergedDatesOverride={eventDates}
-        mergedArtifactsOverride={artifactState}
+        mergedArtifactsOverride={mergedOverride}
         spcDay1Override={event.spcDay1}
         spcHazardProbabilityShapesOverride={event.spcHazardProbabilityShapes}
         initialSpcComparisonMode="overlay"
@@ -135,9 +153,19 @@ function ArchiveMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buildArtifactState(event: HistoricalEnhPlusEvent): OutlookArtifactState {
+function buildArtifactState(
+  event: HistoricalEnhPlusEvent,
+  backing: 'blend' | 'pure' = 'blend',
+): OutlookArtifactState {
   const verification = event.summary as MergedD1VerificationSummary;
   const categoryCounts = verification.predictedCategories;
+  // Pick the baked variant: "SPC Blend" uses the SPC-backed merged outlook,
+  // "Our Model" uses the pure HRRR/XGBoost merged outlook. Both are archived
+  // per event so the backing toggle needs no live backend call.
+  const riskPolygons = backing === 'pure' ? event.riskPolygonsPure : event.riskPolygons;
+  const hazardShapes = backing === 'pure'
+    ? event.hazardProbabilityShapesPure
+    : event.hazardProbabilityShapes;
   const tile: OutlookProbabilityTile = {
     forecastHour: 0,
     validTimeISO: event.eventWindowStartISO,
@@ -152,8 +180,8 @@ function buildArtifactState(event: HistoricalEnhPlusEvent): OutlookArtifactState
       hail: [],
       wind: [],
     },
-    riskShapes: event.riskPolygons,
-    hazardProbabilityShapes: event.hazardProbabilityShapes,
+    riskShapes: riskPolygons,
+    hazardProbabilityShapes: hazardShapes,
   };
   const probabilityTiles: OutlookProbabilityTiles = {
     cycle: cycleLabel(event),
@@ -191,7 +219,7 @@ function buildArtifactState(event: HistoricalEnhPlusEvent): OutlookArtifactState
     status: 'ready',
     artifacts: {
       metadata,
-      riskPolygons: event.riskPolygons,
+      riskPolygons,
       probabilityTiles,
       selectedArtifactForecastHour: 0,
       selectedHourStatus: 'ready',

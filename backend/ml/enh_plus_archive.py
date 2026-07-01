@@ -52,7 +52,17 @@ _ARCHIVE_FILES: tuple[tuple[str, str], ...] = (
     ("merged_hazard_probability_shapes.geojson", "hazard-probability-shapes.geojson"),
     ("merged_probability_tile.json", "probability-tile.json"),
     ("spc_day1_cat.geojson", "spc-day1-category.geojson"),
+    ("spc_day1_hazards.geojson", "spc-hazard-shapes.geojson"),
+    # Pure ("Our Model") merged outlook so archived events support the SPC
+    # backing toggle (SPC Blend vs Our Model) without a live backend call.
+    ("merged_risk_polygons_pure.geojson", "risk-polygons-pure.geojson"),
+    ("merged_hazard_probability_shapes_pure.geojson", "hazard-probability-shapes-pure.geojson"),
 )
+
+# Merged artifact filenames that must be normalized (rather than raw-copied)
+# before being written to the archive, so the archived artifact matches the live
+# served contract (Requirements 3.5, 3.8).
+_SPC_HAZARD_SHAPES_SRC = "spc_day1_hazards.geojson"
 
 ReportFetchFn = Callable[[date], list[dict[str, Any]]]
 
@@ -135,7 +145,15 @@ def update_archive_for_date(
     date_dir.mkdir(parents=True, exist_ok=True)
     for src_name, dst_name in _ARCHIVE_FILES:
         src = merged_dir / src_name
-        if src.is_file():
+        if not src.is_file():
+            continue
+        if src_name == _SPC_HAZARD_SHAPES_SRC:
+            # Normalize the SPC hazard GeoJSON through the same path the live
+            # endpoint uses so the archived artifact matches the served contract
+            # (Requirements 3.5, 3.8). Fall back to a raw copy only if parsing or
+            # normalization fails, so a malformed source never drops the file.
+            _archive_spc_hazard_shapes(src, date_dir / dst_name)
+        else:
             shutil.copyfile(src, date_dir / dst_name)
 
     window = event_window_for_date(event_date)
@@ -238,6 +256,27 @@ def _refresh_reports(
         if isinstance(existing, dict) and isinstance(existing.get("reports"), list):
             return existing["reports"]
         return []
+
+
+def _archive_spc_hazard_shapes(src: Path, dst: Path) -> None:
+    """Normalize the SPC hazard GeoJSON at ``src`` and write it to ``dst``.
+
+    The archived artifact is passed through
+    :func:`backend.ml.merged_outlook.normalize_spc_hazard_outlook` so it matches
+    the live served contract (Requirements 3.5, 3.8). If the source cannot be
+    read/parsed or normalization fails, fall back to a raw copy so a malformed
+    source never causes the artifact to be dropped from the archive. The import
+    is deferred to avoid a circular import between this module and
+    ``merged_outlook`` (mirrors :func:`repair_archived_spc_window`).
+    """
+    try:
+        from backend.ml.merged_outlook import normalize_spc_hazard_outlook
+
+        hazard_geojson = _read_json(src)
+        normalized = normalize_spc_hazard_outlook(hazard_geojson)
+        _write_json(dst, normalized)
+    except Exception:
+        shutil.copyfile(src, dst)
 
 
 def _upsert_index_entry(archive_dir: Path, entry: Mapping[str, Any]) -> None:

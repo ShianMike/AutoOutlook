@@ -8,7 +8,8 @@ import HazardOutlookMap from './HazardOutlookMap';
 import GeneratedOutlookMap, { type SpcComparisonMode } from './GeneratedOutlookMap';
 import GeneratedHazardProbabilityMap, { hasGeneratedHazardTile } from './GeneratedHazardProbabilityMap';
 import ForecastDisclaimer from './ForecastDisclaimer';
-import { useMergedD1Artifacts, useSpcBackedHourArtifacts, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
+import { useMergedD1Artifacts, useSpcBackedHourArtifacts, useSpcHazardShapes, type OutlookArtifactState } from '../hooks/useOutlookArtifacts';
+import { resolveBacking, type MergedArtifactsOverride } from '../utils/backingResolver';
 import type {
   OutlookArtifacts,
   MergedD1VerificationSummary,
@@ -41,7 +42,7 @@ interface OutlookMapPanelProps {
   setStormReportsMode?: (mode: StormReportsMode) => void;
   stormReports?: SpcStormReport[];
   availableMergedDatesOverride?: string[];
-  mergedArtifactsOverride?: OutlookArtifactState;
+  mergedArtifactsOverride?: MergedArtifactsOverride;
   spcDay1Override?: SpcCategoryFeatureCollection | null;
   spcHazardProbabilityShapesOverride?: OutlookProbabilityShapeFeatureCollection | null;
   spcBacked?: boolean;
@@ -53,6 +54,15 @@ interface OutlookMapPanelProps {
 type OutlookMode = 'levels' | 'hazards';
 type StormReportsMode = 'none' | 'all' | 'tornado' | 'hail' | 'wind';
 type GifQualityPreset = 'small' | 'medium' | 'large';
+
+// Displayed when an archive backing mode is selected but no outlook data is
+// available for it (and nothing was previously displayed to retain). Drives the
+// "unavailable comparison" notice (Requirement 6.5).
+const UNAVAILABLE_BACKING_STATE: OutlookArtifactState = {
+  status: 'missing',
+  artifacts: null,
+  message: 'Selected comparison unavailable for this event.',
+};
 
 interface GifProgressState {
   current: number;
@@ -360,7 +370,29 @@ export default function OutlookMapPanel({
     day: mergedDay,
     backing: spcBacked ? 'blend' : 'pure',
   });
-  const mergedArtifacts = mergedArtifactsOverride ?? liveMergedArtifacts;
+
+  // On the archive path both backing variants ("Our Model" = pure, "SPC Blend"
+  // = blend) are supplied through the override. Resolve the effective merged
+  // outlook from the `spcBacked` toggle so switching modes replaces the display
+  // without navigating away (Requirement 6.4). When the selected mode's data is
+  // unavailable the previously displayed outlook is retained and the
+  // "unavailable comparison" notice is surfaced (Requirement 6.5).
+  const previousBackingRef = useRef<OutlookArtifactState | null>(null);
+  const backingResolution = mergedArtifactsOverride
+    ? resolveBacking(spcBacked, mergedArtifactsOverride, previousBackingRef.current)
+    : null;
+  const backingUnavailable = backingResolution?.unavailable ?? false;
+  const mergedArtifacts = mergedArtifactsOverride
+    ? (backingResolution?.effective ?? UNAVAILABLE_BACKING_STATE)
+    : liveMergedArtifacts;
+
+  useEffect(() => {
+    // Remember the last successfully displayed override outlook so that toggling
+    // to an unavailable mode can retain it (Requirement 6.5, 6.7).
+    if (mergedArtifactsOverride && !backingUnavailable && mergedArtifacts.artifacts) {
+      previousBackingRef.current = mergedArtifacts;
+    }
+  }, [mergedArtifactsOverride, backingUnavailable, mergedArtifacts]);
 
   // When showing the merged Day 2 outlook, the SPC comparison overlay must show
   // the SPC Day 2 categorical (not the default Day 1). Fetch it for the selected
@@ -386,6 +418,17 @@ export default function OutlookMapPanel({
   }, [viewType, mergedDay, selectedMergedDate, activeRegion, availableMergedDatesOverride]);
 
   const effectiveSpcOverride = spcDay1Override ?? (mergedDay === 2 ? mergedD2Spc : null);
+
+  // Live SPC hazard outlook (tornado/hail/wind/thunder probability shapes).
+  // Fetched only on the live path; the archive path supplies its own shapes via
+  // `spcHazardProbabilityShapesOverride`. On `missing`/`error` the generated
+  // hazard outlook keeps rendering and the selected hazard type is preserved,
+  // while a visible "unavailable" notice is surfaced (Requirement 1.6).
+  const liveSpcHazard = useSpcHazardShapes(activeRegion, !mergedArtifactsOverride);
+  const effectiveSpcHazardShapes = spcHazardProbabilityShapesOverride ?? liveSpcHazard.shapes;
+  const liveSpcHazardUnavailable = !mergedArtifactsOverride
+    && !spcHazardProbabilityShapesOverride
+    && (liveSpcHazard.status === 'missing' || liveSpcHazard.status === 'error');
 
   // SPC-backed scrubber: apply the SPC day envelope (50/50 blend) to the
   // selected forecast hour at serve time. The SPC Day 1/Day 2 window is chosen
@@ -773,6 +816,15 @@ export default function OutlookMapPanel({
             />
           </div>
         ) : (
+          <>
+          {liveSpcHazardUnavailable && (
+            <div
+              className="outlook-export-hide mb-2 border-[3px] border-ink bg-signal-amber px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-widest text-ink shadow-retro-sm"
+              role="status"
+            >
+              SPC hazard outlook unavailable
+            </div>
+          )}
           <div
             className={[
               'outlook-export-stage',
@@ -796,7 +848,7 @@ export default function OutlookMapPanel({
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
-                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    spcHazardProbabilityShapes={effectiveSpcHazardShapes}
                     cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
@@ -810,7 +862,7 @@ export default function OutlookMapPanel({
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
-                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    spcHazardProbabilityShapes={effectiveSpcHazardShapes}
                     cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
@@ -824,7 +876,7 @@ export default function OutlookMapPanel({
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
-                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    spcHazardProbabilityShapes={effectiveSpcHazardShapes}
                     cigOverlayEnabled={viewType === 'merged'}
                   />
                   <GeneratedHazardProbabilityMap
@@ -838,7 +890,7 @@ export default function OutlookMapPanel({
                     stormReportsMode={mapStormReportsMode}
                     stormReports={mapStormReports}
                     comparisonMode={spcComparisonMode}
-                    spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                    spcHazardProbabilityShapes={effectiveSpcHazardShapes}
                     cigOverlayEnabled={viewType === 'merged'}
                   />
                 </>
@@ -861,7 +913,7 @@ export default function OutlookMapPanel({
                   stormReportsMode={mapStormReportsMode}
                   stormReports={mapStormReports}
                   comparisonMode={spcComparisonMode}
-                  spcHazardProbabilityShapes={spcHazardProbabilityShapesOverride}
+                  spcHazardProbabilityShapes={effectiveSpcHazardShapes}
                   cigOverlayEnabled={viewType === 'merged'}
                   zoomRegion={zoomRegion}
                 />
@@ -934,6 +986,7 @@ export default function OutlookMapPanel({
               <GeneratedHazardsUnavailable message={effectiveArtifactState.message} status={effectiveArtifactState.status} />
             )}
           </div>
+          </>
         )}
 
         {/* Footer strip */}
@@ -1013,6 +1066,11 @@ export default function OutlookMapPanel({
             {hourlySpcUnavailable && (
               <p className="mt-1 max-w-[150px] text-[9px] font-bold uppercase tracking-wider leading-tight text-signal-red" role="status">
                 No SPC for this hour — showing unblended model.
+              </p>
+            )}
+            {backingUnavailable && viewType === 'merged' && (
+              <p className="mt-1 max-w-[150px] text-[9px] font-bold uppercase tracking-wider leading-tight text-signal-red" role="status">
+                {spcBacked ? 'SPC Blend' : 'Our Model'} comparison unavailable for this event.
               </p>
             )}
           </ControlField>
@@ -1116,7 +1174,7 @@ export default function OutlookMapPanel({
             </ControlField>
           )}
 
-          {(mode === 'levels' || (mode === 'hazards' && spcHazardProbabilityShapesOverride?.features?.length)) && (
+          {(mode === 'levels' || (mode === 'hazards' && effectiveSpcHazardShapes?.features?.length)) && (
             <ControlField label="SPC Compare" className="w-40 animate-fadeIn" >
               <select
                 value={spcComparisonMode}

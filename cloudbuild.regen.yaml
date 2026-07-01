@@ -1,0 +1,77 @@
+# Regenerate the ENH+ Risk Archive static catalog on Google Cloud Build.
+#
+# Stage 0 restores any previously-fetched HRRR source artifacts from GCS so the
+# expensive fetch can be skipped on repeat runs. Stage 1 fetches the event-day
+# HRRR f12-f36 sources from the AWS long-term archive (noaa-hrrr-bdp-pds) and
+# runs model inference, then the parallel generator re-merges them into the
+# frontend catalog TS (baking BOTH the SPC-blend and the pure "Our Model"
+# variants per event). Stage 2 persists the sources back to GCS and uploads the
+# generated catalog so it can be pulled back and committed.
+#
+# Runs on a high-CPU machine near AWS for fast S3 byte-range reads + inference.
+#
+# Submit (full 25-date run):
+#   gcloud builds submit --config cloudbuild.regen.yaml .
+# Smoke test (single date):
+#   gcloud builds submit --config cloudbuild.regen.yaml \
+#     --substitutions=_FETCH_ARGS="--event-date 2026-03-05",_GEN_ARGS="--event-date 2026-03-05" .
+
+substitutions:
+  _OUT_BUCKET: autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
+  _JOBS: "24"
+  _FETCH_ARGS: ""     # empty = all configured catalog dates
+  _GEN_ARGS: ""       # empty = all configured catalog dates
+
+options:
+  machineType: E2_HIGHCPU_32
+
+timeout: 7200s
+
+steps:
+  - id: restore-sources
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p backend/artifacts/historical_enh_plus
+        echo "Restoring previously-fetched HRRR sources (if any)..."
+        gsutil -m rsync -r gs://${_OUT_BUCKET}/regen-sources/ backend/artifacts/historical_enh_plus/ || true
+
+  - id: fetch-and-generate
+    name: python:3.11-bookworm
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        apt-get update && apt-get install -y --no-install-recommends libgomp1
+        pip install --no-cache-dir -r backend/requirements.txt
+        echo "=== Stage 1: fetch HRRR source artifacts (skips complete dates) ==="
+        python scripts/fetch-enh-plus-verification-events.py ${_FETCH_ARGS}
+        echo "=== Stage 2: regenerate the risk-archive catalog (blend + pure) ==="
+        python scripts/generate-enh-plus-verification-data.py ${_GEN_ARGS} --jobs ${_JOBS}
+        echo "=== Generated catalog ==="
+        wc -c src/data/historicalEnhPlusVerification.ts
+
+  - id: persist-sources
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "Persisting fetched HRRR sources for cheap future re-runs..."
+        gsutil -m rsync -r backend/artifacts/historical_enh_plus/ gs://${_OUT_BUCKET}/regen-sources/
+
+  - id: upload-catalog
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gsutil cp src/data/historicalEnhPlusVerification.ts \
+          gs://${_OUT_BUCKET}/regen/${BUILD_ID}/historicalEnhPlusVerification.ts
+        echo "Uploaded to gs://${_OUT_BUCKET}/regen/${BUILD_ID}/historicalEnhPlusVerification.ts"

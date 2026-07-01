@@ -18,6 +18,12 @@ import type {
 } from '../types/outlookArtifacts';
 import type { HistoricalEnhPlusEvent } from '../data/historicalEnhPlusVerification';
 import { apiUrl } from '../utils/apiBase';
+import {
+  cycleIdentity,
+  cycleIdentityKey,
+  guardReplacement,
+  sameCycleIdentity,
+} from '../utils/cycleIdentity';
 
 export type ArtifactStatus = 'loading' | 'ready' | 'missing' | 'error' | 'pending' | 'failed';
 
@@ -48,6 +54,64 @@ async function fetchJson<T>(url: string, signal?: AbortSignal, activeRegion?: Ac
     throw new Error(`HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+export interface FetchWithTimeoutRetriesOptions {
+  /** Per-attempt timeout in milliseconds. Defaults to 10000 (10s). */
+  timeoutMs?: number;
+  /** Number of retries after the first attempt. Defaults to 2 (3 total attempts). */
+  retries?: number;
+  /** Optional caller-owned signal (e.g. unmount) that aborts all remaining attempts. */
+  signal?: AbortSignal;
+  /** Optional active region forwarded to the request. */
+  activeRegion?: ActiveRegion;
+}
+
+/**
+ * Wraps {@link fetchJson} with a per-attempt timeout (via AbortController) and
+ * bounded retries. Each attempt is aborted if it exceeds `timeoutMs`; on failure
+ * the request is retried up to `retries` times (so `retries + 1` attempts total)
+ * before the last error is rethrown. A definitive not-found (`artifact_missing`,
+ * HTTP 404) is not retried since retrying cannot change the result, and an
+ * external abort short-circuits the remaining attempts.
+ */
+async function fetchWithTimeoutRetries<T>(
+  url: string,
+  options: FetchWithTimeoutRetriesOptions = {},
+): Promise<T> {
+  const { timeoutMs = 10000, retries = 2, signal: externalSignal, activeRegion } = options;
+  const maxAttempts = retries + 1;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (externalSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await fetchJson<T>(url, controller.signal, activeRegion);
+    } catch (error) {
+      lastError = error;
+      // A definitive not-found will not change across retries.
+      if (error instanceof Error && error.message === 'artifact_missing') {
+        throw error;
+      }
+      // Respect an external cancellation rather than retrying.
+      if (externalSignal?.aborted) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('fetch_failed');
 }
 
 async function fetchOptionalSpcVerification(
@@ -285,13 +349,58 @@ function preserveReadySelectedHour(
   return next;
 }
 
-function incrementalCacheKey(incremental: OutlookIncrementalIndex): string {
-  return [
-    incremental.cycle,
-    incremental.cycleTimeISO ?? '',
-    incremental.generatedAtISO ?? '',
-    incremental.featureSchemaHash ?? '',
-  ].join('|');
+/** Reload resilience: a reload that does not settle within this window after a
+ * refresh is treated as failed (Requirement 4.6). */
+const RELOAD_TIMEOUT_MS = 30 * 1000;
+
+/**
+ * Human-readable label identifying the affected outlook day for a per-day
+ * reload status message (Requirement 4.7). Derived from the durable cycle
+ * identity of the last valid outlook.
+ */
+function reloadDayLabel(state: OutlookArtifactState | null): string {
+  const incremental = state?.artifacts?.incrementalIndex;
+  if (incremental) {
+    const identity = cycleIdentity(incremental);
+    const typeLabel = identity.outlookType === 'day2'
+      ? 'Day 2'
+      : identity.outlookType === 'day1'
+        ? 'Day 1'
+        : 'Current';
+    return identity.issuingDay ? `${typeLabel} (${identity.issuingDay})` : typeLabel;
+  }
+  return 'Current';
+}
+
+/**
+ * Reconcile a newly computed `ready` outlook against the retained state
+ * (Requirement 4.1, 4.2, 4.3, 4.4, 4.8).
+ *
+ * When the newly loaded outlook shares the retained outlook's cycle identity,
+ * a replacement that is empty or missing fields present in the retained cache
+ * is rejected via {@link guardReplacement}, so the retained geometries and
+ * category values continue to display unchanged. When the cycle identity
+ * differs (a genuinely new cycle) or no retained outlook exists, the new
+ * outlook is stored as-is.
+ */
+function reconcileReadyState(
+  previous: OutlookArtifactState,
+  next: OutlookArtifactState,
+): OutlookArtifactState {
+  const previousIncremental = previous.artifacts?.incrementalIndex;
+  const nextIncremental = next.artifacts?.incrementalIndex;
+  if (
+    previous.status === 'ready'
+    && previousIncremental
+    && nextIncremental
+    && sameCycleIdentity(cycleIdentity(previousIncremental), cycleIdentity(nextIncremental))
+    && !guardReplacement(previous, next)
+  ) {
+    // Same cycle, but the replacement is empty or drops a field the retained
+    // cache has: reuse the retained outlook (Requirement 4.2).
+    return previous;
+  }
+  return next;
 }
 
 export function useOutlookArtifacts(
@@ -309,6 +418,11 @@ export function useOutlookArtifacts(
   const warmedRiskPolygonCyclesRef = useRef<Set<string>>(new Set());
   const cacheCycleRef = useRef<string | null>(null);
   const isMountedRef = useRef(true);
+  // Requirement 4.5/4.7: remember the last valid (ready) outlook so it can keep
+  // displaying during a reload and be retained if the reload fails.
+  const lastValidStateRef = useRef<OutlookArtifactState | null>(null);
+  // Requirement 4.6: pending reload-timeout timer, cleared on settle/unmount.
+  const reloadTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -317,8 +431,18 @@ export function useOutlookArtifacts(
     };
   }, []);
 
+  // Track the last valid outlook for reload resilience (Requirement 4.5, 4.7).
+  useEffect(() => {
+    if (state.status === 'ready' && state.artifacts) {
+      lastValidStateRef.current = state;
+    }
+  }, [state]);
+
   const resetProbabilityCacheIfNeeded = (incremental: OutlookIncrementalIndex) => {
-    const cacheKey = incrementalCacheKey(incremental);
+    // Requirement 4.1/4.4: key the cache on the durable cycle identity so it
+    // survives a page refresh when the cycle is unchanged, and is only cleared
+    // (replaced) when a genuinely different cycle loads.
+    const cacheKey = cycleIdentityKey(incremental);
     if (cacheCycleRef.current !== cacheKey) {
       probabilityHourCacheRef.current.clear();
       riskPolygonCacheRef.current.clear();
@@ -512,6 +636,23 @@ export function useOutlookArtifacts(
     const load = async () => {
       if (loadInFlight) return;
       loadInFlight = true;
+      // Requirement 4.6: if this reload does not settle within 30s, treat it as
+      // failed while retaining the last valid outlook and surfacing a per-day
+      // status message (Requirement 4.7).
+      if (reloadTimerRef.current !== null) {
+        window.clearTimeout(reloadTimerRef.current);
+      }
+      reloadTimerRef.current = window.setTimeout(() => {
+        if (cancelled) return;
+        const retained = lastValidStateRef.current;
+        if (retained?.artifacts) {
+          setState({
+            status: 'failed',
+            artifacts: retained.artifacts,
+            message: `${reloadDayLabel(retained)} outlook reload did not complete within 30 seconds; showing the last valid outlook.`,
+          });
+        }
+      }, RELOAD_TIMEOUT_MS);
       if (!cancelled) {
         showCachedSelectedHour();
         setState((previous) => {
@@ -579,7 +720,7 @@ export function useOutlookArtifacts(
               ? probabilityTilesFromIncremental(incremental, cachedHours)
               : undefined;
             if (!cancelled) {
-              setState((previous) => ({
+              setState((previous) => reconcileReadyState(previous, {
                 status: 'ready',
                 artifacts: {
                   metadata: readyMetadata,
@@ -609,7 +750,7 @@ export function useOutlookArtifacts(
               );
               const nextCachedHours = cacheProbabilityHours([probabilityHour]);
               const probabilityTiles = probabilityTilesFromIncremental(incremental, nextCachedHours);
-              setState((previous) => ({
+              setState((previous) => reconcileReadyState(previous, {
                 status: 'ready',
                 artifacts: {
                   metadata: {
@@ -700,7 +841,7 @@ export function useOutlookArtifacts(
           selectedValidTimeISO,
         );
         if (!cancelled) {
-          setState({
+          setState((previous) => reconcileReadyState(previous, {
             status: 'ready',
             artifacts: {
               metadata: {
@@ -714,11 +855,22 @@ export function useOutlookArtifacts(
               selectedHourStatus: 'ready',
             },
             message: null,
-          });
+          }));
         }
       } catch (error) {
         if (cancelled || controller.signal.aborted) return;
         const message = error instanceof Error ? error.message : String(error);
+        // Requirement 4.7: on reload failure, retain the last valid displayed
+        // outlook and surface a per-day status message describing the failure.
+        const retained = lastValidStateRef.current;
+        if (retained?.artifacts) {
+          setState({
+            status: 'failed',
+            artifacts: retained.artifacts,
+            message: `${reloadDayLabel(retained)} outlook reload failed (${message}); showing the last valid outlook.`,
+          });
+          return;
+        }
         const nextState: OutlookArtifactState = {
           status: message === 'artifact_missing' ? 'missing' : 'error',
           artifacts: null,
@@ -728,6 +880,10 @@ export function useOutlookArtifacts(
         };
         setState((previous) => preserveReadySelectedHour(previous, selectedForecastHour, nextState));
       } finally {
+        if (reloadTimerRef.current !== null) {
+          window.clearTimeout(reloadTimerRef.current);
+          reloadTimerRef.current = null;
+        }
         loadInFlight = false;
       }
     };
@@ -739,6 +895,10 @@ export function useOutlookArtifacts(
       loadInFlight = false;
       controller.abort();
       window.clearInterval(interval);
+      if (reloadTimerRef.current !== null) {
+        window.clearTimeout(reloadTimerRef.current);
+        reloadTimerRef.current = null;
+      }
     };
   }, [refreshMs, selectedForecastHour, selectedValidTimeISO, activeRegion, enabled]);
 
@@ -923,6 +1083,79 @@ export function useSpcBackedHourArtifacts(
   return state;
 }
 
+/** State returned by {@link useSpcHazardShapes} for the live SPC hazard outlook. */
+export interface SpcHazardShapesState {
+  status: 'loading' | 'ready' | 'missing' | 'error';
+  shapes: OutlookProbabilityShapeFeatureCollection | null;
+  message: string | null;
+}
+
+const SPC_HAZARD_INITIAL_STATE: SpcHazardShapesState = {
+  status: 'loading',
+  shapes: null,
+  message: null,
+};
+
+/**
+ * Fetches the live SPC hazard outlook (tornado/hail/wind/thunder probability
+ * shapes) from `/api/outlook/spc-hazard-shapes` (Requirement 1.6).
+ *
+ * The result starts as `loading`, becomes `ready` with the normalized shape
+ * collection on success, maps HTTP 404 (`artifact_missing`) to `missing`, and
+ * maps any other failure to `error`. On `missing`/`error` the caller keeps
+ * showing the generated hazard outlook and preserves the selected hazard type.
+ */
+export function useSpcHazardShapes(
+  activeRegion: ActiveRegion = 'conus',
+  enabled = true,
+): SpcHazardShapesState {
+  const [state, setState] = useState<SpcHazardShapesState>(SPC_HAZARD_INITIAL_STATE);
+
+  useEffect(() => {
+    if (!enabled) {
+      setState(SPC_HAZARD_INITIAL_STATE);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setState(SPC_HAZARD_INITIAL_STATE);
+
+    const load = async () => {
+      try {
+        const shapes = await fetchJson<OutlookProbabilityShapeFeatureCollection>(
+          '/api/outlook/spc-hazard-shapes',
+          controller.signal,
+          activeRegion,
+        );
+        setState({ status: 'ready', shapes, message: null });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        // A definitive not-found is distinct from a processing/transport error
+        // so the view can surface an "unavailable" message versus an error.
+        if (error instanceof Error && error.message === 'artifact_missing') {
+          setState({
+            status: 'missing',
+            shapes: null,
+            message: 'SPC hazard outlook unavailable for the selected outlook.',
+          });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setState({
+          status: 'error',
+          shapes: null,
+          message: `Failed to load SPC hazard outlook: ${message}`,
+        });
+      }
+    };
+
+    load();
+    return () => controller.abort();
+  }, [activeRegion, enabled]);
+
+  return state;
+}
+
 
 export function useSpcStormReports(
   activeRegion: ActiveRegion = 'conus',
@@ -1028,13 +1261,26 @@ export function useEnhPlusArchiveEvents(
         const built = await Promise.all(
           entries.map(async (entry) => {
             const query = `?date=${entry.date}`;
-            const [verification, riskPolygons, hazardShapes, tile, spcDay1, reports] = await Promise.all([
+            const [verification, riskPolygons, hazardShapes, tile, spcDay1, spcHazardShapes, reports, riskPolygonsPure, hazardShapesPure] = await Promise.all([
               fetchJson<MergedD1VerificationSummary>(`/api/outlook/enh-plus-archive-verification${query}`, controller.signal, activeRegion).catch(() => null),
               fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/enh-plus-archive-risk-polygons${query}`, controller.signal, activeRegion).catch(() => null),
               fetchJson<OutlookProbabilityShapeFeatureCollection>(`/api/outlook/enh-plus-archive-hazard-shapes${query}`, controller.signal, activeRegion).catch(() => null),
               fetchJson<OutlookProbabilityTile>(`/api/outlook/enh-plus-archive-probability-tile${query}`, controller.signal, activeRegion).catch(() => null),
               fetchJson<SpcCategoryFeatureCollection>(`/api/outlook/enh-plus-archive-spc-category${query}`, controller.signal, activeRegion).catch(() => null),
+              // Requirement 3.4: 10s timeout and up to 2 retries before the
+              // archived SPC hazard outlook is treated as unavailable. A
+              // failure, timeout, or 404 falls back to null so the archived
+              // categorical outlook still displays (Requirement 3.6).
+              fetchWithTimeoutRetries<OutlookProbabilityShapeFeatureCollection>(
+                `/api/outlook/enh-plus-archive-spc-hazard-shapes${query}`,
+                { timeoutMs: 10000, retries: 2, signal: controller.signal, activeRegion },
+              ).catch(() => null),
               fetchJson<{ reports?: SpcStormReport[] }>(`/api/outlook/enh-plus-archive-storm-reports${query}`, controller.signal, activeRegion).catch(() => null),
+              // Pure ("Our Model") merged outlook so the SPC backing toggle
+              // works on live archive events. Older archives without the pure
+              // artifact 404 and fall back to the blend outlook below.
+              fetchJson<OutlookArtifactFeatureCollection>(`/api/outlook/enh-plus-archive-risk-polygons-pure${query}`, controller.signal, activeRegion).catch(() => null),
+              fetchJson<OutlookProbabilityShapeFeatureCollection>(`/api/outlook/enh-plus-archive-hazard-shapes-pure${query}`, controller.signal, activeRegion).catch(() => null),
             ]);
             if (!verification || !riskPolygons) return null;
             const event: HistoricalEnhPlusEvent = {
@@ -1053,8 +1299,18 @@ export function useEnhPlusArchiveEvents(
               summary: verification as unknown as Record<string, unknown>,
               riskPolygons,
               hazardProbabilityShapes: (hazardShapes ?? ENH_PLUS_EMPTY_FC) as unknown as OutlookProbabilityShapeFeatureCollection,
+              // Live archive events serve a separate pure ("Our Model")
+              // outlook when available; older archives without it fall back to
+              // the SPC-backed (blend) outlook so the toggle is a no-op there.
+              riskPolygonsPure: riskPolygonsPure ?? riskPolygons,
+              hazardProbabilityShapesPure: (hazardShapesPure ?? hazardShapes ?? ENH_PLUS_EMPTY_FC) as unknown as OutlookProbabilityShapeFeatureCollection,
               spcDay1: (spcDay1 ?? ENH_PLUS_EMPTY_FC) as unknown as SpcCategoryFeatureCollection,
-              spcHazardProbabilityShapes: ENH_PLUS_EMPTY_FC as unknown as OutlookProbabilityShapeFeatureCollection,
+              // Requirement 3.1/3.7/3.8: populate the archived SPC hazard
+              // outlook from the normalized response (which carries
+              // availableHazards/hazardsPresent for per-hazard partial
+              // availability). Requirement 3.6: when unavailable, fall back to
+              // the empty collection so the categorical outlook still displays.
+              spcHazardProbabilityShapes: (spcHazardShapes ?? ENH_PLUS_EMPTY_FC) as unknown as OutlookProbabilityShapeFeatureCollection,
               stormReports: reports?.reports ?? [],
             };
             return event;

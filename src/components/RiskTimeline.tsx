@@ -4,6 +4,7 @@ import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import { focusLocationFromSnapshot } from '../utils/focusLocation';
 import { buildRiskTimeline } from '../utils/riskTimeline';
+import { highlightedPeriod } from '../utils/timelineDerivation';
 import FocusLocationBadge from './FocusLocationBadge';
 import RetroPanel from './retro/RetroPanel';
 
@@ -13,6 +14,12 @@ interface RiskTimelineProps {
   artifacts?: OutlookArtifacts | null;
   artifactStatus?: ArtifactStatus;
   onHourChange?: (hour: number) => void;
+  /**
+   * The active outlook view. In the merged view the timeline derives each
+   * period's category from the displayed merged artifact hours and renders
+   * unresolved periods with a distinct "no data" state (Requirement 7.1, 7.3).
+   */
+  viewType?: 'hourly' | 'merged';
 }
 
 function getLedColor(category: RiskCategory, isLit: boolean) {
@@ -41,9 +48,14 @@ export default function RiskTimeline({
   artifacts,
   artifactStatus,
   onHourChange,
+  viewType,
 }: RiskTimelineProps) {
+  const mergedView = viewType === 'merged';
   const artifactHours = artifactStatus === 'ready' ? artifacts?.timelineSummary?.hours ?? [] : [];
-  const segs = bundle ? buildRiskTimeline(bundle, artifactHours) : [];
+  const segs = bundle ? buildRiskTimeline(bundle, artifactHours, { mergedView }) : [];
+  // Highlight exactly one period: the single window containing the currently
+  // Selected_Forecast_Hour (Requirements 7.2, 7.6).
+  const activePeriod = highlightedPeriod(segs, selectedForecastHour ?? null);
   const selectedSnapshot = selectedForecastHour !== undefined
     ? bundle?.hours.find((snap) => snap.forecastHour === selectedForecastHour)
     : undefined;
@@ -60,9 +72,8 @@ export default function RiskTimeline({
           const meta = RISK_META[seg.category];
           const hzMeta = seg.dominantHazard ? HAZARD_META[seg.dominantHazard] : null;
           const isDark = meta.tw.includes('text-paper');
-          const isSelected = selectedForecastHour !== undefined &&
-            selectedForecastHour >= seg.startHour &&
-            selectedForecastHour <= seg.endHour;
+          const isSelected = activePeriod === seg.period;
+          const noData = seg.noData;
 
           return (
             <div
@@ -75,12 +86,12 @@ export default function RiskTimeline({
                   : 'border-ink shadow-retro hover:-translate-y-1 hover:-translate-x-1 hover:shadow-[10px_10px_0_0_#111111]',
               ].join(' ')}
             >
-              <div className={`flex items-center justify-between border-b-[3px] border-ink px-3 py-1.5 ${meta.tw}`}>
-                <span className={`font-display font-extrabold uppercase tracking-wider text-sm ${isDark ? 'text-paper' : 'text-ink'}`}>
+              <div className={`flex items-center justify-between border-b-[3px] border-ink px-3 py-1.5 ${noData ? 'bg-ink/10' : meta.tw}`}>
+                <span className={`font-display font-extrabold uppercase tracking-wider text-sm ${!noData && isDark ? 'text-paper' : 'text-ink'}`}>
                   {seg.label}
                 </span>
                 <div className="flex items-center gap-1">
-                  {seg.significantSevere && (
+                  {!noData && seg.significantSevere && (
                     <span className="font-display font-extrabold text-[9px] tracking-widest border-[2px] border-signal-red bg-signal-red text-paper px-1 py-0.5">
                       SIG
                     </span>
@@ -90,14 +101,31 @@ export default function RiskTimeline({
                       ACTIVE
                     </span>
                   )}
-                  <span
-                    className={`font-display font-extrabold text-[11px] tracking-widest border-[2px] px-1.5 py-0.5 ${isDark ? 'border-paper text-paper' : 'border-ink text-ink'}`}
-                  >
-                    {meta.chipText}
-                  </span>
+                  {noData ? (
+                    <span className="font-display font-extrabold text-[11px] tracking-widest border-[2px] border-dashed border-ink/50 text-ink/50 px-1.5 py-0.5">
+                      NO DATA
+                    </span>
+                  ) : (
+                    <span
+                      className={`font-display font-extrabold text-[11px] tracking-widest border-[2px] px-1.5 py-0.5 ${isDark ? 'border-paper text-paper' : 'border-ink text-ink'}`}
+                    >
+                      {meta.chipText}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="p-3 flex flex-col gap-2.5 flex-1 justify-between">
+                {noData ? (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-1.5 py-4 text-center">
+                    <span className="font-display font-extrabold uppercase tracking-widest text-sm text-ink/40">
+                      No Data
+                    </span>
+                    <p className="font-sans text-[11px] leading-snug text-ink/50">
+                      {seg.note}
+                    </p>
+                  </div>
+                ) : (
+                <>
                 <div className="flex flex-col gap-2.5">
                   <div>
                     <div className="font-mono text-[9px] uppercase tracking-widest text-ink/60 mb-1">
@@ -151,6 +179,8 @@ export default function RiskTimeline({
                       <span>F{String(seg.representativeHour).padStart(2, '0')} ▸</span>
                     </div>
                   </div>
+                )}
+                </>
                 )}
               </div>
             </div>

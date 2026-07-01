@@ -70,12 +70,12 @@ interface UpperAirStreakFeature {
 }
 
 const LEVEL_STYLE: Record<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>, { fill: string; stroke: string; label: string }> = {
-  TSTM: { fill: '#c9efc6', stroke: '#5f7f5f', label: 'TSTM' },
-  MRGL: { fill: '#6fc36a', stroke: '#2e6f36', label: 'MRGL' },
-  SLGT: { fill: '#fff45c', stroke: '#f5a400', label: 'SLGT' },
-  ENH:  { fill: '#d9b57b', stroke: '#8a6a35', label: 'ENH'  },
-  MDT:  { fill: '#df7777', stroke: '#b52c2c', label: 'MDT'  },
-  HIGH: { fill: '#e16ce5', stroke: '#9a249f', label: 'HIGH' },
+  TSTM: { fill: '#C1E9C1', stroke: '#3C8A3C', label: 'TSTM' },
+  MRGL: { fill: '#66A366', stroke: '#3C7A3C', label: 'MRGL' },
+  SLGT: { fill: '#FFE066', stroke: '#E6C200', label: 'SLGT' },
+  ENH:  { fill: '#FFA366', stroke: '#E07B2C', label: 'ENH'  },
+  MDT:  { fill: '#E06666', stroke: '#C02C2C', label: 'MDT'  },
+  HIGH: { fill: '#EE99EE', stroke: '#B84BB8', label: 'HIGH' },
 };
 
 const CATEGORY_RAMP: Array<Exclude<ArtifactRiskCategory, 'NONE' | 'MOD'>> = ['TSTM', 'MRGL', 'SLGT', 'ENH', 'MDT', 'HIGH'];
