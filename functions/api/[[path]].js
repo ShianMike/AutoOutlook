@@ -236,6 +236,21 @@ export async function onRequest(context) {
     }
   }
 
+  // The SPC hazard layer was only generated for events archived after the
+  // feature shipped. Older archived days have no spc-hazard-shapes file, and the
+  // client treats a missing layer as "no data" anyway. Return an empty GeoJSON
+  // FeatureCollection with a 200 so the browser does not log a console 404 for
+  // every such day.
+  const ENH_PLUS_EMPTY_ON_MISSING = new Set([
+    '/api/outlook/enh-plus-archive-spc-hazard-shapes',
+  ]);
+  if (isMissingAssetResponse(assetResponse) && ENH_PLUS_EMPTY_ON_MISSING.has(pathname)) {
+    return Response.json(
+      { type: 'FeatureCollection', features: [] },
+      { status: 200, headers: apiHeaders('public, max-age=300', 'application/geo+json; charset=utf-8') },
+    );
+  }
+
   if (isMissingAssetResponse(assetResponse)) {
     const status = pathname === '/api/forecast' || pathname === '/api/health' ? 503 : 404;
     return notReady(pathname, status);

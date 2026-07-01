@@ -713,6 +713,24 @@ def _enh_plus_archive_file_response(file_key: str):
     return _json_path(_enh_plus_archive_dir() / date_str / filename)
 
 
+_EMPTY_FEATURE_COLLECTION = {"type": "FeatureCollection", "features": []}
+
+
+def _enh_plus_archive_file_or_empty(file_key: str):
+    """Serve an archived file, returning an empty GeoJSON FeatureCollection with
+    a 200 when it is absent. Used for the SPC hazard layer, which was only
+    generated for events archived after the feature shipped. Older archived days
+    have no SPC hazard shapes, and the client treats them as "no data" anyway --
+    returning empty-200 avoids logging a console 404 for every such day."""
+    date_str = request.args.get("date")
+    if not date_str:
+        return _json_error({"error": "date query parameter is required", "code": "missing_date"}, 400)
+    path = _enh_plus_archive_dir() / date_str / _ENH_PLUS_ARCHIVE_FILES[file_key]
+    if _artifact_exists(path):
+        return _json_path(path)
+    return _json_response(dict(_EMPTY_FEATURE_COLLECTION))
+
+
 def _enh_plus_archive_file_with_fallback(file_key: str, fallback_key: str):
     """Serve an archived file, falling back to another archived file when the
     primary is absent. Used for the pure ("Our Model") layers, which fall back
@@ -755,7 +773,9 @@ def enh_plus_archive_spc_category():
 
 @app.get("/api/outlook/enh-plus-archive-spc-hazard-shapes")
 def enh_plus_archive_spc_hazard_shapes():
-    return _enh_plus_archive_file_response("spc-hazard-shapes")
+    # Older archived days predate the SPC hazard layer; return empty-200 rather
+    # than 404 so the client does not log a console error for each such day.
+    return _enh_plus_archive_file_or_empty("spc-hazard-shapes")
 
 
 @app.get("/api/outlook/enh-plus-archive-risk-polygons-pure")
