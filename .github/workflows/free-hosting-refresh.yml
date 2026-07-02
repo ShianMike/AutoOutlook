@@ -137,9 +137,26 @@ jobs:
         if: steps.gate.outputs.should_publish == 'true'
         run: |
           mkdir -p backend/artifacts
-          gcloud storage rsync --recursive \
-            "gs://${GCP_ARTIFACT_BUCKET}" \
-            backend/artifacts
+          # The live production pipeline keeps rotating objects in the bucket
+          # while we hydrate, so a recursive rsync can list an object that is
+          # deleted before it gets copied and abort with GcsNotFoundError.
+          # Each rsync invocation re-enumerates the bucket and skips already
+          # copied files, so retrying converges once the transient race clears.
+          # The downstream "Verify static API export" step is the real gate on
+          # completeness, so tolerating these transient misses here is safe.
+          attempts=5
+          for attempt in $(seq 1 "${attempts}"); do
+            if gcloud storage rsync --recursive \
+                "gs://${GCP_ARTIFACT_BUCKET}" \
+                backend/artifacts; then
+              echo "Hydrated artifacts from GCS on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Hydrate attempt ${attempt}/${attempts} failed (likely a transient race with the live pipeline); retrying in 15s..."
+            sleep 15
+          done
+          echo "Hydrate failed after ${attempts} attempts." >&2
+          exit 1
 
       - name: Build frontend and export static API
         if: steps.gate.outputs.should_publish == 'true'
