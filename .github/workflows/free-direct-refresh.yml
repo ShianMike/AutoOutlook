@@ -59,7 +59,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Generate artifacts and deploy Cloudflare Pages
-        shell: pwsh
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -69,8 +68,8 @@ jobs:
           AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ runner.temp }}/autooutlook-hrrr-cache
           AUTOOUTLOOK_LOG_DIR: ${{ runner.temp }}/autooutlook-logs
         run: |
-          $refreshArgs = @('-SkipEnvFile')
-          if ($env:AUTOOUTLOOK_FORCE_DEPLOY -eq 'true') {
-            $refreshArgs += '-Force'
-          }
-          ./scripts/windows/refresh-autooutlook.ps1 @refreshArgs
+          refresh_args=(-NoProfile -File scripts/windows/refresh-autooutlook.ps1 -SkipEnvFile)
+          if [ "${AUTOOUTLOOK_FORCE_DEPLOY}" = "true" ]; then
+            refresh_args+=(-Force)
+          fi
+          pwsh "${refresh_args[@]}"
