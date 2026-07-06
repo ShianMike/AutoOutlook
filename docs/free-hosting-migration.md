@@ -1,15 +1,22 @@
-# Google Cloud Refresh With Cloudflare Pages
+# Manual Google Cloud Refresh With Cloudflare Pages
 
-The expensive HRRR/XGBoost refresh runs in Google Cloud. Cloudflare Pages still serves `autooutlook.tech`.
+This is now a manual fallback. The scheduled no-cost production path is
+documented in `docs/free-direct-refresh.md` and runs through
+`.github/workflows/free-direct-refresh.yml`.
 
 ## Architecture
 
-- Cloud Scheduler starts the Cloud Run Job `autooutlook-artifact-refresh` every two hours on even UTC hours.
+- Cloud Scheduler can start the Cloud Run Job `autooutlook-artifact-refresh` when the Google Cloud fallback is intentionally enabled.
 - The job writes temporary files under `/tmp` and publishes completed artifacts to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
 - The bucket uses stable object paths, so storage does not grow by retaining one archive per workflow run.
-- `.github/workflows/free-hosting-refresh.yml` polls every 15 minutes, authenticates with Google Workload Identity Federation, and deploys Cloudflare Pages only when production does not already have the latest completed GCS snapshot. This gives publication multiple recovery chances if an individual GitHub scheduled run is delayed or skipped.
+- `.github/workflows/free-hosting-refresh.yml` is manual-only, authenticates with Google Workload Identity Federation, and deploys Cloudflare Pages only when production does not already have the latest completed GCS snapshot.
 - The GitHub workflow does not call `actions/upload-artifact`, `actions/download-artifact`, or `actions/cache`.
 - The Cloud Run service `autooutlook` reads the same bucket and provides a fallback API at `https://autooutlook-672125056378.us-east1.run.app`.
+
+The manual publisher hydrates only live deploy prefixes (`latest_incremental*`,
+`latest_incremental_hrrr_*`, and `enh_plus_archive`). It must not rsync the whole
+bucket, because manual archive-regeneration prefixes such as `regen/` and
+`regen-sources/` can be much larger than the live site bundle.
 
 ## Google Cloud Resources
 

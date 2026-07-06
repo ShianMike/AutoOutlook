@@ -146,14 +146,16 @@ Important leakage guard: the pipeline writes prediction artifacts first, then do
 
 Production should keep the public website online while serving only finished artifacts from the web service. Normal visitors should not trigger HRRR/NOMADS downloads, XGBoost inference, f00-f48 generation, polygon regeneration, or preview image generation.
 
-The scheduled refresh now runs in Google Cloud:
+The scheduled refresh now uses the free direct GitHub Actions path:
 
-- Cloud Scheduler starts `autooutlook-artifact-refresh` every two hours on even UTC hours.
-- The Cloud Run Job generates the complete F00-F48 cycle and publishes fixed object paths to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
-- GitHub Actions polls GCS every 15 minutes, skips when production already has the latest completed snapshot, and only then downloads the completed GCS snapshot, exports `dist/_api`, and deploys Cloudflare Pages. It does not use GitHub artifacts or Actions caches.
-- The public Cloud Run service is an API fallback and reads the same GCS bucket.
+- `.github/workflows/free-direct-refresh.yml` runs after the 00Z/06Z/12Z/18Z HRRR extended cycles normally have f48, with backup starts 15 minutes later.
+- The workflow generates the complete F00-F48 cycle on a temporary standard GitHub-hosted runner and deploys `dist` directly to Cloudflare Pages.
+- It does not use GitHub artifacts, Actions caches, GitHub Packages, GCS, Cloud Run, Cloud Scheduler, or Cloud Build.
+- `.github/workflows/free-hosting-refresh.yml` remains available as a manual Google Cloud fallback only.
 
-Recommended public Cloud Run service environment:
+See `docs/free-direct-refresh.md` for the active free path and `docs/free-hosting-migration.md` for the legacy Google Cloud fallback.
+
+Legacy public Cloud Run fallback environment:
 
 ```powershell
 AUTOOUTLOOK_FORECAST_SOURCE=artifact

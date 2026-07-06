@@ -1,12 +1,8 @@
-name: Publish Google Cloud artifacts to Cloudflare
+name: Manual publish Google Cloud artifacts to Cloudflare
 
 on:
-  schedule:
-    # Poll for a completed GCS snapshot every 15 minutes. The gate below skips
-    # all expensive deploy work when production already has the latest complete
-    # cycle, giving the publisher multiple recovery chances if an individual
-    # GitHub scheduled run is delayed or skipped.
-    - cron: '8,23,38,53 * * * *'
+  # GCS publishing is now a manual fallback. The scheduled free production path
+  # generates artifacts directly in .github/workflows/free-direct-refresh.yml.
   workflow_dispatch:
     inputs:
       force_deploy:
@@ -137,26 +133,39 @@ jobs:
         if: steps.gate.outputs.should_publish == 'true'
         run: |
           mkdir -p backend/artifacts
-          # The live production pipeline keeps rotating objects in the bucket
-          # while we hydrate, so a recursive rsync can list an object that is
-          # deleted before it gets copied and abort with GcsNotFoundError.
-          # Each rsync invocation re-enumerates the bucket and skips already
-          # copied files, so retrying converges once the transient race clears.
-          # The downstream "Verify static API export" step is the real gate on
-          # completeness, so tolerating these transient misses here is safe.
+          # Hydrate only the prefixes used by the static export. The bucket can
+          # also contain large manual-regeneration prefixes such as regen/ and
+          # regen-sources/, which are not production deploy inputs.
+          live_prefixes=(
+            latest_incremental
+            latest_incremental_complete
+            latest_incremental.previous
+            latest_incremental_hrrr_00z
+            latest_incremental_hrrr_12z
+            enh_plus_archive
+          )
           attempts=5
-          for attempt in $(seq 1 "${attempts}"); do
-            if gcloud storage rsync --recursive \
-                "gs://${GCP_ARTIFACT_BUCKET}" \
-                backend/artifacts; then
-              echo "Hydrated artifacts from GCS on attempt ${attempt}."
-              exit 0
+          for source_prefix in "${live_prefixes[@]}"; do
+            if ! gcloud storage ls "gs://${GCP_ARTIFACT_BUCKET}/${source_prefix}/" >/dev/null 2>&1; then
+              echo "Skipping missing optional GCS prefix: ${source_prefix}"
+              continue
             fi
-            echo "Hydrate attempt ${attempt}/${attempts} failed (likely a transient race with the live pipeline); retrying in 15s..."
-            sleep 15
+            mkdir -p "backend/artifacts/${source_prefix}"
+            for attempt in $(seq 1 "${attempts}"); do
+              if gcloud storage rsync --recursive \
+                  "gs://${GCP_ARTIFACT_BUCKET}/${source_prefix}" \
+                  "backend/artifacts/${source_prefix}"; then
+                echo "Hydrated ${source_prefix} from GCS on attempt ${attempt}."
+                break
+              fi
+              if [ "${attempt}" -eq "${attempts}" ]; then
+                echo "Hydrate failed for ${source_prefix} after ${attempts} attempts." >&2
+                exit 1
+              fi
+              echo "Hydrate attempt ${attempt}/${attempts} failed for ${source_prefix}; retrying in 15s..."
+              sleep 15
+            done
           done
-          echo "Hydrate failed after ${attempts} attempts." >&2
-          exit 1
 
       - name: Build frontend and export static API
         if: steps.gate.outputs.should_publish == 'true'

@@ -1,0 +1,76 @@
+name: Free direct refresh to Cloudflare
+
+on:
+  schedule:
+    # Run after the 00Z/06Z/12Z/18Z HRRR extended cycles normally have f48.
+    # The second run in each hour is a backup in case GitHub drops or delays the
+    # first scheduled event; the refresh script exits when production is current.
+    - cron: '0,15 3,9,15,21 * * *'
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Generate and deploy even when production already reports the detected cycle.'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: autooutlook-free-direct-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  AUTOOUTLOOK_PRODUCTION_INDEX_URL: ${{ vars.AUTOOUTLOOK_PRODUCTION_INDEX_URL || 'https://autooutlook.tech/api/outlook/incremental' }}
+  CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'autooutlook-pages' }}
+  CLOUDFLARE_PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'master' }}
+  AUTOOUTLOOK_HOUR_WORKERS: '3'
+  AUTOOUTLOOK_RANGE_WORKERS: '4'
+  AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES: '2097152'
+  AUTOOUTLOOK_GRID_STRIDE: '2'
+  AUTOOUTLOOK_TILE_STRIDE: '1'
+  AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY: 'true'
+  AUTOOUTLOOK_CLEANUP_CACHE_AFTER_DEPLOY: 'true'
+  AUTOOUTLOOK_CACHE_MAX_AGE_DAYS: '1'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Generate artifacts and deploy Cloudflare Pages
+        shell: pwsh
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AUTOOUTLOOK_FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
+          AUTOOUTLOOK_VENV_DIR: ${{ runner.temp }}/autooutlook-venv
+          AUTOOUTLOOK_STATE_DIR: ${{ runner.temp }}/autooutlook-state
+          AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ runner.temp }}/autooutlook-hrrr-cache
+          AUTOOUTLOOK_LOG_DIR: ${{ runner.temp }}/autooutlook-logs
+        run: |
+          $refreshArgs = @('-SkipEnvFile')
+          if ($env:AUTOOUTLOOK_FORCE_DEPLOY -eq 'true') {
+            $refreshArgs += '-Force'
+          }
+          ./scripts/windows/refresh-autooutlook.ps1 @refreshArgs
