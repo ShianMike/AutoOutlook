@@ -150,76 +150,11 @@ The scheduled refresh now uses the free direct GitHub Actions path:
 
 - `.github/workflows/free-direct-refresh.yml` runs after the 00Z/06Z/12Z/18Z HRRR extended cycles normally have f48, with backup starts 15 minutes later.
 - The workflow generates the complete F00-F48 cycle on a temporary standard GitHub-hosted runner and deploys `dist` directly to Cloudflare Pages.
-- It does not use GitHub artifacts, Actions caches, GitHub Packages, GCS, Cloud Run, Cloud Scheduler, or Cloud Build.
-- `.github/workflows/free-hosting-refresh.yml` remains available as a manual Google Cloud fallback only.
+- It does not use persistent artifact storage, package registries, or paid cloud runtime services.
 
-See `docs/free-direct-refresh.md` for the active free path and `docs/free-hosting-migration.md` for the legacy Google Cloud fallback.
-
-Legacy public Cloud Run fallback environment:
-
-```powershell
-AUTOOUTLOOK_FORECAST_SOURCE=artifact
-AUTOOUTLOOK_ENABLE_LIVE_BUILD=false
-AUTOOUTLOOK_ARTIFACT_BUCKET=autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6
-```
-
-With `AUTOOUTLOOK_ENABLE_LIVE_BUILD=false`, `/api/forecast` returns the latest generated artifact bundle. If artifacts are missing or incomplete, the public service returns `{"code":"outlook_not_ready"}` instead of starting expensive model work. Raw artifact storage paths are not exposed in public API errors.
-
-If a prefix is used inside the private Cloud Storage bucket, also set:
-
-```powershell
-AUTOOUTLOOK_ARTIFACT_PREFIX=optional/path/prefix
-```
-
-Cloud Run will read objects with its service account and still expose only controlled API responses such as `/api/outlook/incremental`, `/api/outlook/incremental/hour/:hour/risk-polygons`, `/api/outlook/incremental/hour/:hour/probability-tile`, and `/api/outlook/preview.png`.
-
-Recommended public Cloud Run service settings:
-
-```powershell
-gcloud run services update autooutlook `
-  --region us-east1 `
-  --min-instances 0 `
-  --max-instances 1 `
-  --concurrency 20 `
-  --cpu 2 `
-  --memory 2Gi `
-  --timeout 120 `
-  --cpu-boost
-```
-
-The `--timeout 120` setting is the maximum time an individual HTTP request can run before Cloud Run returns a timeout. That is enough for the public service because request handlers only serve existing JSON, GeoJSON, PNG, and frontend assets. Long HRRR/XGBoost generation belongs in the separate scheduled Cloud Run Job or a manual generation job that writes finalized artifacts for the public service to read.
-
-Production deployment checklist:
-
-```powershell
-gcloud builds submit --config cloudbuild.yaml --project project-e75d6e93-197d-4d41-ad6
-```
-
-The build creates and pushes an image tagged with the Cloud Build ID. The service and refresh job must use the same image revision:
-
-```powershell
-gcloud run services update autooutlook `
-  --image us-east1-docker.pkg.dev/project-e75d6e93-197d-4d41-ad6/autooutlook/autooutlook:<IMAGE_TAG> `
-  --region us-east1 `
-  --project project-e75d6e93-197d-4d41-ad6
-```
-
-When a release changes backend artifact-generation code or shared code used by the scheduled pipeline, update the scheduled Cloud Run Job to the same image tag so the artifact generator and public service stay on the same revision:
-
-```powershell
-gcloud run jobs update autooutlook-artifact-refresh `
-  --image us-east1-docker.pkg.dev/project-e75d6e93-197d-4d41-ad6/autooutlook/autooutlook:<IMAGE_TAG> `
-  --region us-east1 `
-  --project project-e75d6e93-197d-4d41-ad6
-```
-
-The job should write working artifacts to local `/tmp` and upload finished JSON artifacts through the Cloud Storage client. Avoid routing generation output through a Cloud Storage FUSE mount; it adds filesystem translation overhead and makes overlapping executions more expensive.
-
-Do not execute the legacy Google Cloud job during a normal deployment unless an immediate fallback artifact refresh is intended. The normal scheduled path is `.github/workflows/free-direct-refresh.yml`; `autooutlook-artifact-refresh-cycle` should remain paused while the direct workflow is healthy.
-
-The Cloud Build service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) needs `roles/run.developer` on the project and `roles/iam.serviceAccountUser` on the runtime service account (`autooutlook-runtime@...`) so the `gcloud builds submit` deploy step can update the Cloud Run service end-to-end. Without these, the build still builds and pushes the image, but the in-build `gcloud run deploy` step fails with `PERMISSION_DENIED` and the service/job must be pointed at the new image manually.
-
-The public Cloud Run service is an API fallback for the incremental F00-F48 artifacts only. Merged D1/D2 outlooks (including the pure "Our Model" and 50/50 SPC-blend variants) are produced by the static export and served from Cloudflare; the fallback service does not pre-generate them, so `merged-d*` endpoints there can return empty/404.
+See `docs/free-direct-refresh.md` for the active free path. Old provider-specific
+fallback notes are archived under `docs/legacy/google-cloud/` and are not part
+of the normal production path.
 
 ## Project layout
 

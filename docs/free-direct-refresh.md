@@ -1,15 +1,15 @@
 # Free Direct Refresh With Cloudflare Pages
 
-This is the no-Google-Cloud production refresh path. The scheduled GitHub
-Actions job generates the finished F00-F48 artifact bundle and deploys `dist`
-directly to Cloudflare Pages.
+This is the self-contained production refresh path. The scheduled GitHub Actions
+job generates the finished F00-F48 artifact bundle and deploys `dist` directly
+to Cloudflare Pages.
 
 ## Why this is the free default
 
 - `ShianMike/AutoOutlook` is a public repository, so standard GitHub-hosted
   Actions minutes are free for this workflow.
-- The workflow does not use `actions/upload-artifact`, `actions/cache`, GitHub
-  Packages, GCS, Cloud Run, Cloud Scheduler, or Cloud Build.
+- The workflow does not use `actions/upload-artifact`, `actions/cache`, package
+  registries, persistent artifact storage, or paid cloud runtime services.
 - Cloudflare Pages serves the deployed static site/API bundle.
 - Generated HRRR files, Python wheels, Node modules, and deploy output live only
   on the temporary GitHub runner and are discarded after the run.
@@ -62,11 +62,12 @@ curl.exe -fsS https://autooutlook.tech/api/health
 curl.exe -fsS https://autooutlook.tech/api/outlook/incremental
 ```
 
-## Google Cloud Fallback
+## Archived Fallback Material
 
-`.github/workflows/free-hosting-refresh.yml` is manual-only now. Do not
-re-enable its schedule while the direct workflow is active, because a stale GCS
-snapshot could redeploy older artifacts over the newer Cloudflare Pages output.
+The old provider-specific workflow has been moved out of `.github/workflows`
+and archived at `docs/legacy/google-cloud/free-hosting-refresh.yml`, so it no
+longer appears as an active GitHub Actions workflow.
 
-After the direct workflow is confirmed healthy, the Google Cloud scheduler can
-be disabled and the GCS artifact bucket can be cleaned up separately.
+The companion notes and configs live under `docs/legacy/google-cloud/` and
+`infra/gcp/`. Keep the archived scheduler disabled while the direct workflow is
+healthy.

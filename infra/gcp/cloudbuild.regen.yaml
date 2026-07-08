@@ -11,9 +11,9 @@
 # Runs on a high-CPU machine near AWS for fast S3 byte-range reads + inference.
 #
 # Submit (full 25-date run):
-#   gcloud builds submit --config cloudbuild.regen.yaml .
+#   gcloud builds submit --config infra/gcp/cloudbuild.regen.yaml .
 # Smoke test (single date):
-#   gcloud builds submit --config cloudbuild.regen.yaml \
+#   gcloud builds submit --config infra/gcp/cloudbuild.regen.yaml \
 #     --substitutions=_FETCH_ARGS="--event-date 2026-03-05",_GEN_ARGS="--event-date 2026-03-05" .
 
 substitutions:

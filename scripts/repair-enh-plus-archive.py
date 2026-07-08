@@ -14,11 +14,9 @@ regenerates the affected days end to end:
      outlook, SPC overlay, and headline category).
 
 Like the historical-event fetcher, this is expensive (fetches ~25 HRRR hours per
-day) and must NOT run in GitHub Actions. After running locally, push the repaired
-archive to GCS so production picks it up on the next deploy:
-
-  gcloud storage rsync --recursive --delete-unmatched-destination-objects \\
-    backend/artifacts/enh_plus_archive gs://$GCP_ARTIFACT_BUCKET/enh_plus_archive
+day) and must NOT run in GitHub Actions. After running locally, review and commit
+the repaired archive, then let the free direct refresh workflow publish it to
+Cloudflare Pages.
 
 With no --date arguments, every archived day whose stored SPC window does not
 cover its convective day is repaired automatically.
@@ -203,9 +201,8 @@ def main() -> None:
     if failures:
         raise SystemExit("Archive repair failed:\n" + "\n".join(failures))
     print(
-        "\nDone. Push the repaired archive to GCS so production updates on the next deploy:\n"
-        "  gcloud storage rsync --recursive --delete-unmatched-destination-objects \\\n"
-        "    backend/artifacts/enh_plus_archive gs://$GCP_ARTIFACT_BUCKET/enh_plus_archive"
+        "\nDone. Review and commit the repaired archive, then run:\n"
+        "  gh workflow run free-direct-refresh.yml -f force_deploy=true"
     )
 
 

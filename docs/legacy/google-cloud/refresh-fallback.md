@@ -1,15 +1,20 @@
-# Manual Google Cloud Refresh With Cloudflare Pages
+# Archived Google Cloud Refresh With Cloudflare Pages
 
-This is now a manual fallback. The scheduled no-cost production path is
-documented in `docs/free-direct-refresh.md` and runs through
+This is legacy fallback documentation. The scheduled no-cost production path is
+documented in `../../free-direct-refresh.md` and runs through
 `.github/workflows/free-direct-refresh.yml`.
+
+The former Google Cloud publisher workflow is archived at
+`docs/legacy/google-cloud/free-hosting-refresh.yml`. It is intentionally outside
+`.github/workflows`, so GitHub Actions will not list or run it. Copy it back
+only if the Google Cloud fallback is intentionally restored.
 
 ## Architecture
 
 - Cloud Scheduler can start the Cloud Run Job `autooutlook-artifact-refresh` when the Google Cloud fallback is intentionally enabled.
 - The job writes temporary files under `/tmp` and publishes completed artifacts to `gs://autooutlook-artifacts-project-e75d6e93-197d-4d41-ad6`.
 - The bucket uses stable object paths, so storage does not grow by retaining one archive per workflow run.
-- `.github/workflows/free-hosting-refresh.yml` is manual-only, authenticates with Google Workload Identity Federation, and deploys Cloudflare Pages only when production does not already have the latest completed GCS snapshot.
+- `docs/legacy/google-cloud/free-hosting-refresh.yml` is the archived publisher workflow. When restored to `.github/workflows/free-hosting-refresh.yml`, it authenticates with Google Workload Identity Federation and deploys Cloudflare Pages only when production does not already have the latest completed GCS snapshot.
 - The GitHub workflow does not call `actions/upload-artifact`, `actions/download-artifact`, or `actions/cache`.
 - The Cloud Run service `autooutlook` reads the same bucket and provides a fallback API at `https://autooutlook-672125056378.us-east1.run.app`.
 
@@ -73,6 +78,7 @@ gcloud run jobs execute autooutlook-artifact-refresh `
 Force the Cloudflare publisher after the GCS snapshot is complete:
 
 ```powershell
+copy docs/legacy/google-cloud/free-hosting-refresh.yml .github/workflows/free-hosting-refresh.yml
 gh workflow run free-hosting-refresh.yml -f force_deploy=true
 ```
 

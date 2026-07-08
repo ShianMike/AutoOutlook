@@ -931,7 +931,7 @@ const RELEASES: VersionRelease[] = [
       {
         kind: 'REMOVE',
         title: 'Landing page no longer mentions backend processes or cloud providers',
-        body: 'Scrubbed every reference to HRRR, XGBoost, NOMADS, MetPy, cfgrib, GRIB, Flask, Python, Cloud Run, Cloud Scheduler, and GCS. Pipeline section now reads as ingest → derive → infer → publish → verify in product-level language only.',
+        body: 'Scrubbed implementation and provider names from the public landing page. Pipeline section now reads as ingest → derive → infer → publish → verify in product-level language only.',
       },
       {
         kind: 'DOCS',
