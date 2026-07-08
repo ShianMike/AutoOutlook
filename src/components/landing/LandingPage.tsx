@@ -416,13 +416,13 @@ function LandingNav() {
 // ---------------------------------------------------------------------------
 
 // Live "last published" indicator driven by the scheduled GitHub Actions run
-// that refreshes the static artifacts ("Refresh static AutoOutlook artifacts"
-// → free-hosting-refresh.yml). Fetches the latest *successful* run timestamp
+// that refreshes and deploys the static artifacts
+// (free-direct-refresh.yml). Fetches the latest *successful* run timestamp
 // from the public GitHub API and returns an elapsed `HH:MM:SS` string that
 // ticks every second. Returns `null` while loading or if the request fails
 // (offline / API rate-limited), so callers can show a graceful placeholder.
 const PUBLISH_RUNS_URL =
-  'https://api.github.com/repos/ShianMike/AutoOutlook/actions/workflows/free-hosting-refresh.yml/runs?status=success&per_page=1';
+  'https://api.github.com/repos/ShianMike/AutoOutlook/actions/workflows/free-direct-refresh.yml/runs?status=success&per_page=1';
 
 function useLastPublished(): string | null {
   const [publishedAt, setPublishedAt] = useState<Date | null>(null);
