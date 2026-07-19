@@ -4443,6 +4443,119 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertLess(len(compact_text), source_size)
         self.assertNotIn("\n  ", compact_text)
 
+    def test_static_export_carries_only_future_d2_archive(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_d2_carry_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "previous"
+            target = root / "next"
+            future_date = "2026-06-09"
+            stale_date = "2026-06-08"
+            (source / future_date).mkdir(parents=True)
+            (source / stale_date).mkdir(parents=True)
+            (source / "available-dates.json").write_text(
+                json.dumps({"dates": [stale_date, future_date, "not-a-date"]}),
+                encoding="utf-8",
+            )
+            for date_str in (future_date, stale_date):
+                for filename in export_module.D2_REQUIRED_FILENAMES:
+                    (source / date_str / filename).write_text(
+                        json.dumps({"date": date_str, "file": filename}),
+                        encoding="utf-8",
+                    )
+            (source / future_date / "risk-polygons-pure.geojson").write_text(
+                json.dumps({"date": future_date, "pure": True}),
+                encoding="utf-8",
+            )
+
+            carried = export_module.carry_forward_merged_d2_archive(
+                source,
+                target,
+                now=datetime(2026, 6, 8, 18, tzinfo=timezone.utc),
+            )
+            available = json.loads((target / "available-dates.json").read_text(encoding="utf-8"))
+            default_risk = json.loads((target / "risk-polygons.geojson").read_text(encoding="utf-8"))
+
+            self.assertEqual(carried, [future_date])
+            self.assertEqual(available, {"dates": [future_date]})
+            self.assertTrue((target / future_date / "probability-tile.json").exists())
+            self.assertTrue((target / future_date / "risk-polygons-pure.geojson").exists())
+            self.assertFalse((target / stale_date).exists())
+            self.assertEqual(default_risk["date"], future_date)
+
+            expired_target = root / "expired"
+            expired = export_module.carry_forward_merged_d2_archive(
+                source,
+                expired_target,
+                now=datetime(2026, 6, 9, 0, tzinfo=timezone.utc),
+            )
+            self.assertEqual(expired, [])
+            self.assertEqual(
+                json.loads((expired_target / "available-dates.json").read_text(encoding="utf-8")),
+                {"dates": []},
+            )
+
+    def test_static_export_hydrates_future_d2_from_cloudflare(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_d2_remote_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        future_date = "2026-06-09"
+
+        def fake_fetch(url: str):
+            path = url.split("?", 1)[0]
+            if path.endswith("/available-dates.json"):
+                return {"dates": [future_date]}
+            return {"source": "cloudflare", "filename": path.rsplit("/", 1)[-1]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "hydrated"
+            dates = export_module.hydrate_merged_d2_from_cloudflare(
+                "https://autooutlook.example",
+                target,
+                now=datetime(2026, 6, 8, 21, tzinfo=timezone.utc),
+                fetch_json=fake_fetch,
+            )
+
+            self.assertEqual(dates, [future_date])
+            self.assertEqual(
+                json.loads((target / "available-dates.json").read_text(encoding="utf-8")),
+                {"dates": [future_date]},
+            )
+            self.assertTrue((target / future_date / "spc-day2-category.geojson").exists())
+            self.assertTrue((target / "probability-tile.json").exists())
+
+    def test_static_export_rejects_incomplete_cloudflare_d2(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_d2_incomplete_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        def fake_fetch(url: str):
+            path = url.split("?", 1)[0]
+            if path.endswith("/available-dates.json"):
+                return {"dates": ["2026-06-09"]}
+            if path.endswith("/probability-tile.json"):
+                raise FileNotFoundError("missing")
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "missing required probability-tile.json"):
+                export_module.hydrate_merged_d2_from_cloudflare(
+                    "https://autooutlook.example",
+                    Path(tmp) / "hydrated",
+                    now=datetime(2026, 6, 8, 21, tzinfo=timezone.utc),
+                    fetch_json=fake_fetch,
+                )
+
     def test_complete_snapshot_publish_avoids_directory_moves(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

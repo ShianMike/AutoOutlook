@@ -85,16 +85,44 @@ jobs:
         shell: pwsh
         env:
           EXPECTED_CYCLE_TIME_ISO: ${{ steps.prepare.outputs.cycle_time_iso }}
+          EXPECTED_D2_FORECAST_DATE: ${{ steps.prepare.outputs.d2_forecast_date }}
         run: |
           $separator = if ($env:AUTOOUTLOOK_PRODUCTION_INDEX_URL.Contains('?')) { '&' } else { '?' }
           $verificationUrl = "$env:AUTOOUTLOOK_PRODUCTION_INDEX_URL${separator}deployment=$env:GITHUB_RUN_ID"
+          $indexUri = [Uri]$env:AUTOOUTLOOK_PRODUCTION_INDEX_URL
+          $origin = $indexUri.GetLeftPart([UriPartial]::Authority)
+
+          function Test-DeployedD2 {
+            if ([string]::IsNullOrWhiteSpace($env:EXPECTED_D2_FORECAST_DATE)) {
+              return $true
+            }
+            $date = $env:EXPECTED_D2_FORECAST_DATE
+            $available = Invoke-RestMethod -Uri "$origin/api/outlook/merged-d2-available-dates?date=$date&deployment=$env:GITHUB_RUN_ID" -TimeoutSec 20
+            if ($date -notin @($available.dates)) {
+              return $false
+            }
+            foreach ($route in @(
+              '/api/outlook/merged-d2-risk-polygons',
+              '/api/outlook/merged-d2-probability-tile',
+              '/api/outlook/merged-d2-spc-category'
+            )) {
+              $response = Invoke-WebRequest -Uri "${origin}${route}?date=$date&deployment=$env:GITHUB_RUN_ID" -Method Head -TimeoutSec 20
+              if ([int]$response.StatusCode -ne 200) {
+                return $false
+              }
+            }
+            return $true
+          }
+
           for ($attempt = 1; $attempt -le 18; $attempt++) {
             try {
               $payload = Invoke-RestMethod -Uri $verificationUrl -TimeoutSec 20
               $ready = @($payload.readyForecastHours)
               $productionCycleTimeIso = ([DateTimeOffset]$payload.cycleTimeISO).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-              if ($productionCycleTimeIso -eq $env:EXPECTED_CYCLE_TIME_ISO -and $payload.status -eq 'complete' -and $ready.Count -ge 49) {
-                Write-Host "Cloudflare production confirmed $env:EXPECTED_CYCLE_TIME_ISO with $($ready.Count) forecast hours."
+              $cycleReady = $productionCycleTimeIso -eq $env:EXPECTED_CYCLE_TIME_ISO -and $payload.status -eq 'complete' -and $ready.Count -ge 49
+              if ($cycleReady -and (Test-DeployedD2)) {
+                $d2Status = if ($env:EXPECTED_D2_FORECAST_DATE) { " and D2 $env:EXPECTED_D2_FORECAST_DATE" } else { '' }
+                Write-Host "Cloudflare production confirmed $env:EXPECTED_CYCLE_TIME_ISO with $($ready.Count) forecast hours$d2Status."
                 exit 0
               }
               Write-Host "Attempt ${attempt}: production reports $productionCycleTimeIso, expected $env:EXPECTED_CYCLE_TIME_ISO."

@@ -62,6 +62,62 @@ function ConvertTo-UtcIsoString {
     }
 }
 
+function Get-ExpectedD2ForecastDate {
+    param([string]$CycleTimeIso)
+
+    try {
+        $cycleTime = ([DateTimeOffset]$CycleTimeIso).ToUniversalTime()
+        if ($cycleTime.Hour -eq 12) {
+            return $cycleTime.Date.AddDays(1).ToString("yyyy-MM-dd", [Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+    catch {
+        Write-Host "Could not determine D2 date from cycle '$CycleTimeIso': $($_.Exception.Message)"
+    }
+    return ""
+}
+
+function Test-ProductionHasD2 {
+    param([string]$ForecastDate)
+
+    if ([string]::IsNullOrWhiteSpace($ForecastDate)) {
+        return $true
+    }
+
+    try {
+        $indexUri = [Uri]$env:AUTOOUTLOOK_PRODUCTION_INDEX_URL
+        $origin = $indexUri.GetLeftPart([UriPartial]::Authority)
+        $available = Invoke-RestMethod `
+            -Uri "$origin/api/outlook/merged-d2-available-dates?validation=$ForecastDate" `
+            -TimeoutSec 20
+        if ($ForecastDate -notin @($available.dates)) {
+            Write-Host "Production D2 date list does not include $ForecastDate."
+            return $false
+        }
+
+        $routes = @(
+            "/api/outlook/merged-d2-risk-polygons",
+            "/api/outlook/merged-d2-probability-tile",
+            "/api/outlook/merged-d2-spc-category"
+        )
+        foreach ($route in $routes) {
+            $response = Invoke-WebRequest `
+                -Uri "${origin}${route}?date=$ForecastDate&validation=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" `
+                -Method Head `
+                -TimeoutSec 20
+            if ([int]$response.StatusCode -ne 200) {
+                Write-Host "Production D2 validation returned $($response.StatusCode) for $route."
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        Write-Host "Production D2 validation failed for ${ForecastDate}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Test-WindowsPlatform {
     return $PSVersionTable.PSEdition -eq "Desktop" -or [bool](Get-Variable -Name IsWindows -ErrorAction SilentlyContinue).Value
 }
@@ -190,8 +246,15 @@ function Test-ProductionHasCycle {
         $payload = Invoke-RestMethod -Uri $env:AUTOOUTLOOK_PRODUCTION_INDEX_URL -TimeoutSec 20
         $ready = @($payload.readyForecastHours)
         $productionCycleTimeIso = ConvertTo-UtcIsoString $payload.cycleTimeISO
-        if ($productionCycleTimeIso -eq $CycleTimeIso -and $payload.status -eq "complete" -and $ready.Count -ge 49) {
-            Write-Host "Production already has this complete cycle."
+        $expectedD2Date = Get-ExpectedD2ForecastDate $CycleTimeIso
+        if (
+            $productionCycleTimeIso -eq $CycleTimeIso `
+            -and $payload.status -eq "complete" `
+            -and $ready.Count -ge 49 `
+            -and (Test-ProductionHasD2 $expectedD2Date)
+        ) {
+            $d2Status = if ($expectedD2Date) { " and D2 $expectedD2Date" } else { "" }
+            Write-Host "Production already has this complete cycle$d2Status."
             return $true
         }
         Write-Host "Production cycle is '$productionCycleTimeIso', expected '$CycleTimeIso'."
@@ -337,7 +400,9 @@ try {
 
     $cycle = Get-Content -LiteralPath $cyclePath -Raw | ConvertFrom-Json
     $cycleTimeIso = ConvertTo-UtcIsoString $cycle.cycleTimeISO
+    $expectedD2Date = Get-ExpectedD2ForecastDate $cycleTimeIso
     Set-WorkflowOutput -Name "cycle_time_iso" -Value $cycleTimeIso
+    Set-WorkflowOutput -Name "d2_forecast_date" -Value $expectedD2Date
     if (Test-ProductionHasCycle -CycleTimeIso $cycleTimeIso) {
         Set-WorkflowOutput -Name "deploy_required" -Value "false"
         exit 0

@@ -27,7 +27,14 @@ The active workflow is:
 It runs at `03:00Z`, `09:00Z`, `15:00Z`, and `21:00Z`, with backup starts at
 `:15` after each primary start. The refresh script first detects the latest
 complete HRRR cycle and exits without generating when production already serves
-that cycle.
+that cycle. For a 12Z cycle, "complete" also requires the expected Day 2 date
+and its risk, probability, and SPC layers to be live.
+
+Day 2 is anchored to the 12Z F24-F48 window. Later-cycle runners are ephemeral,
+so their static export carries the still-future Day 2 bundle forward from the
+current Cloudflare Pages deployment. The carry-forward rejects incomplete
+bundles and automatically drops the date once it is no longer a future
+convective day.
 
 Required GitHub repository secrets:
 

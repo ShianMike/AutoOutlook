@@ -18,6 +18,8 @@ import sys
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,35 @@ DEFAULT_ARTIFACT_DIR = PROJECT_ROOT / "backend" / "artifacts" / "latest_incremen
 DEFAULT_LEGACY_ARTIFACT_DIR = PROJECT_ROOT / "backend" / "artifacts" / "latest"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "dist" / "_api"
 FULL_INCREMENTAL_FORECAST_HOURS = set(range(49))
+D2_ARCHIVE_FILENAMES = (
+    "verification.json",
+    "risk-polygons.geojson",
+    "hazard-probability-shapes.geojson",
+    "probability-tile.json",
+    "spc-day2-category.geojson",
+    "risk-polygons-pure.geojson",
+    "hazard-probability-shapes-pure.geojson",
+    "probability-tile-pure.json",
+    "storm-reports.json",
+)
+D2_REQUIRED_FILENAMES = {
+    "verification.json",
+    "risk-polygons.geojson",
+    "probability-tile.json",
+    "spc-day2-category.geojson",
+}
+MAX_REMOTE_D2_FILE_BYTES = 64 * 1024 * 1024
+
+
+def default_production_base_url() -> str:
+    explicit = os.environ.get("AUTOOUTLOOK_PRODUCTION_BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    index_url = os.environ.get("AUTOOUTLOOK_PRODUCTION_INDEX_URL", "").strip()
+    parts = urlsplit(index_url)
+    if parts.scheme in {"http", "https"} and parts.netloc:
+        return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    return ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--legacy-artifact-dir", type=Path, default=DEFAULT_LEGACY_ARTIFACT_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--production-base-url",
+        default=default_production_base_url(),
+        help="Current Cloudflare production origin used to carry a still-valid D2 export across ephemeral CI runs.",
+    )
     return parser.parse_args()
 
 
@@ -320,19 +356,145 @@ def export_merged_d1_archives(output_dir: Path, artifact_root: Path, helpers) ->
         )
 
 
-def export_merged_d2_archives(output_dir: Path, artifact_root: Path, helpers) -> None:
+def _future_d2_dates(payload: object, now: datetime | None = None) -> list[str]:
+    values = payload.get("dates") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return []
+    today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+    future: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            continue
+        if parsed > today:
+            future.add(parsed.isoformat())
+    return sorted(future, reverse=True)
+
+
+def _write_d2_default_files(merged_d2_out_dir: Path, latest_date_dir: Path) -> None:
+    for filename in D2_ARCHIVE_FILENAMES:
+        copy_if_exists(latest_date_dir / filename, merged_d2_out_dir / filename)
+
+
+def carry_forward_merged_d2_archive(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    now: datetime | None = None,
+) -> list[str]:
+    """Copy still-future D2 static files into a fresh regional export tree."""
+    dates = _future_d2_dates(read_json(source_dir / "available-dates.json"), now)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for date_str in dates:
+        source_date_dir = source_dir / date_str
+        missing = sorted(name for name in D2_REQUIRED_FILENAMES if not (source_date_dir / name).is_file())
+        if missing:
+            raise RuntimeError(f"Cloudflare D2 carry-forward for {date_str} is incomplete: {', '.join(missing)}")
+        target_date_dir = target_dir / date_str
+        for filename in D2_ARCHIVE_FILENAMES:
+            copy_if_exists(source_date_dir / filename, target_date_dir / filename)
+
+    write_json(target_dir / "available-dates.json", {"dates": dates})
+    if dates:
+        _write_d2_default_files(target_dir, target_dir / dates[0])
+    return dates
+
+
+def _fetch_remote_json(url: str, timeout_seconds: int = 20) -> dict[str, Any] | list[Any]:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json, application/geo+json",
+            "User-Agent": "AutoOutlook-D2-Carry-Forward/1.0",
+        },
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        raw = response.read(MAX_REMOTE_D2_FILE_BYTES + 1)
+    if len(raw) > MAX_REMOTE_D2_FILE_BYTES:
+        raise RuntimeError(f"Cloudflare D2 artifact exceeds {MAX_REMOTE_D2_FILE_BYTES} bytes: {url}")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, (dict, list)):
+        raise RuntimeError(f"Cloudflare D2 artifact is not JSON: {url}")
+    return payload
+
+
+def hydrate_merged_d2_from_cloudflare(
+    production_base_url: str,
+    target_dir: Path,
+    *,
+    now: datetime | None = None,
+    fetch_json=None,
+) -> list[str]:
+    """Hydrate a future D2 export from the currently served Cloudflare deployment."""
+    fetch = fetch_json or _fetch_remote_json
+    base_url = production_base_url.rstrip("/")
+    if not base_url:
+        write_json(target_dir / "available-dates.json", {"dates": []})
+        return []
+    cache_buster = int((now or datetime.now(timezone.utc)).timestamp())
+    remote_root = f"{base_url}/_api/outlook/merged-d2"
+    available = fetch(f"{remote_root}/available-dates.json?carry_forward={cache_buster}")
+    dates = _future_d2_dates(available, now)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    for date_str in dates:
+        payloads: dict[str, dict[str, Any] | list[Any]] = {}
+        for filename in D2_ARCHIVE_FILENAMES:
+            url = f"{remote_root}/{date_str}/{filename}?carry_forward={cache_buster}"
+            try:
+                payloads[filename] = fetch(url)
+            except Exception as exc:
+                if filename in D2_REQUIRED_FILENAMES:
+                    raise RuntimeError(
+                        f"Cloudflare D2 carry-forward for {date_str} is missing required {filename}: {exc}"
+                    ) from exc
+                print(f"Warning: optional Cloudflare D2 artifact unavailable for {date_str}: {filename} ({exc})")
+        payloads.setdefault("storm-reports.json", {"reports": []})
+        target_date_dir = target_dir / date_str
+        for filename, payload in payloads.items():
+            write_json(target_date_dir / filename, payload)
+
+    write_json(target_dir / "available-dates.json", {"dates": dates})
+    if dates:
+        _write_d2_default_files(target_dir, target_dir / dates[0])
+    return dates
+
+
+def export_merged_d2_archives(
+    output_dir: Path,
+    artifact_root: Path,
+    helpers,
+    *,
+    carry_forward_dir: Path | None = None,
+    production_base_url: str = "",
+    now: datetime | None = None,
+) -> None:
     # 1. Get available merged D2 dates list (12Z cycles reaching f48).
     dates = helpers._available_merge_d2_dates_list(model="hrrr")
 
-    # 2. Create target dir and always (re)write the dates list, even when empty,
-    #    so a now-stale D2 day is cleared from production instead of lingering.
+    # 2. Create the target dir. Ephemeral CI runners do not retain the 12Z cache
+    #    used by later 18Z/00Z/06Z exports, so carry the still-future static D2
+    #    tree forward from Cloudflare (or the root export for the regional copy).
     merged_d2_out_dir = output_dir / "outlook" / "merged-d2"
     merged_d2_out_dir.mkdir(parents=True, exist_ok=True)
-    write_json(merged_d2_out_dir / "available-dates.json", {"dates": dates})
 
     if not dates:
-        print("No available merged D2 dates found for static export.")
+        if carry_forward_dir is not None:
+            dates = carry_forward_merged_d2_archive(carry_forward_dir, merged_d2_out_dir, now=now)
+        elif production_base_url:
+            dates = hydrate_merged_d2_from_cloudflare(production_base_url, merged_d2_out_dir, now=now)
+        else:
+            write_json(merged_d2_out_dir / "available-dates.json", {"dates": []})
+        if dates:
+            print(f"Carried forward Cloudflare D2 archives for dates: {dates}")
+        else:
+            print("No available merged D2 dates found for static export.")
         return
+
+    write_json(merged_d2_out_dir / "available-dates.json", {"dates": dates})
 
     print(f"Exporting merged D2 archives for dates: {dates}")
 
@@ -565,7 +727,14 @@ def export_enh_plus_archive(output_dir: Path, artifact_root: Path, helpers) -> N
     print(f"ENH+ archive: exported {len(dates)} day(s) -> {out_dir}")
 
 
-def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir: Path) -> None:
+def export_static_api(
+    artifact_dir: Path,
+    legacy_artifact_dir: Path,
+    output_dir: Path,
+    *,
+    d2_carry_forward_dir: Path | None = None,
+    production_base_url: str = "",
+) -> None:
     artifact_dir = artifact_dir.resolve()
     legacy_artifact_dir = legacy_artifact_dir.resolve()
     output_dir = output_dir.resolve()
@@ -626,7 +795,13 @@ def export_static_api(artifact_dir: Path, legacy_artifact_dir: Path, output_dir:
     export_spc_backed_hours(index, artifact_dir, output_dir, helpers)
 
     # Export merged D2 outlook archives (12Z cycle F24-F48)
-    export_merged_d2_archives(output_dir, artifact_dir.parent, helpers)
+    export_merged_d2_archives(
+        output_dir,
+        artifact_dir.parent,
+        helpers,
+        carry_forward_dir=d2_carry_forward_dir,
+        production_base_url=production_base_url,
+    )
 
     # Accumulate + export the auto ENH+ risk archive (persisted across deploys)
     export_enh_plus_archive(output_dir, artifact_dir.parent, helpers)
@@ -650,10 +825,20 @@ def main() -> None:
         if DEFAULT_ARTIFACT_DIR.exists():
             try:
                 print("Exporting CONUS artifacts (legacy root)...")
-                export_static_api(DEFAULT_ARTIFACT_DIR, args.legacy_artifact_dir, args.output_dir)
+                export_static_api(
+                    DEFAULT_ARTIFACT_DIR,
+                    args.legacy_artifact_dir,
+                    args.output_dir,
+                    production_base_url=args.production_base_url,
+                )
 
                 print("Exporting CONUS artifacts (regional)...")
-                export_static_api(DEFAULT_ARTIFACT_DIR, args.legacy_artifact_dir, args.output_dir / "conus")
+                export_static_api(
+                    DEFAULT_ARTIFACT_DIR,
+                    args.legacy_artifact_dir,
+                    args.output_dir / "conus",
+                    d2_carry_forward_dir=args.output_dir / "outlook" / "merged-d2",
+                )
             except ValueError as exc:
                 print(f"Warning: Skipping CONUS export: {exc}")
         else:
@@ -662,7 +847,12 @@ def main() -> None:
         pass
     else:
         try:
-            export_static_api(args.artifact_dir, args.legacy_artifact_dir, args.output_dir)
+            export_static_api(
+                args.artifact_dir,
+                args.legacy_artifact_dir,
+                args.output_dir,
+                production_base_url=args.production_base_url,
+            )
         except ValueError as exc:
             raise SystemExit(str(exc))
 
