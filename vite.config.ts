@@ -3,6 +3,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Keep route-level lazy loading effective as the dashboard grows.
+    chunkSizeWarningLimit: 350,
+  },
   server: {
     port: 5173,
     proxy: {

@@ -13,7 +13,7 @@ the finished F00-F48 `dist` bundle to Cloudflare Pages for storage and serving.
 - Cloudflare Pages serves the deployed static site/API bundle.
 - Generated HRRR files, Python wheels, Node modules, and deploy output live only
   on the temporary GitHub runner and are discarded after the run.
-- Deployment uses `cloudflare/wrangler-action@v3`, the current Cloudflare Pages
+- Deployment uses `cloudflare/wrangler-action@v4`, the Node 24 Cloudflare Pages
   continuous-integration path, with Wrangler pinned to major version 4.
 
 ## Workflow
@@ -77,9 +77,9 @@ The old provider-specific workflow has been moved out of `.github/workflows`
 and archived at `docs/legacy/google-cloud/free-hosting-refresh.yml`, so it no
 longer appears as an active GitHub Actions workflow.
 
-The companion notes and configs live under `docs/legacy/google-cloud/` and
-`infra/gcp/`. Keep the archived scheduler disabled while the direct workflow is
-healthy.
+The companion notes and configs now live entirely under
+`docs/legacy/google-cloud/`. Keep the archived scheduler disabled while the
+direct workflow is healthy.
 
 The retired GitHub Container Registry publisher and cleanup workflow live under
 `docs/legacy/github-packages/`. They are not active production workflows.

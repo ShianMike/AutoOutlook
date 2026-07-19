@@ -186,7 +186,6 @@ def main() -> None:
     metadata = run_incremental_pipeline(
         output_dir=args.output_dir,
         forecast_hours=forecast_hours,
-        process_forecast_hours=forecast_hours,
         hour_workers=args.hour_workers,
         range_workers=args.range_workers,
         grid_stride=args.grid_stride,
@@ -207,7 +206,6 @@ def main() -> None:
             args.grid_stride,
         ),
         continue_on_hour_failure=not args.stop_on_hour_failure,
-        publish_gcs_bucket=None,
         verify_spc=not args.no_spc_verify,
     )
     update_custom_metadata(args.output_dir, args.include_hgt500)

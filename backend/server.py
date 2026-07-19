@@ -14,7 +14,6 @@ import os
 import sys
 import threading
 import json
-from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,8 +61,6 @@ CORS(app, resources={r"/api/*": {"origins": _cors_origins()}})
 cache = TTLCache(ttl_seconds=600)  # 10 min
 _build_locks: dict[str, threading.Lock] = {}
 _build_locks_guard = threading.Lock()
-_gcs_client = None
-_gcs_client_guard = threading.Lock()
 ARTIFACT_DIR = Path(os.environ.get(
     "AUTOOUTLOOK_ARTIFACT_DIR",
     Path(__file__).resolve().parent / "artifacts" / "latest",
@@ -1457,90 +1454,18 @@ def _incremental_hour_path(forecast_hour: int, artifact_dir: Path | None = None)
     return base_dir / "hours" / f"f{int(forecast_hour):02d}"
 
 
-def _artifact_bucket_name() -> str:
-    return os.environ.get("AUTOOUTLOOK_ARTIFACT_BUCKET", "").strip()
-
-
-def _artifact_prefix() -> str:
-    return os.environ.get("AUTOOUTLOOK_ARTIFACT_PREFIX", "").strip().strip("/")
-
-
-def _using_gcs_artifacts() -> bool:
-    return bool(_artifact_bucket_name())
-
-
-def _get_gcs_client():
-    global _gcs_client
-    with _gcs_client_guard:
-        if _gcs_client is None:
-            try:
-                from google.cloud import storage  # type: ignore
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError("google-cloud-storage is required when AUTOOUTLOOK_ARTIFACT_BUCKET is set") from exc
-            _gcs_client = storage.Client()
-        return _gcs_client
-
-
-def _artifact_storage_key(path: Path) -> str:
-    roots = [
-        ARTIFACT_DIR.parent,
-        INCREMENTAL_ARTIFACT_DIR.parent,
-        _incremental_complete_artifact_dir().parent,
-    ]
-    for root in roots:
-        try:
-            relative = path.resolve().relative_to(root.resolve())
-        except ValueError:
-            continue
-        key = relative.as_posix()
-        prefix = _artifact_prefix()
-        return f"{prefix}/{key}" if prefix else key
-    key = path.name
-    prefix = _artifact_prefix()
-    return f"{prefix}/{key}" if prefix else key
-
-
-def _artifact_blob(path: Path):
-    bucket = _get_gcs_client().bucket(_artifact_bucket_name())
-    return bucket.blob(_artifact_storage_key(path))
-
-
 def _artifact_exists(path: Path) -> bool:
-    if not _using_gcs_artifacts():
-        return path.exists()
-    try:
-        return bool(_artifact_blob(path).exists())
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Could not check artifact object %s: %s", _artifact_storage_key(path), exc)
-        return False
+    return path.exists()
 
 
 def _download_artifact_bytes(path: Path) -> bytes | None:
-    if not _using_gcs_artifacts():
-        if not path.exists():
-            return None
-        return path.read_bytes()
-    try:
-        return _artifact_blob(path).download_as_bytes()
-    except Exception as exc:  # noqa: BLE001
-        if exc.__class__.__name__ not in {"NotFound", "Forbidden"}:
-            log.warning("Could not read artifact object %s: %s", _artifact_storage_key(path), exc)
+    if not path.exists():
         return None
+    return path.read_bytes()
 
 
 def _png_artifact_response(path: Path):
-    if _using_gcs_artifacts():
-        data = _download_artifact_bytes(path)
-        if data is None:
-            return _artifact_not_ready_response(path)
-        response = send_file(
-            BytesIO(data),
-            mimetype="image/png",
-            download_name=path.name,
-            conditional=True,
-        )
-    else:
-        response = send_file(path, mimetype="image/png", conditional=True)
+    response = send_file(path, mimetype="image/png", conditional=True)
     response.headers["Cache-Control"] = f"public, max-age={PNG_ARTIFACT_CACHE_SECONDS}"
     return response
 

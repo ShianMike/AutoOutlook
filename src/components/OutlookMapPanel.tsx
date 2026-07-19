@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { toPng } from 'html-to-image';
 import type { ForecastBundle, HourSnapshot, ActiveRegion } from '../types/forecast';
 import { FORECAST_HOUR_LABELS } from '../types/forecast';
 import RetroPanel from './retro/RetroPanel';
@@ -246,6 +245,7 @@ function dataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
 }
 
 async function captureFixedExportCanvas(element: HTMLElement): Promise<HTMLCanvasElement> {
+  const { toPng } = await import('html-to-image');
   const dataUrl = await toPng(element, {
     backgroundColor: EXPORT_BACKGROUND_COLOR,
     cacheBust: true,

@@ -1,5 +1,4 @@
 import { useRef, useState } from 'react';
-import { toPng } from 'html-to-image';
 import type { HourSnapshot } from '../types/forecast';
 import type { OutlookArtifacts } from '../types/outlookArtifacts';
 import type { ArtifactStatus } from '../hooks/useOutlookArtifacts';
@@ -62,6 +61,7 @@ export default function ForecastDiscussion({ snapshot, artifacts, artifactStatus
     setIsExporting(true);
     setExportError(null);
     try {
+      const { toPng } = await import('html-to-image');
       const dataUrl = await toPng(discussionRef.current, {
         backgroundColor: '#f5f0e6',
         cacheBust: true,

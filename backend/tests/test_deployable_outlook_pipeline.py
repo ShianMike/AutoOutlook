@@ -59,19 +59,14 @@ from backend.ml.gridded_outlook import (
 from backend.ml.outlook_pipeline import (
     ALL_FORECAST_HOURS,
     PRODUCTION_FORECAST_HOURS,
-    CloudRunTaskShard,
     FetchedHour,
     _cache_previous_incremental_cycle,
-    _hydrate_incremental_artifacts_from_gcs,
     _merged_d1_00z_cache_dir,
     _merged_d2_12z_cache_dir,
     _publish_complete_incremental_snapshot,
-    _publish_incremental_artifacts_to_gcs,
-    _publish_incremental_shard_artifacts_to_gcs,
     _publish_working_dir,
     _incremental_hour_ready,
     _region_from_max_risk_grid,
-    resolve_cloud_run_task_forecast_hours,
     resolve_cycle_policy,
     resolve_forecast_hours,
     resolve_cli_forecast_hours,
@@ -500,54 +495,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
         args.forecast_hours = [0, 6]
         self.assertEqual(resolve_cli_forecast_hours(args), [0, 6])
-
-    def test_cloud_run_task_shard_splits_requested_hours(self) -> None:
-        hours = list(range(10))
-
-        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=0, count=3)), [0, 3, 6, 9])
-        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=1, count=3)), [1, 4, 7])
-        self.assertEqual(resolve_cloud_run_task_forecast_hours(hours, CloudRunTaskShard(index=2, count=3)), [2, 5, 8])
-
-    def test_incremental_pipeline_processes_task_shard_but_indexes_all_requested_hours(self) -> None:
-        cycle = HrrrCycle("20240504", 12)
-        lats = np.linspace(30.0, 34.0, 5)
-        lons = np.linspace(-100.0, -96.0, 5)
-        fetched_hours: list[int] = []
-
-        def fake_detect(_session, _now):
-            return cycle
-
-        def fake_fetch(ref, _session):
-            fetched_hours.append(ref.forecast_hour)
-            return lats, lons, small_fields()
-
-        def fake_predict(features):
-            probs = np.zeros(features.shape, dtype=float)
-            probs[2, 2] = 0.2
-            return {"tornado": probs * 0.0, "hail": probs, "wind": probs * 0.0}
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline.model_status",
-            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
-        ):
-            index = run_incremental_pipeline(
-                output_dir=Path(tmp) / "latest_incremental",
-                forecast_hours=[0, 1, 2, 3],
-                process_forecast_hours=[1, 3],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                hour_workers=1,
-                tile_stride=1,
-                detect_cycle_fn=fake_detect,
-                fetch_hour_fn=fake_fetch,
-                predictor_fn=fake_predict,
-            )
-
-        self.assertEqual(fetched_hours, [1, 3])
-        self.assertEqual(index["requestedForecastHours"], [0, 1, 2, 3])
-        self.assertEqual(index["processForecastHours"], [1, 3])
-        self.assertEqual(index["readyForecastHours"], [1, 3])
-        self.assertEqual(index["pendingForecastHours"], [0, 2])
-        self.assertEqual(index["status"], "partial")
 
     def test_pipeline_passes_requested_hour_requirement_to_cycle_detection(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -3959,7 +3906,7 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 "riskLabels": list(SPC_RISK_LABELS),
             }), encoding="utf-8")
 
-            with patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}), patch.object(
+            with patch.object(
                 server,
                 "ARTIFACT_DIR",
                 latest_dir,
@@ -4032,7 +3979,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 }), encoding="utf-8")
 
             with (
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", current_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", None),
                 patch.object(server, "ARTIFACT_DIR", root / "latest"),
@@ -4089,7 +4035,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             }), encoding="utf-8")
 
             with (
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
                 patch.object(server, "ARTIFACT_DIR", latest_dir),
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", complete_dir),
@@ -4219,78 +4164,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
         self.assertEqual(after_skip, after_first)
         self.assertEqual(sorted(fetched_hours), [0, 0, 1])
 
-    def test_incremental_pipeline_finalizes_merged_shard_hours_without_refetching(self) -> None:
-        cycle = HrrrCycle("20240504", 12)
-        lats = np.linspace(30.0, 34.0, 5)
-        lons = np.linspace(-100.0, -96.0, 5)
-
-        def fake_detect(_session, _now):
-            return cycle
-
-        def fake_fetch(_ref, _session):
-            return lats, lons, small_fields()
-
-        def failing_fetch(ref, _session):
-            raise AssertionError(f"downloaded shard hour F{ref.forecast_hour:02d} should not be refetched")
-
-        def fake_predict(features):
-            probs = np.zeros(features.shape, dtype=float)
-            return {"tornado": probs, "hail": probs, "wind": probs}
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline.model_status",
-            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
-        ):
-            root = Path(tmp)
-            shard0 = root / "shard0"
-            shard1 = root / "shard1"
-            merged = root / "latest_incremental"
-
-            run_incremental_pipeline(
-                output_dir=shard0,
-                forecast_hours=[0, 1],
-                process_forecast_hours=[0],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                tile_stride=1,
-                detect_cycle_fn=fake_detect,
-                fetch_hour_fn=fake_fetch,
-                predictor_fn=fake_predict,
-                verify_spc=False,
-            )
-            run_incremental_pipeline(
-                output_dir=shard1,
-                forecast_hours=[0, 1],
-                process_forecast_hours=[1],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                tile_stride=1,
-                detect_cycle_fn=fake_detect,
-                fetch_hour_fn=fake_fetch,
-                predictor_fn=fake_predict,
-                verify_spc=False,
-            )
-
-            (merged / "hours").mkdir(parents=True)
-            shutil.copytree(shard0 / "hours" / "f00", merged / "hours" / "f00")
-            shutil.copytree(shard1 / "hours" / "f01", merged / "hours" / "f01")
-
-            index = run_incremental_pipeline(
-                output_dir=merged,
-                forecast_hours=[0, 1],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                tile_stride=1,
-                detect_cycle_fn=fake_detect,
-                fetch_hour_fn=failing_fetch,
-                predictor_fn=fake_predict,
-                verify_spc=False,
-            )
-
-            complete_index = json.loads((root / "latest_incremental_complete" / "index.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(index["status"], "complete")
-        self.assertEqual(index["readyForecastHours"], [0, 1])
-        self.assertEqual(index["pendingForecastHours"], [])
-        self.assertEqual(complete_index["status"], "complete")
-        self.assertEqual(complete_index["readyForecastHours"], [0, 1])
 
     def test_incremental_pipeline_publishes_complete_snapshot_for_fallback(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -4666,294 +4539,11 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(cache_index_after_18z["cycleTimeISO"], "2026-06-08T12:00:00Z")
             self.assertEqual(cache_tile_after_18z["cycle"], "12z")
 
-    def test_gcs_incremental_publish_uses_artifact_layout_and_index_last(self) -> None:
-        uploads: list[str] = []
 
-        class FakeBlob:
-            def __init__(self, name: str):
-                self.name = name
 
-            def upload_from_filename(self, _filename: str) -> None:
-                uploads.append(self.name)
 
-        class FakeBucket:
-            def blob(self, name: str) -> FakeBlob:
-                return FakeBlob(name)
 
-        class FakeClient:
-            def bucket(self, _name: str) -> FakeBucket:
-                return FakeBucket()
 
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline._get_gcs_storage_client",
-            return_value=FakeClient(),
-        ):
-            root = Path(tmp)
-            output_dir = root / "latest_incremental"
-            hour_dir = output_dir / "hours" / "f00"
-            hour_dir.mkdir(parents=True)
-            index = {
-                "status": "complete",
-                "readyForecastHours": [0],
-                "requestedForecastHours": [0],
-                "cycle": "new",
-            }
-            (output_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
-            for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
-                (hour_dir / name).write_text(json.dumps({"name": name}), encoding="utf-8")
-            _publish_complete_incremental_snapshot(output_dir, index, [0])
-            zeroz_cache = _merged_d1_00z_cache_dir(output_dir)
-            zeroz_hour_dir = zeroz_cache / "hours" / "f00"
-            zeroz_hour_dir.mkdir(parents=True)
-            (zeroz_cache / "index.json").write_text(json.dumps({"cycle": "HRRR 00Z 20260608"}), encoding="utf-8")
-            (zeroz_hour_dir / "probability_tile.json").write_text(json.dumps({"cycle": "00z"}), encoding="utf-8")
-
-            result = _publish_incremental_artifacts_to_gcs(output_dir, index, [0], "bucket", "prod/artifacts")
-
-        current_hour_key = "prod/artifacts/latest_incremental/hours/f00/probability_tile.json"
-        current_index_key = "prod/artifacts/latest_incremental/index.json"
-        complete_hour_key = "prod/artifacts/latest_incremental_complete/hours/f00/probability_tile.json"
-        complete_index_key = "prod/artifacts/latest_incremental_complete/index.json"
-        zeroz_hour_key = "prod/artifacts/latest_incremental_hrrr_00z/hours/f00/probability_tile.json"
-        zeroz_index_key = "prod/artifacts/latest_incremental_hrrr_00z/index.json"
-        self.assertEqual(result["currentFiles"], 5)
-        self.assertEqual(result["completeFiles"], 5)
-        self.assertEqual(result["mergedD1ZeroZFiles"], 2)
-        self.assertIn(current_hour_key, uploads)
-        self.assertIn(complete_hour_key, uploads)
-        self.assertIn(zeroz_hour_key, uploads)
-        self.assertLess(uploads.index(current_hour_key), uploads.index(current_index_key))
-        self.assertLess(uploads.index(complete_hour_key), uploads.index(complete_index_key))
-        self.assertLess(uploads.index(zeroz_hour_key), uploads.index(zeroz_index_key))
-
-    def test_gcs_shard_publish_uploads_only_processed_hour_dirs(self) -> None:
-        uploads: list[str] = []
-
-        class FakeBlob:
-            def __init__(self, name: str):
-                self.name = name
-
-            def upload_from_filename(self, _filename: str) -> None:
-                uploads.append(self.name)
-
-        class FakeBucket:
-            def blob(self, name: str) -> FakeBlob:
-                return FakeBlob(name)
-
-        class FakeClient:
-            def bucket(self, _name: str) -> FakeBucket:
-                return FakeBucket()
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline._get_gcs_storage_client",
-            return_value=FakeClient(),
-        ):
-            root = Path(tmp)
-            output_dir = root / "latest_incremental"
-            for hour in (0, 1):
-                hour_dir = output_dir / "hours" / f"f{hour:02d}"
-                hour_dir.mkdir(parents=True)
-                for name in ("metadata.json", "probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
-                    (hour_dir / name).write_text(json.dumps({"hour": hour, "name": name}), encoding="utf-8")
-            index = {"status": "partial", "artifactGenerationId": "exec-1"}
-
-            result = _publish_incremental_shard_artifacts_to_gcs(output_dir, index, [1], "bucket", "prod/artifacts")
-
-        self.assertEqual(result["currentFiles"], 4)
-        self.assertTrue(all("/hours/f01/" in name for name in uploads))
-        self.assertNotIn("prod/artifacts/latest_incremental/hours/f00/metadata.json", uploads)
-        self.assertNotIn("prod/artifacts/latest_incremental/index.json", uploads)
-
-    def test_incremental_hour_ready_can_require_current_generation_id(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "latest_incremental"
-            hour_dir = output_dir / "hours" / "f00"
-            hour_dir.mkdir(parents=True)
-            metadata = {
-                "forecastHour": 0,
-                "validTimeISO": "2024-05-04T12:00:00Z",
-                "status": "ready",
-                "artifactGenerationId": "exec-new",
-                "region": {"centerLat": 35.0, "centerLon": -97.0},
-                "ingredients": {},
-                "ingredientSample": {"gridRow": 1, "gridCol": 1},
-            }
-            for name in ("probability_tile.json", "risk_polygons.geojson", "upper_air_overlay.json"):
-                (hour_dir / name).write_text("{}", encoding="utf-8")
-            (hour_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
-
-            self.assertTrue(_incremental_hour_ready(output_dir, 0, cycle_time_iso="2024-05-04T12:00:00Z", artifact_generation_id="exec-new"))
-            self.assertFalse(_incremental_hour_ready(output_dir, 0, cycle_time_iso="2024-05-04T12:00:00Z", artifact_generation_id="exec-old"))
-
-    def test_gcs_hydrate_restores_incremental_artifact_layout(self) -> None:
-        class FakeBlob:
-            def __init__(self, name: str, data: str):
-                self.name = name
-                self.data = data
-
-            def download_to_filename(self, filename: str) -> None:
-                Path(filename).write_text(self.data, encoding="utf-8")
-
-        class FakeBucket:
-            def __init__(self):
-                self.blobs = [
-                    FakeBlob("prod/latest_incremental/index.json", '{"status":"complete"}'),
-                    FakeBlob("prod/latest_incremental/hours/f00/metadata.json", '{"forecastHour":0}'),
-                    FakeBlob("prod/latest_incremental_complete/index.json", '{"status":"complete"}'),
-                    FakeBlob("prod/latest_incremental_hrrr_00z/index.json", '{"cycle":"HRRR 00Z 20260608"}'),
-                ]
-
-            def list_blobs(self, prefix: str):
-                return [blob for blob in self.blobs if blob.name.startswith(prefix)]
-
-        class FakeClient:
-            def bucket(self, _name: str) -> FakeBucket:
-                return FakeBucket()
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline._get_gcs_storage_client",
-            return_value=FakeClient(),
-        ):
-            output_dir = Path(tmp) / "latest_incremental"
-            result = _hydrate_incremental_artifacts_from_gcs(output_dir, "bucket", "prod")
-
-            self.assertTrue((output_dir / "index.json").exists())
-            self.assertTrue((output_dir / "hours" / "f00" / "metadata.json").exists())
-            self.assertTrue((Path(tmp) / "latest_incremental_complete" / "index.json").exists())
-            self.assertTrue((Path(tmp) / "latest_incremental_hrrr_00z" / "index.json").exists())
-
-        self.assertEqual(result["currentFiles"], 2)
-        self.assertEqual(result["completeFiles"], 1)
-        self.assertEqual(result["mergedD1ZeroZFiles"], 1)
-
-    def test_gcs_hydrate_skips_objects_deleted_during_concurrent_publish(self) -> None:
-        class NotFound(Exception):
-            pass
-
-        class FakeBlob:
-            def __init__(self, name: str, data: str | None):
-                self.name = name
-                self.data = data
-
-            def download_to_filename(self, filename: str) -> None:
-                if self.data is None:
-                    raise NotFound("missing")
-                Path(filename).write_text(self.data, encoding="utf-8")
-
-        class FakeBucket:
-            def __init__(self):
-                self.blobs = [
-                    FakeBlob("prod/latest_incremental/hours/f00/metadata.json", '{"forecastHour":0}'),
-                    FakeBlob("prod/latest_incremental/hours/f00/risk_polygons.geojson", None),
-                ]
-
-            def list_blobs(self, prefix: str):
-                return [blob for blob in self.blobs if blob.name.startswith(prefix)]
-
-        class FakeClient:
-            def bucket(self, _name: str) -> FakeBucket:
-                return FakeBucket()
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline._get_gcs_storage_client",
-            return_value=FakeClient(),
-        ):
-            output_dir = Path(tmp) / "latest_incremental"
-            result = _hydrate_incremental_artifacts_from_gcs(output_dir, "bucket", "prod")
-
-            self.assertTrue((output_dir / "hours" / "f00" / "metadata.json").exists())
-
-        self.assertEqual(result["currentFiles"], 1)
-
-    def test_incremental_pipeline_can_publish_finished_artifacts_to_gcs(self) -> None:
-        cycle = HrrrCycle("20240504", 12)
-        lats = np.linspace(30.0, 34.0, 5)
-        lons = np.linspace(-100.0, -96.0, 5)
-
-        def fake_detect(_session, _now):
-            return cycle
-
-        def fake_fetch(_ref, _session):
-            return lats, lons, small_fields()
-
-        def fake_predict(features):
-            probs = np.zeros(features.shape, dtype=float)
-            return {"tornado": probs, "hail": probs, "wind": probs}
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline.model_status",
-            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
-        ), patch(
-            "backend.ml.outlook_pipeline._publish_incremental_artifacts_to_gcs",
-            return_value={"enabled": True},
-        ) as publish_mock:
-            output_dir = Path(tmp) / "latest_incremental"
-            index = run_incremental_pipeline(
-                output_dir=output_dir,
-                forecast_hours=[0],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                tile_stride=1,
-                detect_cycle_fn=fake_detect,
-                fetch_hour_fn=fake_fetch,
-                predictor_fn=fake_predict,
-                publish_gcs_bucket="bucket",
-                publish_gcs_prefix="prod/artifacts",
-            )
-
-        self.assertEqual(index["status"], "complete")
-        publish_mock.assert_called_once()
-
-    def test_incremental_pipeline_skips_gcs_publish_when_nothing_changed(self) -> None:
-        cycle = HrrrCycle("20240504", 12)
-
-        def fake_detect(_session, _now):
-            return cycle
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.ml.outlook_pipeline.model_status",
-            return_value={"active": True, "version": "unit", "featureSchemaHash": "hash"},
-        ), patch(
-            "backend.ml.outlook_pipeline._publish_incremental_artifacts_to_gcs",
-            side_effect=AssertionError("unchanged artifacts should not be republished"),
-        ):
-            root = Path(tmp)
-            output_dir = root / "latest_incremental"
-            complete_dir = root / "latest_incremental_complete"
-            hour_dir = output_dir / "hours" / "f00"
-            complete_hour_dir = complete_dir / "hours" / "f00"
-            hour_dir.mkdir(parents=True)
-            complete_hour_dir.mkdir(parents=True)
-            index = {
-                "cycle": cycle.label,
-                "status": "complete",
-                "readyForecastHours": [0],
-                "requestedForecastHours": [0],
-                "model": {"active": True},
-            }
-            (output_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
-            (complete_dir / "index.json").write_text(json.dumps(index), encoding="utf-8")
-            for directory in (hour_dir, complete_hour_dir):
-                (directory / "risk_polygons.geojson").write_text("{}", encoding="utf-8")
-                (directory / "probability_tile.json").write_text("{}", encoding="utf-8")
-                (directory / "upper_air_overlay.json").write_text("{}", encoding="utf-8")
-                (directory / "metadata.json").write_text(json.dumps({
-                    "forecastHour": 0,
-                    "cycleTimeISO": cycle.cycle_time.isoformat().replace("+00:00", "Z"),
-                    "validTimeISO": cycle.cycle_time.isoformat().replace("+00:00", "Z"),
-                    "region": {"centerLat": 35.0, "centerLon": -97.0},
-                    "ingredients": {},
-                    "ingredientSample": {"gridRow": 0, "gridCol": 0},
-                }), encoding="utf-8")
-
-            result = run_incremental_pipeline(
-                output_dir=output_dir,
-                forecast_hours=[0],
-                now=datetime(2024, 5, 4, 13, tzinfo=timezone.utc),
-                detect_cycle_fn=fake_detect,
-                publish_gcs_bucket="bucket",
-            )
-
-        self.assertEqual(result["readyForecastHours"], [0])
 
     def test_incremental_pipeline_merges_existing_ready_hours(self) -> None:
         cycle = HrrrCycle("20240504", 12)
@@ -5180,7 +4770,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 patch.object(server, "ARTIFACT_DIR", artifact_dir),
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", complete_dir),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 response = client.get("/api/outlook/latest")
@@ -5202,7 +4791,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 patch.object(server, "ARTIFACT_DIR", artifact_dir),
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", incremental_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", root / "latest_incremental_complete"),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 response = client.get("/api/outlook/latest")
@@ -5228,7 +4816,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 patch.dict(os.environ, {
                     "AUTOOUTLOOK_FORECAST_SOURCE": "artifact",
                     "AUTOOUTLOOK_ENABLE_LIVE_BUILD": "false",
-                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
                 }),
                 patch.object(server, "build_bundle", side_effect=AssertionError("live build should not run")) as build_mock,
             ):
@@ -5241,20 +4828,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
             build_mock.assert_not_called()
 
-    def test_server_artifact_bucket_keys_match_artifact_layout(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            from backend import server
-
-            with (
-                patch.object(server, "ARTIFACT_DIR", root / "latest"),
-                patch.object(server, "INCREMENTAL_ARTIFACT_DIR", root / "latest_incremental"),
-                patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", root / "latest_incremental_complete"),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_PREFIX": "prod/artifacts"}),
-            ):
-                key = server._artifact_storage_key(root / "latest_incremental" / "hours" / "f03" / "metadata.json")
-
-            self.assertEqual(key, "prod/artifacts/latest_incremental/hours/f03/metadata.json")
 
     def test_server_serves_incremental_hour_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5269,7 +4842,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 index_response = client.get("/api/outlook/incremental")
@@ -5295,7 +4867,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 response = client.get("/api/outlook/incremental/hour/1/probability-tile")
@@ -5331,7 +4902,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             with (
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", current_dir),
                 patch.object(server, "INCREMENTAL_COMPLETE_ARTIFACT_DIR", complete_dir),
-                patch.dict(os.environ, {"AUTOOUTLOOK_ARTIFACT_BUCKET": ""}),
             ):
                 client = server.app.test_client()
                 index_response = client.get("/api/outlook/incremental")
@@ -5436,7 +5006,6 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
                 patch.object(server, "INCREMENTAL_ARTIFACT_DIR", artifact_dir),
                 patch.dict(os.environ, {
                     "AUTOOUTLOOK_FORECAST_SOURCE": "artifacts",
-                    "AUTOOUTLOOK_ARTIFACT_BUCKET": "",
                 }),
                 patch.object(server, "build_bundle", side_effect=AssertionError("should not build live bundle")),
             ):

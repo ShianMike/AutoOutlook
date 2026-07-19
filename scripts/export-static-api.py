@@ -1,6 +1,6 @@
 """Export generated AutoOutlook artifacts as a static API tree.
 
-This is used by the no-Google-Cloud hosting path:
+This is used by the static Cloudflare Pages hosting path:
 
 1. Generate artifacts with ``backend.ml.outlook_pipeline``.
 2. Build the Vite frontend into ``dist``.
@@ -145,9 +145,6 @@ def import_artifact_server_helpers(artifact_dir: Path):
     os.environ["AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR"] = str(artifact_dir)
     os.environ["AUTOOUTLOOK_FORECAST_SOURCE"] = "artifact"
     os.environ["AUTOOUTLOOK_ENABLE_LIVE_BUILD"] = "false"
-    os.environ.pop("AUTOOUTLOOK_ARTIFACT_BUCKET", None)
-    os.environ.pop("AUTOOUTLOOK_ARTIFACT_PREFIX", None)
-
     import importlib
     if "backend.server" in sys.modules:
         server = importlib.reload(sys.modules["backend.server"])

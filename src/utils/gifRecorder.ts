@@ -1,5 +1,3 @@
-import GIF from 'gif.js';
-
 export interface GifRecorderOptions {
   width: number;
   height: number;
@@ -10,7 +8,7 @@ export interface GifRecorderOptions {
   onProgress?: (progress: number) => void;
 }
 
-export function recordCanvasesToGif(
+export async function recordCanvasesToGif(
   frames: HTMLCanvasElement[],
   {
     width,
@@ -23,8 +21,10 @@ export function recordCanvasesToGif(
   }: GifRecorderOptions,
 ): Promise<Blob> {
   if (frames.length === 0) {
-    return Promise.reject(new Error('No GIF frames were captured.'));
+    throw new Error('No GIF frames were captured.');
   }
+
+  const { default: GIF } = await import('gif.js');
 
   return new Promise((resolve, reject) => {
     let settled = false;

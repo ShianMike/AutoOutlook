@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import time
-import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -94,7 +93,6 @@ DEFAULT_INCREMENTAL_CYCLE_POLICY = "latest-startable"
 DEFAULT_HOUR_WORKERS = _env_int("AUTOOUTLOOK_HOUR_WORKERS", 4)
 DEFAULT_RANGE_WORKERS = _env_int("AUTOOUTLOOK_RANGE_WORKERS", 6)
 DEFAULT_GRID_STRIDE = _env_int("AUTOOUTLOOK_GRID_STRIDE", 2)
-DEFAULT_GCS_LOCK_TTL_SECONDS = _env_int("AUTOOUTLOOK_RUN_LOCK_TTL_SECONDS", 5400)
 MERGED_D1_00Z_CACHE_MODEL = "hrrr"
 MERGED_D2_12Z_CACHE_MODEL = "hrrr"
 
@@ -124,19 +122,6 @@ class IncrementalHourResult:
     cache_hit: bool
     grid_shape: list[int] | None
     selected_byte_count: int | None
-
-
-@dataclass(frozen=True)
-class GcsRunLock:
-    bucket_name: str
-    blob_name: str
-    generation: int | None
-
-
-@dataclass(frozen=True)
-class CloudRunTaskShard:
-    index: int
-    count: int
 
 
 def run_pipeline(
@@ -408,8 +393,6 @@ def run_pipeline(
 def run_incremental_pipeline(
     output_dir: Path = DEFAULT_INCREMENTAL_OUTPUT_DIR,
     forecast_hours: Iterable[int] | None = None,
-    process_forecast_hours: Iterable[int] | None = None,
-    artifact_generation_id: str | None = None,
     now: datetime | None = None,
     max_workers: int | None = None,
     hour_workers: int | None = None,
@@ -430,8 +413,6 @@ def run_incremental_pipeline(
     predictor_fn: PredictorFn | None = None,
     verify_spc: bool = False,
     spc_fetch_fn: Callable[[requests.Session, Path | None], dict[str, Any]] | None = None,
-    publish_gcs_bucket: str | None = None,
-    publish_gcs_prefix: str = "",
     model_name: str = "hrrr",
 ) -> dict[str, Any]:
     """Publish per-hour artifacts as soon as each HRRR hour is processed."""
@@ -441,20 +422,13 @@ def run_incremental_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "hours").mkdir(parents=True, exist_ok=True)
     hours = resolve_forecast_hours(forecast_hours, model_name=model_name)
-    if process_forecast_hours is None:
-        process_requested_hours = list(hours)
-    else:
-        process_requested_hours = _resolve_process_forecast_hours(process_forecast_hours, hours)
-    requested_force_hours = set(process_requested_hours)
+    process_requested_hours = list(hours)
     resolved_cycle_policy = resolve_cycle_policy(cycle_policy, incremental=True)
     required_forecast_hour = resolve_required_forecast_hour(hours, require_complete_hour, resolved_cycle_policy, model_name=model_name)
     hour_workers = _resolve_worker_count(hour_workers, DEFAULT_HOUR_WORKERS)
     range_workers = _resolve_worker_count(range_workers if range_workers is not None else max_workers, DEFAULT_RANGE_WORKERS)
     grid_stride = _resolve_grid_stride(grid_stride)
     tile_stride = _resolve_tile_stride(tile_stride, grid_stride)
-    artifact_generation_id = artifact_generation_id or os.environ.get("AUTOOUTLOOK_ARTIFACT_GENERATION_ID") or os.environ.get("CLOUD_RUN_EXECUTION") or ""
-    sharded_run = set(process_requested_hours) != set(hours)
-
     session = requests.Session()
     session.headers["User-Agent"] = "AutoOutlook-outlook-pipeline/1.0 incremental"
     ready_hours: list[int] = []
@@ -539,9 +513,6 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
-                "processForecastHours": process_requested_hours,
-                "artifactGenerationId": artifact_generation_id or None,
-                "artifactChangesThisRun": artifact_changes,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata),
                 "readyForecastHours": ready,
                 "failedForecastHours": failed,
@@ -583,7 +554,7 @@ def run_incremental_pipeline(
         for forecast_hour in process_requested_hours:
             if stop_after_hour is not None and forecast_hour > stop_after_hour:
                 continue
-            should_force_hour = force and forecast_hour in requested_force_hours
+            should_force_hour = force
             if not should_force_hour and forecast_hour in ready_hours and _incremental_hour_ready(output_dir, forecast_hour):
                 print(f"[incremental skip] F{forecast_hour:02d} already ready", flush=True)
                 continue
@@ -619,7 +590,6 @@ def run_incremental_pipeline(
                         no_cache,
                         grid_stride,
                         tile_stride,
-                        artifact_generation_id,
                         model_name,
                     )
                     future_to_hour[future] = forecast_hour
@@ -711,26 +681,12 @@ def run_incremental_pipeline(
             artifact_changes = True
             index = write_index(str(index.get("status") or "complete"))
         complete_dir = _incremental_complete_output_dir(output_dir)
-        if sharded_run:
-            if publish_gcs_bucket and process_hours:
-                _publish_incremental_shard_artifacts_to_gcs(
-                    output_dir,
-                    index,
-                    process_hours,
-                    publish_gcs_bucket,
-                    publish_gcs_prefix,
-                )
-        else:
-            complete_snapshot_ready = _incremental_index_covers_requested_hours(
-                _read_incremental_index_payload(complete_dir),
-                hours,
-            )
-            if artifact_changes or not complete_snapshot_ready:
-                _publish_complete_incremental_snapshot(output_dir, index, hours)
-                if publish_gcs_bucket:
-                    _publish_incremental_artifacts_to_gcs(output_dir, index, hours, publish_gcs_bucket, publish_gcs_prefix)
-            elif publish_gcs_bucket:
-                print("[gcs publish skip] no artifact changes; existing complete snapshot is current", flush=True)
+        complete_snapshot_ready = _incremental_index_covers_requested_hours(
+            _read_incremental_index_payload(complete_dir),
+            hours,
+        )
+        if artifact_changes or not complete_snapshot_ready:
+            _publish_complete_incremental_snapshot(output_dir, index, hours)
         return index
     except Exception:
         if output_dir.exists():
@@ -741,9 +697,6 @@ def run_incremental_pipeline(
                 "generatedAtISO": _now_iso(),
                 "mode": "incremental",
                 "requestedForecastHours": hours,
-                "processForecastHours": process_requested_hours if "process_requested_hours" in locals() else hours,
-                "artifactGenerationId": artifact_generation_id if "artifact_generation_id" in locals() and artifact_generation_id else None,
-                "artifactChangesThisRun": artifact_changes if "artifact_changes" in locals() else None,
                 **_cycle_detection_artifact_fields(cycle_detection_metadata if "cycle_detection_metadata" in locals() else {
                     "requestedForecastHours": hours,
                     "requiredForecastHourForCycle": required_forecast_hour,
@@ -858,7 +811,6 @@ def _process_incremental_hour(
     no_cache: bool,
     grid_stride: int,
     tile_stride: int,
-    artifact_generation_id: str = "",
     model_name: str = "hrrr",
 ) -> IncrementalHourResult:
     hour_started = time.perf_counter()
@@ -911,7 +863,6 @@ def _process_incremental_hour(
             "validTimeISO": built["validTimeISO"],
             "status": "ready",
             "generatedAtISO": _now_iso(),
-            "artifactGenerationId": artifact_generation_id or None,
             "latencyMs": 0,
             "timing": timing,
             "categoryCounts": counts,
@@ -986,21 +937,6 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _resolve_process_forecast_hours(
-    process_forecast_hours: Iterable[int],
-    requested_forecast_hours: Iterable[int],
-) -> list[int]:
-    requested = set(resolve_forecast_hours(requested_forecast_hours))
-    selected = sorted({int(hour) for hour in process_forecast_hours})
-    invalid = [hour for hour in selected if hour < 0 or hour > 48]
-    if invalid:
-        raise ValueError(f"Forecast hours must be in 0..48: {invalid}")
-    unknown = [hour for hour in selected if hour not in requested]
-    if unknown:
-        raise ValueError(f"Process forecast hours must be a subset of requested forecast hours: {unknown}")
-    return selected
 
 
 def _normalize_fetched_hour(
@@ -1853,357 +1789,6 @@ def _copy_file_atomic(source: Path, destination: Path) -> None:
     tmp.replace(destination)
 
 
-def _get_gcs_storage_client():
-    try:
-        from google.cloud import storage  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("google-cloud-storage is required for GCS artifact publishing") from exc
-    return storage.Client()
-
-
-def _publish_incremental_artifacts_to_gcs(
-    output_dir: Path,
-    index: Mapping[str, Any],
-    requested_hours: Iterable[int],
-    bucket_name: str,
-    prefix: str = "",
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    bucket_name = bucket_name.strip()
-    if not bucket_name:
-        return {"enabled": False, "latencyMs": 0, "currentFiles": 0, "completeFiles": 0}
-
-    client = _get_gcs_storage_client()
-    bucket = client.bucket(bucket_name)
-    output_dir = Path(output_dir)
-    current_files = _upload_directory_to_gcs(bucket, output_dir, _gcs_join(prefix, output_dir.name))
-    complete_files = 0
-    complete_dir = _incremental_complete_output_dir(output_dir)
-    if complete_dir.exists() and _incremental_index_covers_requested_hours(index, requested_hours):
-        complete_files = _upload_directory_to_gcs(bucket, complete_dir, _gcs_join(prefix, complete_dir.name))
-    previous_files = 0
-    previous_dir = output_dir.with_name(f"{output_dir.name}.previous")
-    if previous_dir.exists():
-        previous_files = _upload_directory_to_gcs(bucket, previous_dir, _gcs_join(prefix, previous_dir.name))
-    merged_d1_00z_files = 0
-    merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
-    if merged_d1_00z_dir.exists():
-        merged_d1_00z_files = _upload_directory_to_gcs(bucket, merged_d1_00z_dir, _gcs_join(prefix, merged_d1_00z_dir.name))
-    merged_d2_12z_files = 0
-    merged_d2_12z_dir = _merged_d2_12z_cache_dir(output_dir)
-    if merged_d2_12z_dir.exists():
-        merged_d2_12z_files = _upload_directory_to_gcs(bucket, merged_d2_12z_dir, _gcs_join(prefix, merged_d2_12z_dir.name))
-
-    result = {
-        "enabled": True,
-        "bucket": bucket_name,
-        "prefix": prefix.strip("/"),
-        "currentFiles": current_files,
-        "completeFiles": complete_files,
-        "previousFiles": previous_files,
-        "mergedD1ZeroZFiles": merged_d1_00z_files,
-        "mergedD2TwelveZFiles": merged_d2_12z_files,
-        "latencyMs": int((time.perf_counter() - started) * 1000),
-    }
-    print(
-        f"[gcs publish] bucket={bucket_name} prefix={result['prefix']} "
-        f"currentFiles={current_files} completeFiles={complete_files} previousFiles={previous_files} "
-        f"mergedD1ZeroZFiles={merged_d1_00z_files} mergedD2TwelveZFiles={merged_d2_12z_files} "
-        f"latency={result['latencyMs']}ms",
-        flush=True,
-    )
-    return result
-
-
-def _publish_incremental_shard_artifacts_to_gcs(
-    output_dir: Path,
-    index: Mapping[str, Any],
-    processed_hours: Iterable[int],
-    bucket_name: str,
-    prefix: str = "",
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    bucket_name = bucket_name.strip()
-    if not bucket_name:
-        return {"enabled": False, "latencyMs": 0, "currentFiles": 0, "completeFiles": 0}
-
-    client = _get_gcs_storage_client()
-    bucket = client.bucket(bucket_name)
-    output_dir = Path(output_dir)
-    current_files = 0
-    for forecast_hour in sorted({int(hour) for hour in processed_hours}):
-        hour_dir = output_dir / "hours" / f"f{forecast_hour:02d}"
-        current_files += _upload_directory_to_gcs(
-            bucket,
-            hour_dir,
-            _gcs_join(prefix, output_dir.name, "hours", f"f{forecast_hour:02d}"),
-        )
-
-    result = {
-        "enabled": True,
-        "bucket": bucket_name,
-        "prefix": prefix.strip("/"),
-        "currentFiles": current_files,
-        "completeFiles": 0,
-        "latencyMs": int((time.perf_counter() - started) * 1000),
-    }
-    print(
-        f"[gcs shard publish] bucket={bucket_name} prefix={result['prefix']} "
-        f"hours={sorted({int(hour) for hour in processed_hours})} "
-        f"currentFiles={current_files} latency={result['latencyMs']}ms",
-        flush=True,
-    )
-    return result
-
-
-def _finalize_sharded_incremental_snapshot(
-    output_dir: Path,
-    index: Mapping[str, Any],
-    requested_hours: Iterable[int],
-    bucket_name: str,
-    prefix: str = "",
-    timeout_seconds: int = 2700,
-    poll_seconds: int = 20,
-) -> dict[str, Any]:
-    requested = resolve_forecast_hours(requested_hours)
-    output_dir = Path(output_dir)
-    started = time.perf_counter()
-    deadline = started + max(1, int(timeout_seconds))
-    poll = max(1, int(poll_seconds))
-    cycle_time_iso = str(index.get("cycleTimeISO") or "")
-    artifact_generation_id = str(index.get("artifactGenerationId") or "") if index.get("artifactChangesThisRun") else ""
-    last_payload = dict(index)
-
-    while True:
-        _hydrate_incremental_artifacts_from_gcs(output_dir, bucket_name, prefix)
-        ready = [
-            hour
-            for hour in requested
-            if _incremental_hour_ready(
-                output_dir,
-                hour,
-                cycle_time_iso=cycle_time_iso,
-                artifact_generation_id=artifact_generation_id,
-            )
-        ]
-        failed_hours = _failed_incremental_hours_for_cycle(output_dir, requested, cycle_time_iso)
-        failed = sorted({int(item["forecastHour"]) for item in failed_hours})
-        pending = [hour for hour in requested if hour not in ready and hour not in failed]
-        status = "complete" if not pending and not failed else "partial"
-        last_payload = {
-            **dict(index),
-            "generatedAtISO": _now_iso(),
-            "requestedForecastHours": requested,
-            "processForecastHours": requested,
-            "readyForecastHours": ready,
-            "failedForecastHours": failed,
-            "failedHours": failed_hours,
-            "pendingForecastHours": pending,
-            "latestReadyForecastHour": ready[-1] if ready else None,
-            "status": status,
-            "taskShardFinalized": True,
-            "taskShardFinalizeLatencyMs": int((time.perf_counter() - started) * 1000),
-        }
-        _write_json(output_dir / "index.json", last_payload)
-        _write_json(output_dir / "metadata.json", last_payload)
-        if status == "complete":
-            _publish_complete_incremental_snapshot(output_dir, last_payload, requested)
-            _publish_incremental_artifacts_to_gcs(output_dir, last_payload, requested, bucket_name, prefix)
-            print(
-                f"[task shard finalize] complete ready={len(ready)} requested={len(requested)}",
-                flush=True,
-            )
-            return last_payload
-        if time.perf_counter() >= deadline:
-            _publish_incremental_artifacts_to_gcs(output_dir, last_payload, requested, bucket_name, prefix)
-            print(
-                f"[task shard finalize] timeout ready={len(ready)} pending={len(pending)} failed={len(failed)}",
-                flush=True,
-            )
-            return last_payload
-        print(
-            f"[task shard finalize] waiting ready={len(ready)} pending={len(pending)} failed={len(failed)}",
-            flush=True,
-        )
-        time.sleep(poll)
-
-
-def _hydrate_incremental_artifacts_from_gcs(
-    output_dir: Path,
-    bucket_name: str,
-    prefix: str = "",
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    bucket_name = bucket_name.strip()
-    if not bucket_name:
-        return {"enabled": False, "latencyMs": 0, "currentFiles": 0, "completeFiles": 0}
-
-    client = _get_gcs_storage_client()
-    bucket = client.bucket(bucket_name)
-    output_dir = Path(output_dir)
-    current_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, output_dir.name), output_dir)
-    complete_dir = _incremental_complete_output_dir(output_dir)
-    complete_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, complete_dir.name), complete_dir)
-    merged_d1_00z_dir = _merged_d1_00z_cache_dir(output_dir)
-    merged_d1_00z_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, merged_d1_00z_dir.name), merged_d1_00z_dir)
-    merged_d2_12z_dir = _merged_d2_12z_cache_dir(output_dir)
-    merged_d2_12z_files = _download_gcs_prefix_to_directory(bucket, _gcs_join(prefix, merged_d2_12z_dir.name), merged_d2_12z_dir)
-    result = {
-        "enabled": True,
-        "bucket": bucket_name,
-        "prefix": prefix.strip("/"),
-        "currentFiles": current_files,
-        "completeFiles": complete_files,
-        "mergedD1ZeroZFiles": merged_d1_00z_files,
-        "mergedD2TwelveZFiles": merged_d2_12z_files,
-        "latencyMs": int((time.perf_counter() - started) * 1000),
-    }
-    print(
-        f"[gcs hydrate] bucket={bucket_name} prefix={result['prefix']} "
-        f"currentFiles={current_files} completeFiles={complete_files} mergedD1ZeroZFiles={merged_d1_00z_files} "
-        f"mergedD2TwelveZFiles={merged_d2_12z_files} "
-        f"latency={result['latencyMs']}ms",
-        flush=True,
-    )
-    return result
-
-
-def _download_gcs_prefix_to_directory(bucket: Any, source_prefix: str, destination_dir: Path) -> int:
-    source_prefix = source_prefix.strip("/")
-    list_prefix = f"{source_prefix}/" if source_prefix else ""
-    downloaded = 0
-    try:
-        from google.api_core import exceptions as gcs_exceptions  # type: ignore
-    except Exception:  # noqa: BLE001
-        gcs_exceptions = None
-    for blob in bucket.list_blobs(prefix=list_prefix):
-        blob_name = str(blob.name)
-        if not blob_name or blob_name.endswith("/"):
-            continue
-        relative_name = blob_name[len(list_prefix):] if list_prefix and blob_name.startswith(list_prefix) else blob_name
-        if not relative_name:
-            continue
-        destination = destination_dir / Path(relative_name)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            blob.download_to_filename(str(destination))
-        except Exception as exc:  # noqa: BLE001
-            not_found = (
-                (gcs_exceptions is not None and isinstance(exc, gcs_exceptions.NotFound))
-                or type(exc).__name__ == "NotFound"
-            )
-            if not_found:
-                print(f"[gcs hydrate skip] missing object during concurrent publish {blob_name}", flush=True)
-                continue
-            raise
-        downloaded += 1
-    return downloaded
-
-
-def _upload_directory_to_gcs(bucket: Any, source_dir: Path, destination_prefix: str) -> int:
-    if not source_dir.exists():
-        return 0
-    source_dir = Path(source_dir)
-    files = sorted(path for path in source_dir.rglob("*") if path.is_file())
-    index_path = source_dir / "index.json"
-    ordered_files = [path for path in files if path != index_path]
-    if index_path in files:
-        ordered_files.append(index_path)
-
-    uploaded = 0
-    for source in ordered_files:
-        relative = source.relative_to(source_dir).as_posix()
-        blob = bucket.blob(_gcs_join(destination_prefix, relative))
-        blob.upload_from_filename(str(source))
-        uploaded += 1
-    return uploaded
-
-
-def _gcs_join(*parts: str | Path | None) -> str:
-    return "/".join(str(part).strip("/") for part in parts if part is not None and str(part).strip("/"))
-
-
-def _try_acquire_gcs_run_lock(
-    bucket_name: str,
-    lock_name: str,
-    ttl_seconds: int,
-) -> GcsRunLock | None:
-    bucket_name = bucket_name.strip()
-    lock_name = lock_name.strip().strip("/")
-    if not bucket_name or not lock_name:
-        return None
-
-    try:
-        from google.api_core import exceptions as gcs_exceptions  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("google-api-core is required for GCS run locking") from exc
-
-    client = _get_gcs_storage_client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(lock_name)
-    payload = {
-        "id": str(uuid.uuid4()),
-        "createdAtISO": _now_iso(),
-        "ttlSeconds": int(ttl_seconds),
-    }
-    for _ in range(2):
-        try:
-            blob.upload_from_string(
-                json.dumps(payload, indent=2, default=_json_default),
-                content_type="application/json",
-                if_generation_match=0,
-            )
-            generation = int(blob.generation) if getattr(blob, "generation", None) is not None else None
-            print(f"[run lock] acquired gs://{bucket_name}/{lock_name}", flush=True)
-            return GcsRunLock(bucket_name=bucket_name, blob_name=lock_name, generation=generation)
-        except gcs_exceptions.PreconditionFailed:
-            if _delete_stale_gcs_run_lock(blob, int(ttl_seconds), gcs_exceptions):
-                continue
-            print(f"[run lock] held gs://{bucket_name}/{lock_name}; skipping overlapping execution", flush=True)
-            return None
-    return None
-
-
-def _delete_stale_gcs_run_lock(blob: Any, ttl_seconds: int, gcs_exceptions: Any) -> bool:
-    try:
-        blob.reload()
-    except gcs_exceptions.NotFound:
-        return True
-    updated = getattr(blob, "updated", None)
-    generation = getattr(blob, "generation", None)
-    if updated is None:
-        return False
-    age_seconds = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
-    if age_seconds <= max(1, int(ttl_seconds)):
-        return False
-    try:
-        blob.delete(if_generation_match=generation)
-        print(f"[run lock] removed stale lock age={int(age_seconds)}s", flush=True)
-        return True
-    except (gcs_exceptions.NotFound, gcs_exceptions.PreconditionFailed):
-        return False
-
-
-def _release_gcs_run_lock(lock: GcsRunLock) -> None:
-    try:
-        from google.api_core import exceptions as gcs_exceptions  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        print(f"[run lock] release unavailable {type(exc).__name__}: {exc}", flush=True)
-        return
-    try:
-        bucket = _get_gcs_storage_client().bucket(lock.bucket_name)
-        blob = bucket.blob(lock.blob_name)
-        kwargs = {"if_generation_match": lock.generation} if lock.generation is not None else {}
-        blob.delete(**kwargs)
-        print(f"[run lock] released gs://{lock.bucket_name}/{lock.blob_name}", flush=True)
-    except gcs_exceptions.NotFound:
-        return
-    except gcs_exceptions.PreconditionFailed:
-        print(f"[run lock] not released because generation changed gs://{lock.bucket_name}/{lock.blob_name}", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[run lock] release failed {type(exc).__name__}: {exc}", flush=True)
-
-
 def _incremental_complete_output_dir(output_dir: Path) -> Path:
     output_dir = Path(output_dir)
     configured = os.environ.get("AUTOOUTLOOK_INCREMENTAL_COMPLETE_ARTIFACT_DIR")
@@ -2327,7 +1912,6 @@ def _incremental_hour_ready(
     output_dir: Path,
     forecast_hour: int,
     cycle_time_iso: str | None = None,
-    artifact_generation_id: str | None = None,
 ) -> bool:
     hour_dir = output_dir / "hours" / f"f{int(forecast_hour):02d}"
     if not all(
@@ -2339,7 +1923,6 @@ def _incremental_hour_ready(
     return (
         _incremental_metadata_has_focus_fields(metadata_path)
         and _incremental_metadata_matches_cycle(metadata_path, forecast_hour, cycle_time_iso)
-        and _incremental_metadata_matches_generation(metadata_path, artifact_generation_id)
     )
 
 
@@ -2358,16 +1941,6 @@ def _incremental_metadata_matches_cycle(path: Path, forecast_hour: int, cycle_ti
         return False
     expected = cycle_time + timedelta(hours=int(forecast_hour))
     return abs((valid_time - expected).total_seconds()) <= 60
-
-
-def _incremental_metadata_matches_generation(path: Path, artifact_generation_id: str | None = None) -> bool:
-    if not artifact_generation_id:
-        return True
-    try:
-        metadata = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return metadata.get("artifactGenerationId") == artifact_generation_id
 
 
 def _failed_incremental_hours_for_cycle(
@@ -2718,13 +2291,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Regenerate incremental hours even when existing artifacts are marked ready.")
     parser.add_argument("--continue-on-hour-failure", action="store_true", default=True)
     parser.add_argument("--stop-on-hour-failure", dest="continue_on_hour_failure", action="store_false")
-    parser.add_argument("--publish-gcs-bucket", default=os.environ.get("AUTOOUTLOOK_PUBLISH_GCS_BUCKET", ""), help="Upload finished incremental artifacts to this Cloud Storage bucket.")
-    parser.add_argument("--publish-gcs-prefix", default=os.environ.get("AUTOOUTLOOK_PUBLISH_GCS_PREFIX", ""), help="Optional object prefix for GCS artifact publishing.")
-    parser.add_argument("--gcs-lock-bucket", default=os.environ.get("AUTOOUTLOOK_RUN_LOCK_BUCKET", ""), help="Cloud Storage bucket used for best-effort overlap prevention.")
-    parser.add_argument("--gcs-lock-name", default=os.environ.get("AUTOOUTLOOK_RUN_LOCK_NAME", "locks/autooutlook-artifact-refresh.lock"), help="Object name used for the overlap-prevention lock.")
-    parser.add_argument("--gcs-lock-ttl-seconds", type=int, default=DEFAULT_GCS_LOCK_TTL_SECONDS, help="Seconds before an abandoned GCS run lock may be replaced.")
-    parser.add_argument("--task-shard-finalize-timeout-seconds", type=int, default=_env_int("AUTOOUTLOOK_TASK_SHARD_FINALIZE_TIMEOUT_SECONDS", 2700), help="Seconds task 0 waits for all task-sharded incremental hours before publishing the complete snapshot.")
-    parser.add_argument("--task-shard-finalize-poll-seconds", type=int, default=_env_int("AUTOOUTLOOK_TASK_SHARD_FINALIZE_POLL_SECONDS", 20), help="Seconds between task-shard finalization GCS hydrate checks.")
     args = parser.parse_args()
     if args.all_hours and args.forecast_hours:
         parser.error("--all-hours cannot be combined with --forecast-hours")
@@ -2743,148 +2309,75 @@ def resolve_cli_forecast_hours(args: argparse.Namespace) -> list[int]:
     return forecast_hours
 
 
-def cloud_run_task_shard_from_env(environ: Mapping[str, str] | None = None) -> CloudRunTaskShard | None:
-    env = environ if environ is not None else os.environ
-    raw_count = _optional_int(env.get("CLOUD_RUN_TASK_COUNT"))
-    raw_index = _optional_int(env.get("CLOUD_RUN_TASK_INDEX"))
-    if raw_count is None or raw_index is None or raw_count <= 1:
-        return None
-    if raw_index < 0 or raw_index >= raw_count:
-        raise ValueError(f"CLOUD_RUN_TASK_INDEX must be in 0..{raw_count - 1}: {raw_index}")
-    return CloudRunTaskShard(index=raw_index, count=raw_count)
-
-
-def resolve_cloud_run_task_forecast_hours(
-    forecast_hours: Iterable[int],
-    task_shard: CloudRunTaskShard | None,
-) -> list[int]:
-    hours = resolve_forecast_hours(forecast_hours)
-    if task_shard is None:
-        return hours
-    return [
-        hour
-        for ordinal, hour in enumerate(hours)
-        if ordinal % task_shard.count == task_shard.index
-    ]
-
-
-def _task_sharded_lock_name(lock_name: str, task_shard: CloudRunTaskShard | None) -> str:
-    clean = lock_name.strip().strip("/")
-    if task_shard is None:
-        return clean
-    return f"{clean}.task-{task_shard.index:02d}"
-
-
 def main() -> None:
     args = parse_args()
     incremental_mode = args.incremental or args.publish_each_hour
     forecast_hours = resolve_cli_forecast_hours(args)
-    task_shard = cloud_run_task_shard_from_env() if incremental_mode else None
-    process_forecast_hours = resolve_cloud_run_task_forecast_hours(forecast_hours, task_shard)
     cycle_policy = resolve_cycle_policy(args.cycle_policy, incremental=incremental_mode)
     output_dir = args.output_dir or (DEFAULT_INCREMENTAL_OUTPUT_DIR if incremental_mode else DEFAULT_OUTPUT_DIR)
-    run_lock = None
-    if args.gcs_lock_bucket:
-        lock_name = _task_sharded_lock_name(args.gcs_lock_name, task_shard)
-        run_lock = _try_acquire_gcs_run_lock(args.gcs_lock_bucket, lock_name, args.gcs_lock_ttl_seconds)
-        if run_lock is None:
-            print(json.dumps({
-                "status": "skipped",
-                "reason": "run_lock_held",
-                "lockBucket": args.gcs_lock_bucket,
-                "lockName": lock_name,
-            }, indent=2))
+    while True:
+        if incremental_mode:
+            metadata = run_incremental_pipeline(
+                output_dir=output_dir,
+                forecast_hours=forecast_hours,
+                max_workers=args.max_workers,
+                hour_workers=args.hour_workers,
+                range_workers=args.range_workers,
+                tile_stride=args.tile_stride,
+                grid_stride=args.grid_stride,
+                cache_dir=args.cache_dir,
+                cache_ttl_hours=args.cache_ttl_hours,
+                no_cache=args.no_cache,
+                hour_delay_seconds=args.hour_delay_seconds,
+                stop_after_hour=args.stop_after_hour,
+                continue_on_hour_failure=args.continue_on_hour_failure,
+                force=args.force,
+                cycle_policy=cycle_policy,
+                require_complete_hour=args.require_complete_hour,
+                verify_spc=not args.no_spc_verify,
+                model_name=args.model,
+            )
+        else:
+            metadata = run_pipeline(
+                output_dir=output_dir,
+                forecast_hours=forecast_hours,
+                max_workers=args.range_workers if args.max_workers is None else args.max_workers,
+                tile_stride=args.tile_stride,
+                grid_stride=args.grid_stride,
+                min_successful_hours=args.min_successful_hours,
+                cache_dir=args.cache_dir,
+                cache_ttl_hours=args.cache_ttl_hours,
+                no_cache=args.no_cache,
+                verify_spc=not args.no_spc_verify,
+                preview=not args.no_preview,
+                cycle_policy=cycle_policy,
+                require_complete_hour=args.require_complete_hour,
+                model_name=args.model,
+            )
+        print(json.dumps({
+            "outputDir": str(output_dir),
+            "cycle": metadata["cycle"],
+            "generatedAtISO": metadata["generatedAtISO"],
+            "latencyMs": metadata["latencyMs"],
+            "hourWorkers": metadata.get("hourWorkers"),
+            "rangeWorkers": metadata.get("rangeWorkers"),
+            "gridStride": metadata.get("gridStride"),
+            "tileStride": metadata.get("tileStride"),
+        }, indent=2))
+        if not args.loop:
             return
-    try:
-        while True:
-            if incremental_mode:
-                if args.publish_gcs_bucket:
-                    _hydrate_incremental_artifacts_from_gcs(output_dir, args.publish_gcs_bucket, args.publish_gcs_prefix)
-                metadata = run_incremental_pipeline(
-                    output_dir=output_dir,
-                    forecast_hours=forecast_hours,
-                    process_forecast_hours=process_forecast_hours,
-                    max_workers=args.max_workers,
-                    hour_workers=args.hour_workers,
-                    range_workers=args.range_workers,
-                    tile_stride=args.tile_stride,
-                    grid_stride=args.grid_stride,
-                    cache_dir=args.cache_dir,
-                    cache_ttl_hours=args.cache_ttl_hours,
-                    no_cache=args.no_cache,
-                    hour_delay_seconds=args.hour_delay_seconds,
-                    stop_after_hour=args.stop_after_hour,
-                    continue_on_hour_failure=args.continue_on_hour_failure,
-                    force=args.force,
-                    cycle_policy=cycle_policy,
-                    require_complete_hour=args.require_complete_hour,
-                    verify_spc=not args.no_spc_verify,
-                    publish_gcs_bucket=args.publish_gcs_bucket,
-                    publish_gcs_prefix=args.publish_gcs_prefix,
-                    model_name=args.model,
-                )
-                needs_shard_finalizer = (
-                    task_shard is not None
-                    and task_shard.index == 0
-                    and bool(args.publish_gcs_bucket)
-                    and (metadata.get("status") != "complete" or bool(metadata.get("artifactChangesThisRun")))
-                )
-                if needs_shard_finalizer:
-                    metadata = _finalize_sharded_incremental_snapshot(
-                        output_dir,
-                        metadata,
-                        forecast_hours,
-                        args.publish_gcs_bucket,
-                        args.publish_gcs_prefix,
-                        timeout_seconds=args.task_shard_finalize_timeout_seconds,
-                        poll_seconds=args.task_shard_finalize_poll_seconds,
-                    )
-            else:
-                metadata = run_pipeline(
-                    output_dir=output_dir,
-                    forecast_hours=forecast_hours,
-                    max_workers=args.range_workers if args.max_workers is None else args.max_workers,
-                    tile_stride=args.tile_stride,
-                    grid_stride=args.grid_stride,
-                    min_successful_hours=args.min_successful_hours,
-                    cache_dir=args.cache_dir,
-                    cache_ttl_hours=args.cache_ttl_hours,
-                    no_cache=args.no_cache,
-                    verify_spc=not args.no_spc_verify,
-                    preview=not args.no_preview,
-                    cycle_policy=cycle_policy,
-                    require_complete_hour=args.require_complete_hour,
-                    model_name=args.model,
-                )
-            print(json.dumps({
-                "outputDir": str(output_dir),
-                "cycle": metadata["cycle"],
-                "generatedAtISO": metadata["generatedAtISO"],
-                "latencyMs": metadata["latencyMs"],
-                "hourWorkers": metadata.get("hourWorkers"),
-                "rangeWorkers": metadata.get("rangeWorkers"),
-                "taskShard": {"index": task_shard.index, "count": task_shard.count} if task_shard else None,
-                "processForecastHours": metadata.get("processForecastHours"),
-                "gridStride": metadata.get("gridStride"),
-                "tileStride": metadata.get("tileStride"),
-            }, indent=2))
-            if not args.loop:
-                return
-            # Align the next run to a fixed wall-clock interval boundary instead
-            # of sleeping a fixed delay after the previous run finished. Sleeping
-            # `interval_minutes` from completion made the schedule drift by the
-            # duration of each run, so the loop never fired on the intended
-            # scheduled times. Anchoring to interval boundaries keeps successive
-            # runs on a stable cadence (for example :00 and :30 for a 30-minute
-            # interval) and, when a run overruns the interval, simply targets the
-            # next future boundary rather than falling further behind.
-            interval_seconds = max(60.0, args.interval_minutes * 60.0)
-            now = time.time()
-            next_run = (int(now // interval_seconds) + 1) * interval_seconds
-            time.sleep(max(0.0, next_run - now))
-    finally:
-        if run_lock is not None:
-            _release_gcs_run_lock(run_lock)
+        # Align the next run to a fixed wall-clock interval boundary instead
+        # of sleeping a fixed delay after the previous run finished. Sleeping
+        # `interval_minutes` from completion made the schedule drift by the
+        # duration of each run, so the loop never fired on the intended
+        # scheduled times. Anchoring to interval boundaries keeps successive
+        # runs on a stable cadence (for example :00 and :30 for a 30-minute
+        # interval) and, when a run overruns the interval, simply targets the
+        # next future boundary rather than falling further behind.
+        interval_seconds = max(60.0, args.interval_minutes * 60.0)
+        now = time.time()
+        next_run = (int(now // interval_seconds) + 1) * interval_seconds
+        time.sleep(max(0.0, next_run - now))
 
 
 if __name__ == "__main__":

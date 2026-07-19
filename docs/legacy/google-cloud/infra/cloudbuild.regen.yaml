@@ -1,3 +1,4 @@
+# Archived Google Cloud Build job; retained only as regeneration history.
 # Regenerate the ENH+ Risk Archive static catalog on Google Cloud Build.
 #
 # Stage 0 restores any previously-fetched HRRR source artifacts from GCS so the
