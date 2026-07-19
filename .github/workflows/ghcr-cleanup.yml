@@ -10,6 +10,10 @@ on:
     - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
+      delete_all:
+        description: 'Delete every retained AutoOutlook container version.'
+        required: false
+        default: 'false'
       min_versions_to_keep:
         description: 'Also trim tagged versions, keeping only this many most-recent. Leave at 0 to delete untagged versions only.'
         required: false
@@ -30,7 +34,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Delete all container versions
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.delete_all == 'true' }}
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: autooutlook
+          package-type: container
+          min-versions-to-keep: '0'
+
       - name: Delete untagged container versions
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.delete_all != 'true' }}
         uses: actions/delete-package-versions@v5
         with:
           package-name: autooutlook
@@ -38,7 +51,7 @@ jobs:
           delete-only-untagged-versions: 'true'
 
       - name: Trim retained versions (manual dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_versions_to_keep != '0' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.delete_all != 'true' && github.event.inputs.min_versions_to_keep != '0' }}
         uses: actions/delete-package-versions@v5
         with:
           package-name: autooutlook
