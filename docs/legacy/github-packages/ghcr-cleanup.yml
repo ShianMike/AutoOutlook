@@ -1,4 +1,4 @@
-name: Prune old GHCR images
+name: Archived GHCR package cleanup
 
 # Reclaims GitHub "Actions storage" (shared with Packages) by removing
 # untagged/dangling container versions left behind by image rebuilds, and

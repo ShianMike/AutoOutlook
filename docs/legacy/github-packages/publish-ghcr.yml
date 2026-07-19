@@ -1,4 +1,4 @@
-name: Publish AutoOutlook package
+name: Archived GHCR package publisher
 
 on:
   release:

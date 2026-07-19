@@ -1,18 +1,20 @@
 # Free Direct Refresh With Cloudflare Pages
 
-This is the self-contained production refresh path. The scheduled GitHub Actions
-job generates the finished F00-F48 artifact bundle and deploys `dist` directly
-to Cloudflare Pages.
+This is the self-contained production refresh path. GitHub Actions supplies the
+temporary scheduled runner, while Cloudflare's official Wrangler Action uploads
+the finished F00-F48 `dist` bundle to Cloudflare Pages for storage and serving.
 
 ## Why this is the free default
 
 - `ShianMike/AutoOutlook` is a public repository, so standard GitHub-hosted
   Actions minutes are free for this workflow.
 - The workflow does not use `actions/upload-artifact`, `actions/cache`, package
-  registries, persistent artifact storage, or paid cloud runtime services.
+  registries, persistent GitHub storage, or paid cloud runtime services.
 - Cloudflare Pages serves the deployed static site/API bundle.
 - Generated HRRR files, Python wheels, Node modules, and deploy output live only
   on the temporary GitHub runner and are discarded after the run.
+- Deployment uses `cloudflare/wrangler-action@v3`, the current Cloudflare Pages
+  continuous-integration path, with Wrangler pinned to major version 4.
 
 ## Workflow
 
@@ -71,3 +73,6 @@ longer appears as an active GitHub Actions workflow.
 The companion notes and configs live under `docs/legacy/google-cloud/` and
 `infra/gcp/`. Keep the archived scheduler disabled while the direct workflow is
 healthy.
+
+The retired GitHub Container Registry publisher and cleanup workflow live under
+`docs/legacy/github-packages/`. They are not active production workflows.

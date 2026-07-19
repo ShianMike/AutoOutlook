@@ -1,4 +1,4 @@
-name: Free direct refresh to Cloudflare
+name: Generate and deploy Cloudflare Pages
 
 on:
   schedule:
@@ -30,9 +30,6 @@ env:
   AUTOOUTLOOK_RANGE_COALESCE_GAP_BYTES: '2097152'
   AUTOOUTLOOK_GRID_STRIDE: '2'
   AUTOOUTLOOK_TILE_STRIDE: '1'
-  AUTOOUTLOOK_CLEANUP_AFTER_DEPLOY: 'true'
-  AUTOOUTLOOK_CLEANUP_CACHE_AFTER_DEPLOY: 'true'
-  AUTOOUTLOOK_CACHE_MAX_AGE_DAYS: '1'
 
 jobs:
   refresh:
@@ -58,18 +55,53 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libgomp1
 
-      - name: Generate artifacts and deploy Cloudflare Pages
+      - name: Generate Cloudflare Pages bundle
+        id: prepare
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           AUTOOUTLOOK_FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
           AUTOOUTLOOK_VENV_DIR: ${{ runner.temp }}/autooutlook-venv
           AUTOOUTLOOK_STATE_DIR: ${{ runner.temp }}/autooutlook-state
           AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ runner.temp }}/autooutlook-hrrr-cache
           AUTOOUTLOOK_LOG_DIR: ${{ runner.temp }}/autooutlook-logs
         run: |
-          refresh_args=(-NoProfile -File scripts/windows/refresh-autooutlook.ps1 -SkipEnvFile)
+          refresh_args=(-NoProfile -File scripts/windows/refresh-autooutlook.ps1 -SkipEnvFile -SkipDeploy)
           if [ "${AUTOOUTLOOK_FORCE_DEPLOY}" = "true" ]; then
             refresh_args+=(-Force)
           fi
           pwsh "${refresh_args[@]}"
+
+      - name: Deploy bundle with Cloudflare Wrangler Action
+        id: deploy
+        if: ${{ steps.prepare.outputs.deploy_required == 'true' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: pages deploy dist --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=${{ env.CLOUDFLARE_PAGES_BRANCH }} --commit-dirty=true
+
+      - name: Verify production serves the deployed cycle
+        if: ${{ steps.prepare.outputs.deploy_required == 'true' }}
+        shell: pwsh
+        env:
+          EXPECTED_CYCLE_TIME_ISO: ${{ steps.prepare.outputs.cycle_time_iso }}
+        run: |
+          $separator = if ($env:AUTOOUTLOOK_PRODUCTION_INDEX_URL.Contains('?')) { '&' } else { '?' }
+          $verificationUrl = "$env:AUTOOUTLOOK_PRODUCTION_INDEX_URL${separator}deployment=$env:GITHUB_RUN_ID"
+          for ($attempt = 1; $attempt -le 18; $attempt++) {
+            try {
+              $payload = Invoke-RestMethod -Uri $verificationUrl -TimeoutSec 20
+              $ready = @($payload.readyForecastHours)
+              $productionCycleTimeIso = ([DateTimeOffset]$payload.cycleTimeISO).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+              if ($productionCycleTimeIso -eq $env:EXPECTED_CYCLE_TIME_ISO -and $payload.status -eq 'complete' -and $ready.Count -ge 49) {
+                Write-Host "Cloudflare production confirmed $env:EXPECTED_CYCLE_TIME_ISO with $($ready.Count) forecast hours."
+                exit 0
+              }
+              Write-Host "Attempt $attempt: production reports $productionCycleTimeIso, expected $env:EXPECTED_CYCLE_TIME_ISO."
+            }
+            catch {
+              Write-Host "Attempt $attempt: production verification failed: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 10
+          }
+          throw "Cloudflare production did not confirm $env:EXPECTED_CYCLE_TIME_ISO within three minutes."

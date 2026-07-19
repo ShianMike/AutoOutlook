@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [switch]$SkipEnvFile
+    [switch]$SkipEnvFile,
+    [switch]$SkipDeploy
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,32 @@ function Require-Env {
         throw "Missing required environment variable: $Name"
     }
     return $value
+}
+
+function Set-WorkflowOutput {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
+        return
+    }
+    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "$Name=$Value" -Encoding UTF8
+}
+
+function ConvertTo-UtcIsoString {
+    param([object]$Value)
+
+    try {
+        return ([DateTimeOffset]$Value).ToUniversalTime().ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    catch {
+        return [string]$Value
+    }
 }
 
 function Test-WindowsPlatform {
@@ -162,11 +189,12 @@ function Test-ProductionHasCycle {
     try {
         $payload = Invoke-RestMethod -Uri $env:AUTOOUTLOOK_PRODUCTION_INDEX_URL -TimeoutSec 20
         $ready = @($payload.readyForecastHours)
-        if ($payload.cycleTimeISO -eq $CycleTimeIso -and $payload.status -eq "complete" -and $ready.Count -ge 49) {
+        $productionCycleTimeIso = ConvertTo-UtcIsoString $payload.cycleTimeISO
+        if ($productionCycleTimeIso -eq $CycleTimeIso -and $payload.status -eq "complete" -and $ready.Count -ge 49) {
             Write-Host "Production already has this complete cycle."
             return $true
         }
-        Write-Host "Production cycle is '$($payload.cycleTimeISO)', expected '$CycleTimeIso'."
+        Write-Host "Production cycle is '$productionCycleTimeIso', expected '$CycleTimeIso'."
         return $false
     }
     catch {
@@ -256,8 +284,10 @@ else {
     Write-Host "Skipping env file import; using process environment."
 }
 
-Require-Env "CLOUDFLARE_ACCOUNT_ID" | Out-Null
-Require-Env "CLOUDFLARE_API_TOKEN" | Out-Null
+if (-not $SkipDeploy) {
+    Require-Env "CLOUDFLARE_ACCOUNT_ID" | Out-Null
+    Require-Env "CLOUDFLARE_API_TOKEN" | Out-Null
+}
 
 $script:RepoDir = if ($env:AUTOOUTLOOK_REPO_DIR) { $env:AUTOOUTLOOK_REPO_DIR } else { (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
 $defaultDataRoot = Get-DefaultDataRoot
@@ -295,10 +325,6 @@ try {
     Set-Location -LiteralPath $script:RepoDir
 
     $python = Invoke-Step "Prepare Python dependencies" { Ensure-PythonEnvironment }
-    Invoke-Step "Prepare frontend dependencies" { Ensure-NodeDependencies }
-    Invoke-Step "Bootstrap runtime hazard models" {
-        Invoke-NativeCommand $python @("-m", "backend.ml.bootstrap_models")
-    }
 
     $cyclePath = Join-Path $script:StateDir "cycle.json"
     Invoke-Step "Detect latest complete HRRR cycle" {
@@ -310,8 +336,16 @@ try {
     }
 
     $cycle = Get-Content -LiteralPath $cyclePath -Raw | ConvertFrom-Json
-    if (Test-ProductionHasCycle -CycleTimeIso $cycle.cycleTimeISO) {
+    $cycleTimeIso = ConvertTo-UtcIsoString $cycle.cycleTimeISO
+    Set-WorkflowOutput -Name "cycle_time_iso" -Value $cycleTimeIso
+    if (Test-ProductionHasCycle -CycleTimeIso $cycleTimeIso) {
+        Set-WorkflowOutput -Name "deploy_required" -Value "false"
         exit 0
+    }
+
+    Invoke-Step "Prepare frontend dependencies" { Ensure-NodeDependencies }
+    Invoke-Step "Bootstrap runtime hazard models" {
+        Invoke-NativeCommand $python @("-m", "backend.ml.bootstrap_models")
     }
 
     Invoke-Step "Generate incremental artifacts" {
@@ -331,10 +365,17 @@ try {
 
     Invoke-Step "Build frontend" { Invoke-NativeCommand "npm" @("run", "build") }
     Invoke-Step "Export static API" { Invoke-NativeCommand $python @("scripts/export-static-api.py") }
+
+    if ($SkipDeploy) {
+        Set-WorkflowOutput -Name "deploy_required" -Value "true"
+        Write-Host "Cloudflare Pages bundle is ready in dist; deployment delegated to the caller."
+        exit 0
+    }
+
     Invoke-Step "Deploy to Cloudflare Pages" {
         Invoke-NativeCommand "npx" @(
             "--yes",
-            "wrangler@latest",
+            "wrangler@4",
             "pages",
             "deploy",
             "dist",
@@ -344,7 +385,7 @@ try {
         )
     }
 
-    $productionConfirmed = Test-ProductionHasCycle -CycleTimeIso $cycle.cycleTimeISO -IgnoreForce
+    $productionConfirmed = Test-ProductionHasCycle -CycleTimeIso $cycleTimeIso -IgnoreForce
     if (-not $productionConfirmed) {
         Write-Host "[cleanup] skipped because production did not confirm the deployed cycle yet."
     }

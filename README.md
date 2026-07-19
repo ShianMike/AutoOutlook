@@ -2,7 +2,7 @@
 
 **Automated Convective Risk Intelligence**
 
-[![Free direct refresh to Cloudflare](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-direct-refresh.yml/badge.svg)](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-direct-refresh.yml)
+[![Generate and deploy Cloudflare Pages](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-direct-refresh.yml/badge.svg)](https://github.com/ShianMike/AutoOutlook/actions/workflows/free-direct-refresh.yml)
 
 AutoOutlook is an open-source severe-weather outlook dashboard and artifact pipeline. It turns selected HRRR model fields into SPC-style risk products, hazard probability grids, verification summaries, and a public React dashboard.
 
@@ -32,16 +32,15 @@ Severe-weather model guidance is often hard to inspect end to end: raw GRIB2 fil
 - Supports cost-controlled static and API hosting through Cloudflare Pages with scheduled artifact refreshes.
 - Keeps a leakage guard between model prediction and verification: official SPC outlook data is used only after prediction artifacts are generated.
 
-## Release package
+## Production hosting
 
-Tagged releases publish a container image to GitHub Container Registry:
+GitHub stores the source code and provides temporary scheduled compute. Generated
+HRRR inputs and deploy bundles are not uploaded to GitHub storage. The final
+static site/API bundle is uploaded and served by Cloudflare Pages through
+Cloudflare's official Wrangler Action.
 
-```powershell
-docker pull ghcr.io/shianmike/autooutlook:latest
-docker pull ghcr.io/shianmike/autooutlook:v0.9
-```
-
-The image contains the built React dashboard and Python backend service from the release tag.
+The old GHCR release-image publisher is retired and archived under
+`docs/legacy/github-packages/`; container packages are not part of production.
 
 ## Repository health
 
@@ -149,12 +148,12 @@ Production should keep the public website online while serving only finished art
 The scheduled refresh now uses the free direct GitHub Actions path:
 
 - `.github/workflows/free-direct-refresh.yml` runs after the 00Z/06Z/12Z/18Z HRRR extended cycles normally have f48, with backup starts 15 minutes later.
-- The workflow generates the complete F00-F48 cycle on a temporary standard GitHub-hosted runner and deploys `dist` directly to Cloudflare Pages.
+- The workflow generates the complete F00-F48 cycle on a temporary standard GitHub-hosted runner and deploys `dist` with Cloudflare's official Wrangler Action.
 - It does not use persistent artifact storage, package registries, or paid cloud runtime services.
 
 See `docs/free-direct-refresh.md` for the active free path. Old provider-specific
-fallback notes are archived under `docs/legacy/google-cloud/` and are not part
-of the normal production path.
+fallback notes and package workflows are archived under `docs/legacy/` and are
+not part of the normal production path.
 
 ## Project layout
 
