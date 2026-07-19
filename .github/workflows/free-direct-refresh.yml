@@ -97,10 +97,10 @@ jobs:
                 Write-Host "Cloudflare production confirmed $env:EXPECTED_CYCLE_TIME_ISO with $($ready.Count) forecast hours."
                 exit 0
               }
-              Write-Host "Attempt $attempt: production reports $productionCycleTimeIso, expected $env:EXPECTED_CYCLE_TIME_ISO."
+              Write-Host "Attempt ${attempt}: production reports $productionCycleTimeIso, expected $env:EXPECTED_CYCLE_TIME_ISO."
             }
             catch {
-              Write-Host "Attempt $attempt: production verification failed: $($_.Exception.Message)"
+              Write-Host "Attempt ${attempt}: production verification failed: $($_.Exception.Message)"
             }
             Start-Sleep -Seconds 10
           }
