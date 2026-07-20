@@ -1065,11 +1065,10 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
         self.assertTrue(aware["report"]["spcCategoryWeighting"])
         self.assertAlmostEqual(aware["report"]["spcSupportWeightMax"], 0.65)
 
-    def test_spc_category_cannot_raise_risk_above_model_only_hazard_support(self) -> None:
-        # Regression for the 2026-07-20 merged D2 mismatch: model hazards top
-        # out at SLGT thresholds while the SPC categorical outlook says ENH.
-        # Without an SPC hazard probability outlook, the categorical blend must
-        # not manufacture an ENH risk area beside 5%/15%/15% hazard contours.
+    def test_spc_category_does_not_infer_hazards_when_outlook_is_unavailable(self) -> None:
+        # A categorical outlook is hazard-agnostic. Without actual SPC hazard
+        # layers, keep the model probabilities unchanged rather than inventing
+        # a 30% wind (or any other) contour from ENH alone.
         lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
         lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
         hrrr_grid = np.full((3, 3), 3, dtype=np.int16)  # SLGT
@@ -1094,28 +1093,34 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             weight=0.5,
         )
 
-        self.assertEqual(int(np.max(out["category_grid"])), 3)
+        self.assertEqual(int(np.max(out["category_grid"])), 4)
         self.assertAlmostEqual(float(np.max(out["probabilities"]["tornado"])), 0.05)
         self.assertAlmostEqual(float(np.max(out["probabilities"]["hail"])), 0.15)
         self.assertAlmostEqual(float(np.max(out["probabilities"]["wind"])), 0.15)
-        consistency = out["report"]["categoryHazardConsistency"]
-        self.assertEqual(consistency["cappedSpcUpgradeCells"], 9)
-        self.assertEqual(consistency["maxCategoryBefore"], "ENH")
-        self.assertEqual(consistency["maxCategoryAfter"], "SLGT")
+        self.assertEqual(
+            out["report"]["hazardProbabilityBlendPolicy"],
+            "weighted_blend_preserve_category_driver_contour_then_ceiling",
+        )
+        self.assertEqual(
+            out["report"]["hazardSourceContourPreservedCells"],
+            {"tornado": 0, "hail": 0, "wind": 0},
+        )
 
-    def test_spc_category_upgrade_requires_final_blended_hazard_threshold(self) -> None:
-        # The live mismatch had a 29% model wind field blended with SPC's 30%,
-        # yielding 29.5%. Under the 2026 Probability+CIG table, both 29.5% and
-        # 30% wind without CIG remain SLGT; a true 45% no-CIG field may retain
-        # the ENH upgrade.
-        lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
-        lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
-        hrrr_grid = np.full((3, 3), 3, dtype=np.int16)  # SLGT
+    def test_enh_blend_preserves_actual_spc_30_percent_wind_driver(self) -> None:
+        # Exact 2026-07-20 D2 regression. The model supplied 29% wind and SPC
+        # supplied a real 30% wind contour. A flat average is 29.5%, which made
+        # vectorization display only 15% beside an ENH category. Preserve the
+        # actual 30% category-driving source contour without promoting the
+        # unrelated tornado or hail hazards.
+        lat_axis = np.linspace(34.0, 38.0, 9)
+        lon_axis = np.linspace(-99.0, -96.0, 9)
+        lons, lats = np.meshgrid(lon_axis, lat_axis)
+        hrrr_grid = np.full((9, 9), 3, dtype=np.int16)  # SLGT
         base_probs = {
-            "tornado": np.full((3, 3), 0.05),
-            "hail": np.full((3, 3), 0.15),
-            "wind": np.full((3, 3), 0.29),
-            "thunder": np.full((3, 3), 0.40),
+            "tornado": np.full((9, 9), 0.099),
+            "hail": np.full((9, 9), 0.29),
+            "wind": np.full((9, 9), 0.29),
+            "thunder": np.full((9, 9), 0.40),
         }
         spc_geojson = _make_spc_geojson(
             label="ENH",
@@ -1127,7 +1132,7 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
         )
 
-        near_threshold = blend_merged_outlook_with_spc(
+        out = blend_merged_outlook_with_spc(
             lats,
             lons,
             hrrr_grid,
@@ -1136,45 +1141,39 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
             weight=0.5,
             spc_hazard_geojson=spc_hazards,
         )
-        self.assertAlmostEqual(float(np.max(near_threshold["probabilities"]["wind"])), 0.295)
-        self.assertEqual(int(np.max(near_threshold["category_grid"])), 3)
-
-        at_thirty = blend_merged_outlook_with_spc(
-            lats,
-            lons,
-            hrrr_grid,
-            {**base_probs, "wind": np.full((3, 3), 0.30)},
-            spc_geojson,
-            weight=0.5,
-            spc_hazard_geojson=spc_hazards,
-        )
-        self.assertLessEqual(float(np.max(at_thirty["probabilities"]["wind"])), 0.30)
-        self.assertEqual(int(np.max(at_thirty["category_grid"])), 3)
-
-        spc_enh_hazards = _make_spc_hazard_geojson(
-            {"tornado": 0.05, "hail": 0.15, "wind": 0.45},
-            polygon=[[[-100.0, 33.0], [-95.0, 33.0], [-95.0, 39.0], [-100.0, 39.0], [-100.0, 33.0]]],
-        )
-        at_threshold = blend_merged_outlook_with_spc(
-            lats,
-            lons,
-            hrrr_grid,
-            {**base_probs, "wind": np.full((3, 3), 0.45)},
-            spc_geojson,
-            weight=0.5,
-            spc_hazard_geojson=spc_enh_hazards,
-        )
-        self.assertAlmostEqual(float(np.max(at_threshold["probabilities"]["wind"])), 0.45)
-        self.assertEqual(int(np.max(at_threshold["category_grid"])), 4)
+        self.assertEqual(int(np.max(out["category_grid"])), 4)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["wind"])), 0.30)
+        self.assertLess(float(np.max(out["probabilities"]["tornado"])), 0.10)
+        self.assertLess(float(np.max(out["probabilities"]["hail"])), 0.30)
         self.assertEqual(
-            at_threshold["report"]["categoryHazardConsistency"]["cappedSpcUpgradeCells"],
-            0,
+            out["report"]["hazardSourceContourPreservedCells"],
+            {"tornado": 0, "hail": 0, "wind": 81},
         )
 
-    def test_spc_support_blends_with_actual_spc_hazard_probabilities(self) -> None:
-        # Hazard probabilities use SPC's actual hazard probability layers, not a
-        # category-derived proxy. Equal 5% model/SPC tornado stays 5%; 15% model
-        # against 5% SPC becomes 10% with the default 50/50 probability blend.
+        from backend.ml.gridded_outlook import hazard_probability_shapes_from_grids
+
+        shapes = hazard_probability_shapes_from_grids(
+            lats,
+            lons,
+            out["probabilities"],
+            out["category_grid"],
+            forecast_hour=0,
+            valid_time_iso="2026-07-20T12:00:00Z",
+            min_cells=1,
+        )
+        thresholds: dict[str, list[float]] = {}
+        for feature in shapes["features"]:
+            properties = feature["properties"]
+            thresholds.setdefault(properties["hazard"], []).append(properties["threshold"])
+        self.assertEqual(thresholds["tornado"], [0.02, 0.05])
+        self.assertEqual(thresholds["hail"], [0.05, 0.15])
+        self.assertEqual(thresholds["wind"], [0.05, 0.15, 0.30])
+        self.assertEqual(thresholds["thunder"], [0.10, 0.40])
+
+    def test_spc_support_preserves_category_driving_source_probabilities(self) -> None:
+        # Hazard probabilities use actual per-hazard sources. When a source
+        # probability supports the final category, its contour survives the
+        # weighted blend; values are never synthesized from category alone.
         lats = np.array([[34.0, 34.0, 34.0], [36.0, 36.0, 36.0], [38.0, 38.0, 38.0]])
         lons = np.array([[-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0], [-99.0, -97.0, -96.0]])
         hrrr_grid = np.full((3, 3), 4, dtype=np.int16)  # ENH
@@ -1207,20 +1206,13 @@ class TestMergeCyclesForSpcWindow(unittest.TestCase):
         self.assertTrue(out["report"]["hazardProbabilitiesBlended"])
         self.assertEqual(
             out["report"]["hazardProbabilitySources"]["tornado"],
-            "official_spc_hazard_probability",
+            "weighted_model_spc_with_driver_contour_floor",
         )
-        self.assertAlmostEqual(float(np.max(out["probabilities"]["tornado"])), 0.10)
-        self.assertAlmostEqual(float(np.max(out["probabilities"]["hail"])), 0.225)
-        self.assertAlmostEqual(float(np.max(out["probabilities"]["wind"])), 0.225)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["tornado"])), 0.15)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["hail"])), 0.30)
+        self.assertAlmostEqual(float(np.max(out["probabilities"]["wind"])), 0.30)
         self.assertAlmostEqual(float(np.max(out["probabilities"]["thunder"])), 0.55)
-        # The model was already ENH before SPC blending (for example, it may
-        # have model CIG support), so reconciliation must not erase that model
-        # category merely because merged CIG grids are not available here.
         self.assertEqual(int(np.max(out["category_grid"])), 4)
-        self.assertEqual(
-            out["report"]["categoryHazardConsistency"]["maxProbabilitySupportedCategory"],
-            "SLGT",
-        )
 
         equal = blend_merged_outlook_with_spc(
             lats,
