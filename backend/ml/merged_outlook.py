@@ -38,6 +38,7 @@ from backend.ml.gridded_outlook import (
     risk_polygons_from_grid,
     hazard_probability_shapes_from_grids,
 )
+from backend.ml.spc_categories import category_from_probability_and_cig, category_ordinal
 
 
 SPC_ANCHORED_OUTLOOK_FLAG = "AUTOOUTLOOK_SPC_ANCHORED_OUTLOOK"
@@ -126,6 +127,55 @@ def _category_aware_weight_grid(base_weight: float, spc_grid: np.ndarray) -> np.
             weights,
         )
     return weights
+
+
+def _probability_supported_category_grid(
+    probabilities: Mapping[str, np.ndarray],
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    """Highest SPC category directly supported by the displayed probabilities.
+
+    This intentionally uses the ordinary, non-CIG probability thresholds. The
+    model category grid is considered separately by the SPC blend so a model
+    category that was already raised by CIG or post-processing is preserved.
+    Here we only need to decide whether the *final blended hazards* justify an
+    additional category upgrade beyond the model's own category.
+    """
+    zero = np.zeros(shape, dtype=float)
+    hazard_thresholds = {
+        "tornado": _TORNADO_PROBABILITY_THRESHOLDS,
+        "hail": _SEVERE_PROBABILITY_THRESHOLDS,
+        "wind": _SEVERE_PROBABILITY_THRESHOLDS,
+    }
+    hazard_ordinals: list[np.ndarray] = []
+    for hazard, thresholds in hazard_thresholds.items():
+        values = np.clip(
+            np.asarray(probabilities.get(hazard, zero), dtype=float),
+            0.0,
+            1.0,
+        )
+        ordinal_grid = np.zeros(shape, dtype=np.int16)
+        for threshold in thresholds:
+            # Missing merged CIG data means the official <CIG1 column. Resolve
+            # every contour threshold through the 2026 Probability+CIG table
+            # instead of duplicating (or using the legacy SIG-era ladder).
+            threshold_ordinal = category_ordinal(
+                category_from_probability_and_cig(hazard, threshold, 0)
+            )
+            ordinal_grid = np.where(
+                values >= threshold,
+                np.maximum(ordinal_grid, threshold_ordinal),
+                ordinal_grid,
+            )
+        hazard_ordinals.append(ordinal_grid)
+    severe = np.maximum.reduce(hazard_ordinals)
+    thunder_values = probabilities.get("thunder", probabilities.get("thunderstorm", zero))
+    thunder = np.clip(np.asarray(thunder_values, dtype=float), 0.0, 1.0)
+    return np.where(
+        severe > 0,
+        severe,
+        np.where(thunder >= _THUNDER_PROBABILITY_THRESHOLDS[0], 1, 0),
+    ).astype(np.int16)
 
 
 def _spc_hazard_probability_available(
@@ -329,8 +379,12 @@ def blend_merged_outlook_with_spc(
     hours stay quiet and no risk is drawn where SPC drew none, but the model is
     never inflated. ``weight`` is ignored in this mode.
 
+    In blend mode, an SPC-driven category upgrade is retained only when either
+    the model category already supports it (including model CIG reasoning) or
+    the final blended hazard probabilities reach that category. This prevents
+    an ENH categorical contour from appearing beside only SLGT-level hazards.
     In both modes the hazard probabilities (and implied CIG / hazard overlays)
-    are clipped to stay consistent with the resulting categories.
+    are then clipped to stay consistent with the resulting categories.
     """
     normalized_mode = str(mode).strip().lower()
     weight = min(1.0, max(0.0, float(weight)))
@@ -407,6 +461,31 @@ def blend_merged_outlook_with_spc(
                 hazard_sources[hazard_key] = "model_only_no_spc_hazard_probability"
         support_weight_max = float(np.max(weight_grid))
 
+    category_hazard_consistency = {
+        "applied": False,
+        "cappedSpcUpgradeCells": 0,
+    }
+    if normalized_mode == "blend":
+        category_before_hazard_support = blended_grid.copy()
+        probability_supported_grid = _probability_supported_category_grid(
+            blended_probabilities,
+            hrrr_grid.shape,
+        )
+        # Preserve every category the model already supported (including CIG
+        # and post-processing), but require final hazard support for any extra
+        # lift introduced solely by the SPC categorical blend.
+        category_support_ceiling = np.maximum(hrrr_grid, probability_supported_grid)
+        blended_grid = np.minimum(blended_grid, category_support_ceiling).astype(np.int16)
+        capped_upgrade_mask = blended_grid < category_before_hazard_support
+        category_hazard_consistency = {
+            "applied": True,
+            "cappedSpcUpgradeCells": int(np.sum(capped_upgrade_mask)),
+            "maxCategoryBefore": SPC_RISK_LABELS[int(np.max(category_before_hazard_support))],
+            "maxCategoryAfter": SPC_RISK_LABELS[int(np.max(blended_grid))],
+            "maxProbabilitySupportedCategory": SPC_RISK_LABELS[int(np.max(probability_supported_grid))],
+            "maxModelCategory": SPC_RISK_LABELS[int(np.max(hrrr_grid))],
+        }
+
     ceiling = apply_category_probability_ceiling(
         blended_probabilities,
         blended_grid,
@@ -427,6 +506,7 @@ def blend_merged_outlook_with_spc(
         "blendedCategoryCells": int(np.sum(blended_grid > 0)),
         "raisedTowardSpcCells": int(np.sum(blended_grid > hrrr_grid)),
         "loweredTowardSpcCells": int(np.sum(blended_grid < hrrr_grid)),
+        "categoryHazardConsistency": category_hazard_consistency,
         "categoryConsistency": ceiling.report,
     }
     return {
