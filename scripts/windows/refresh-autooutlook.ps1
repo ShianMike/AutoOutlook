@@ -77,6 +77,38 @@ function Get-ExpectedD2ForecastDate {
     return ""
 }
 
+function Get-CarriedD2ForecastDate {
+    $baseUrl = if ($env:AUTOOUTLOOK_D2_CARRY_FORWARD_BASE_URL) {
+        $env:AUTOOUTLOOK_D2_CARRY_FORWARD_BASE_URL.TrimEnd("/")
+    }
+    else {
+        $indexUri = [Uri]$env:AUTOOUTLOOK_PRODUCTION_INDEX_URL
+        $indexUri.GetLeftPart([UriPartial]::Authority)
+    }
+
+    $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $available = Invoke-RestMethod `
+        -Uri "$baseUrl/api/outlook/merged-d2-available-dates?carry_forward=$cacheBuster" `
+        -TimeoutSec 20
+    $nowUtc = [DateTimeOffset]::UtcNow
+    foreach ($dateValue in @($available.dates) | Sort-Object -Descending) {
+        try {
+            $expiresAt = [DateTimeOffset]::ParseExact(
+                "${dateValue}T12:00:00Z",
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                [Globalization.CultureInfo]::InvariantCulture
+            ).ToUniversalTime()
+            if ($nowUtc -lt $expiresAt) {
+                return [string]$dateValue
+            }
+        }
+        catch {
+            Write-Host "Ignoring invalid production D2 date '$dateValue'."
+        }
+    }
+    return ""
+}
+
 function Test-ProductionHasD2 {
     param([string]$ForecastDate)
 
@@ -401,6 +433,9 @@ try {
     $cycle = Get-Content -LiteralPath $cyclePath -Raw | ConvertFrom-Json
     $cycleTimeIso = ConvertTo-UtcIsoString $cycle.cycleTimeISO
     $expectedD2Date = Get-ExpectedD2ForecastDate $cycleTimeIso
+    if ([string]::IsNullOrWhiteSpace($expectedD2Date)) {
+        $expectedD2Date = Get-CarriedD2ForecastDate
+    }
     Set-WorkflowOutput -Name "cycle_time_iso" -Value $cycleTimeIso
     Set-WorkflowOutput -Name "d2_forecast_date" -Value $expectedD2Date
     if (Test-ProductionHasCycle -CycleTimeIso $cycleTimeIso) {

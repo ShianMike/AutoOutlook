@@ -12,6 +12,10 @@ on:
         description: 'Generate and deploy even when production already reports the detected cycle.'
         required: false
         default: 'false'
+      d2_carry_forward_base_url:
+        description: 'Optional prior Cloudflare deployment used to recover a still-valid D2 archive.'
+        required: false
+        default: ''
 
 concurrency:
   group: autooutlook-free-direct-refresh
@@ -59,6 +63,7 @@ jobs:
         id: prepare
         env:
           AUTOOUTLOOK_FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
+          AUTOOUTLOOK_D2_CARRY_FORWARD_BASE_URL: ${{ github.event.inputs.d2_carry_forward_base_url || '' }}
           AUTOOUTLOOK_VENV_DIR: ${{ runner.temp }}/autooutlook-venv
           AUTOOUTLOOK_STATE_DIR: ${{ runner.temp }}/autooutlook-state
           AUTOOUTLOOK_HRRR_CACHE_DIR: ${{ runner.temp }}/autooutlook-hrrr-cache

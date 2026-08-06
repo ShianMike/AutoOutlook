@@ -50,6 +50,9 @@ MAX_REMOTE_D2_FILE_BYTES = 64 * 1024 * 1024
 
 
 def default_production_base_url() -> str:
+    carry_forward_override = os.environ.get("AUTOOUTLOOK_D2_CARRY_FORWARD_BASE_URL", "").strip()
+    if carry_forward_override:
+        return carry_forward_override.rstrip("/")
     explicit = os.environ.get("AUTOOUTLOOK_PRODUCTION_BASE_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -357,7 +360,7 @@ def _future_d2_dates(payload: object, now: datetime | None = None) -> list[str]:
     values = payload.get("dates") if isinstance(payload, dict) else None
     if not isinstance(values, list):
         return []
-    today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+    reference_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     future: set[str] = set()
     for value in values:
         if not isinstance(value, str):
@@ -366,7 +369,11 @@ def _future_d2_dates(payload: object, now: datetime | None = None) -> list[str]:
             parsed = date.fromisoformat(value)
         except ValueError:
             continue
-        if parsed > today:
+        # A forecast date represents the 12Z-to-12Z convective day. Keep the
+        # previous 12Z cycle's D2 product through 00Z and 06Z refreshes on the
+        # forecast date; it does not expire at midnight.
+        expires_at = datetime(parsed.year, parsed.month, parsed.day, 12, tzinfo=timezone.utc)
+        if reference_time < expires_at:
             future.add(parsed.isoformat())
     return sorted(future, reverse=True)
 

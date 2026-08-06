@@ -4362,14 +4362,26 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             self.assertEqual(default_risk["date"], future_date)
 
             expired_target = root / "expired"
-            expired = export_module.carry_forward_merged_d2_archive(
+            same_day = export_module.carry_forward_merged_d2_archive(
                 source,
                 expired_target,
                 now=datetime(2026, 6, 9, 0, tzinfo=timezone.utc),
             )
-            self.assertEqual(expired, [])
+            self.assertEqual(same_day, [future_date])
             self.assertEqual(
                 json.loads((expired_target / "available-dates.json").read_text(encoding="utf-8")),
+                {"dates": [future_date]},
+            )
+
+            after_valid_window_target = root / "after-valid-window"
+            expired = export_module.carry_forward_merged_d2_archive(
+                source,
+                after_valid_window_target,
+                now=datetime(2026, 6, 9, 12, tzinfo=timezone.utc),
+            )
+            self.assertEqual(expired, [])
+            self.assertEqual(
+                json.loads((after_valid_window_target / "available-dates.json").read_text(encoding="utf-8")),
                 {"dates": []},
             )
 
@@ -4404,6 +4416,22 @@ class DeployableOutlookPipelineTests(unittest.TestCase):
             )
             self.assertTrue((target / future_date / "spc-day2-category.geojson").exists())
             self.assertTrue((target / "probability-tile.json").exists())
+
+    def test_static_export_prefers_d2_recovery_deployment_override(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
+        spec = importlib.util.spec_from_file_location("export_static_api_d2_override_module", module_path)
+        assert spec is not None and spec.loader is not None
+        export_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export_module)
+
+        with patch.dict(os.environ, {
+            "AUTOOUTLOOK_D2_CARRY_FORWARD_BASE_URL": "https://prior-deployment.example/",
+            "AUTOOUTLOOK_PRODUCTION_BASE_URL": "https://production.example",
+        }):
+            self.assertEqual(
+                export_module.default_production_base_url(),
+                "https://prior-deployment.example",
+            )
 
     def test_static_export_rejects_incomplete_cloudflare_d2(self) -> None:
         module_path = Path(__file__).resolve().parents[2] / "scripts" / "export-static-api.py"
