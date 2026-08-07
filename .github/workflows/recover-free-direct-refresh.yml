@@ -1,0 +1,44 @@
+name: Recover failed Cloudflare refresh
+
+on:
+  workflow_run:
+    workflows:
+      - Generate and deploy Cloudflare Pages
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: autooutlook-free-direct-recovery
+  cancel-in-progress: false
+
+jobs:
+  redispatch:
+    if: >-
+      github.event.workflow_run.event == 'schedule' &&
+      github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-dispatch the failed scheduled refresh once
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const failedRun = context.payload.workflow_run;
+            core.warning(
+              `Scheduled refresh ${failedRun.html_url} concluded ${failedRun.conclusion}; ` +
+              'dispatching one recovery run.'
+            );
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'free-direct-refresh.yml',
+              ref: failedRun.head_branch || context.payload.repository.default_branch,
+              inputs: {
+                force_deploy: 'false',
+              },
+            });
